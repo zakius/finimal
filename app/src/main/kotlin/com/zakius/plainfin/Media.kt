@@ -290,7 +290,10 @@ class FillWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
             repeat(5) {
                 val writer = CacheWriter(
                     Media.writerFactory().createDataSource(),
-                    DataSpec.Builder().setUri(url).setPosition(position).setKey(key).build(),
+                    // Fragmentation commits every 5 MB: progress becomes visible, the player can read
+                    // what's already buffered, and a killed process loses at most one fragment.
+                    DataSpec.Builder().setUri(url).setPosition(position).setKey(key)
+                        .setFlags(DataSpec.FLAG_ALLOW_CACHE_FRAGMENTATION).build(),
                     null,
                     progress,
                 )
