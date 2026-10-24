@@ -212,6 +212,7 @@ object Media {
 
     /** The ID the queue worker is writing now. */
     @Volatile var downloading: String? = null
+        set(value) { field = value; changes++ }
 
     val queueOrder = compareBy<Download>({ it.queuedAt }, { it.item.parentIndexNumber }, { it.item.indexNumber })
     /** Finished downloads: grouped by series in season order, movies last. */
