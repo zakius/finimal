@@ -4,17 +4,27 @@ import android.app.Application
 import android.content.Context
 import android.content.SharedPreferences
 import androidx.core.content.edit
+import coil3.ImageLoader
+import coil3.PlatformContext
+import coil3.SingletonImageLoader
+import coil3.network.okhttp.OkHttpNetworkFetcherFactory
 import java.io.File
+import kotlin.concurrent.thread
 import kotlinx.coroutines.Dispatchers
 import plainfin.core.PendingStore
 
 /** Process-wide singletons. There is one server and one user, so nothing here needs scoping. */
-class App : Application() {
+class App : Application(), SingletonImageLoader.Factory {
     override fun onCreate() {
         super.onCreate()
         instance = this
         Media.onAppStart(this)
+        thread(name = "warm-server") { server } // builds the API client before the first frame asks for it
     }
+
+    override fun newImageLoader(context: PlatformContext) = ImageLoader.Builder(context)
+        .components { add(OkHttpNetworkFetcherFactory(callFactory = { Media.http })) }
+        .build()
 
     companion object {
         lateinit var instance: App

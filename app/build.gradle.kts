@@ -46,6 +46,10 @@ android {
         isUniversalApk = false
     }
     packaging.jniLibs.useLegacyPackaging = true
+    // The UI is English only; library translations for ~80 locales would just ship unused.
+    androidResources { localeFilters += "en" }
+    // Sideloaded through GitHub, so no Play-only dependency metadata blob.
+    dependenciesInfo { includeInApk = false; includeInBundle = false }
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_21

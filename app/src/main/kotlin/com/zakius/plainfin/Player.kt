@@ -85,6 +85,7 @@ import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.datasource.HttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
+import androidx.media3.exoplayer.SeekParameters
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.CaptionStyleCompat
@@ -94,8 +95,10 @@ import io.github.peerless2012.ass.media.kt.buildWithAssSupport
 import io.github.peerless2012.ass.media.type.AssRenderType
 import kotlin.math.abs
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.withContext
 import org.jellyfin.sdk.api.client.exception.InvalidStatusException
 import org.jellyfin.sdk.model.api.BaseItemDto
@@ -132,18 +135,18 @@ fun PlayerScreen(itemId: String, fromStart: Boolean, onBack: () -> Unit, onPlay:
     LaunchedEffect(itemId, retry) {
         error = null
         val server = App.server
-        val result = runCatching { server.flush(); server.item(itemId) }
-            .onFailure { if (it is InvalidStatusException && it.status == 401) server.expire() }
+        val downloaded = withContext(Dispatchers.IO) { Media.download(itemId)?.item }
+        val complete = downloaded != null && withContext(Dispatchers.IO) { Media.isComplete(Media.key(downloaded)) }
+        // Outside this screen's scope, so giving up on a slow server below doesn't cut a flush short.
+        val fetch = ProcessLifecycleOwner.get().lifecycleScope.async { runCatching { server.flush(); server.item(itemId) } }
+        // A finished download doesn't wait out network timeouts; it plays offline if the server is slow to answer.
+        val result = (if (complete) withTimeoutOrNull(2_000) { fetch.await() } else fetch.await())
+            ?: Result.failure(java.util.concurrent.TimeoutException("server slow to answer"))
+        result.onFailure { if (it is InvalidStatusException && it.status == 401) server.expire() }
         val loaded = result.getOrNull()
         online = loaded != null
-        item = withContext(Dispatchers.IO) {
-            // A finished download plays as downloaded, even if the server's file changed since.
-            val downloaded = Media.download(itemId)?.item
-            when {
-                downloaded != null && Media.isComplete(Media.key(downloaded)) -> downloaded.copy(userData = loaded?.userData ?: downloaded.userData)
-                else -> loaded ?: downloaded
-            }
-        }
+        // A finished download plays as downloaded, even if the server's file changed since.
+        item = if (complete) downloaded!!.copy(userData = loaded?.userData ?: downloaded.userData) else loaded ?: downloaded
         if (item == null) error = result.exceptionOrNull()
     }
     // Re-fetched after "Mark played" in the episode list.
@@ -220,7 +223,7 @@ private fun Playback(
 
     // Prepare: external subtitles first (cached on disk), then the media item at the resume point.
     LaunchedEffect(player) {
-        val subs = withContext(Dispatchers.IO) { Media.fetchSubtitles(item) }
+        val subs = Media.fetchSubtitles(item)
         val streams = externalSubs(item).associateBy { it.index }
         val url = if (transcoding) App.server.transcodeUrl(id, sourceId, null) else App.server.streamUrl(id, sourceId)
         val mediaItem = MediaItem.Builder()
@@ -257,7 +260,7 @@ private fun Playback(
         player.prepare()
         player.play()
         Media.playing = Media.key(item)
-        App.server.reportStart(id, sourceId, startMs * TICKS_PER_MS, transcoding)
+        launch { App.server.reportStart(id, sourceId, startMs * TICKS_PER_MS, transcoding) }
         if (online) intro = runCatching { App.server.introSegment(id) }.getOrNull()
     }
 
@@ -281,7 +284,8 @@ private fun Playback(
                     scope.launch(App.disk) {
                         // The player only reads the cache, so the length may not be recorded yet; the server knows it.
                         val len = Media.contentLength(Media.key(item)).takeIf { it > 0 } ?: source.size ?: 0
-                        Media.startBuffer(item, if (len > 0) (len * (fraction - 0.05)).toLong().coerceAtLeast(0) else 0)
+                        // A fixed margin behind the playhead: a share of the file would be a gigabyte behind on a big remux.
+                        Media.startBuffer(item, if (len > 0) ((len * fraction).toLong() - 32_000_000).coerceAtLeast(0) else 0)
                     }
                 }
                 if (state == Player.STATE_ENDED && !ended) {
@@ -370,10 +374,10 @@ private fun Playback(
         )
     }
 
-    val downloads = rememberDownloadStatuses()
     if (fullscreen) {
         video(Modifier.fillMaxSize())
     } else {
+        val downloads = rememberDownloadStatuses()
         Column(Modifier.fillMaxSize().statusBarsPadding()) {
             video(Modifier.fillMaxWidth().aspectRatio(16f / 9))
             LazyColumn(Modifier.fillMaxSize().padding(horizontal = 12.dp)) {
@@ -392,6 +396,7 @@ private fun Playback(
 
 private fun buildPlayer(context: Context, view: PlayerView, transcoding: Boolean): ExoPlayer {
     val renderers = DefaultRenderersFactory(context).setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
+        .setEnableDecoderFallback(true) // another device decoder before giving up and transcoding
     // The RAM buffer stays modest; buffering to the end happens on disk through FillWorker.
     val load = DefaultLoadControl.Builder().setBufferDurationsMs(30_000, 120_000, 1_000, 2_000).build()
     return ExoPlayer.Builder(context)
@@ -462,7 +467,9 @@ private fun VideoSurface(
         while (true) {
             position = player.currentPosition
             duration = player.duration.coerceAtLeast(0)
-            buffered = maxOf(player.bufferedPosition, cacheKey?.let { Media.cachedUntilMs(it, position, duration) } ?: 0)
+            // Off the main thread: cache lookups wait on the lock the fill worker holds while committing to disk.
+            val cached = cacheKey?.let { k -> withContext(Dispatchers.IO) { Media.cachedUntilMs(k, position, duration) } } ?: 0
+            buffered = maxOf(player.bufferedPosition, cached)
             playing = player.isPlaying
             // Idle is the time before the first prepare (subtitles are fetched first), or after an error.
             waiting = player.playbackState == Player.STATE_BUFFERING || player.playbackState == Player.STATE_IDLE
@@ -549,7 +556,7 @@ private fun VideoSurface(
                             }
                         }
                     }
-                    scrubTarget?.let { player.seekTo(it) }
+                    scrubTarget?.let { player.seekToNearestKeyframe(it) }
                     scrubTarget = null
                     if (axis == 2 && prefs.gestureFullscreen) {
                         val threshold = h * 0.15f
@@ -705,7 +712,7 @@ private fun Controls(
                     value = shown.toFloat().coerceIn(0f, duration.toFloat().coerceAtLeast(1f)),
                     valueRange = 0f..duration.toFloat().coerceAtLeast(1f),
                     onValueChange = { dragging = it; onInteraction() },
-                    onValueChangeFinished = { player.seekTo(dragging.toLong()); dragging = -1f },
+                    onValueChangeFinished = { player.seekToNearestKeyframe(dragging.toLong()); dragging = -1f },
                     modifier = Modifier.weight(1f),
                 )
                 if (onSkipIntro != null) SkipIntro(onSkipIntro, Modifier.padding(start = 8.dp))
@@ -723,6 +730,13 @@ private fun Choice(label: String, selected: Boolean, onClick: () -> Unit) =
     DropdownMenuItem({ Text(label) }, onClick, trailingIcon = { if (selected) Icon(Icons.Default.Check, null) })
 
 /** Language of the selected track, "" when that type is off, null when unknown. */
+/** For coarse seeks (slider, swipe): exact seeks decode from the keyframe before, seconds on long-GOP files. Skips stay exact. */
+private fun ExoPlayer.seekToNearestKeyframe(ms: Long) {
+    setSeekParameters(SeekParameters.CLOSEST_SYNC)
+    seekTo(ms)
+    setSeekParameters(SeekParameters.DEFAULT)
+}
+
 private fun selectedLanguage(player: ExoPlayer, type: Int): String? {
     if (player.trackSelectionParameters.disabledTrackTypes.contains(type)) return ""
     return player.currentTracks.groups.filter { it.type == type && it.isSelected }

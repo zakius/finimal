@@ -19,6 +19,7 @@ import androidx.media3.database.StandaloneDatabaseProvider
 import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.HttpDataSource
+import androidx.media3.datasource.cache.CacheDataSink
 import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.cache.CacheWriter
 import androidx.media3.datasource.cache.ContentMetadata
@@ -38,6 +39,9 @@ import java.io.File
 import java.io.IOException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
@@ -67,7 +71,8 @@ object Media {
         private set
     private lateinit var ctx: Context
     private lateinit var db: StandaloneDatabaseProvider
-    val http = OkHttpClient()
+    /** Shared by the SDK, Coil and the player, so they reuse connections to the server. */
+    val http by lazy { OkHttpClient() }
     private val json = Json { ignoreUnknownKeys = true }
 
     /**
@@ -98,8 +103,6 @@ object Media {
         db = StandaloneDatabaseProvider(context)
         storageMissing = App.prefs.storageIndex >= storageRoots().size
         cache = openCache()
-        // Builds before the queue ran one job per download; those would run alongside it.
-        downloads().forEach { WorkManager.getInstance(context).cancelUniqueWork("fill-${it.item.id}") }
         kickDownloads(restart = false)
         Housekeeping.enqueue(context)
     }
@@ -122,6 +125,7 @@ object Media {
         wm.cancelUniqueWork("downloads")
         wm.cancelAllWorkByTag(FILL_TAG)
         downloads().forEach { val id = it.item.id.toString(); metaFile(id).delete(); subsDir(id).deleteRecursively() }
+        memo = null
         changes++
         val old = cache
         val oldDir = cacheDir()
@@ -141,6 +145,8 @@ object Media {
         CacheDataSource.Factory()
             .setCache(cache)
             .setUpstreamDataSourceFactory(upstreamFactory())
+            // 1 MB writes instead of the default 20 KB: far fewer syscalls on SD cards and FUSE.
+            .setCacheWriteDataSinkFactory(CacheDataSink.Factory().setCache(cache).setBufferSize(1 shl 20))
             .setFlags(CacheDataSource.FLAG_BLOCK_ON_CACHE)
 
     /**
@@ -195,6 +201,7 @@ object Media {
     private fun metaFile(id: String) = File(downloadsDir, "$id.json")
     private fun write(d: Download) {
         metaFile(d.item.id.toString()).writeText(json.encodeToString(d))
+        memo = null
         changes++
     }
 
@@ -203,12 +210,16 @@ object Media {
         private set
     fun subsDir(id: String) = File(ctx.filesDir, "subs/$id")
 
-    fun downloads(): List<Download> =
-        downloadsDir.listFiles { f -> f.extension == "json" }.orEmpty()
-            .mapNotNull { runCatching { json.decodeFromString<Download>(it.readText()) }.getOrNull() }
+    /** Decoded files, kept until the next change; the status poll would otherwise re-read every file each second. */
+    private var memo: List<Download>? = null
 
-    fun download(id: String): Download? =
-        metaFile(id).takeIf { it.exists() }?.let { runCatching { json.decodeFromString<Download>(it.readText()) }.getOrNull() }
+    /** All writes go through [write], [deleteDownload] and [switchStorage], which clear [memo]. */
+    @Synchronized
+    fun downloads(): List<Download> = memo ?: downloadsDir.listFiles { f -> f.extension == "json" }.orEmpty()
+        .mapNotNull { runCatching { json.decodeFromString<Download>(it.readText()) }.getOrNull() }
+        .also { memo = it }
+
+    fun download(id: String): Download? = downloads().firstOrNull { it.item.id.toString() == id }
 
     /** The ID the queue worker is writing now. */
     @Volatile var downloading: String? = null
@@ -295,6 +306,7 @@ object Media {
     fun deleteDownload(id: String) {
         val key = download(id)?.let { key(it.item) }
         metaFile(id).delete()
+        memo = null
         changes++
         if (downloading == id) kickDownloads(restart = true)
         subsDir(id).deleteRecursively()
@@ -401,11 +413,11 @@ object Media {
     }
 
     /** External subtitle streams are separate files; fetch them once so playback works offline too. */
-    fun fetchSubtitles(item: BaseItemDto): Map<Int, File> {
+    suspend fun fetchSubtitles(item: BaseItemDto): Map<Int, File> = coroutineScope {
         val id = item.id.toString()
-        val source = item.mediaSources?.firstOrNull() ?: return emptyMap()
+        val source = item.mediaSources?.firstOrNull() ?: return@coroutineScope emptyMap()
         val dir = subsDir(id).apply { mkdirs() }
-        return externalSubs(item).mapNotNull { stream ->
+        externalSubs(item).map { stream -> async(Dispatchers.IO) {
             val file = File(dir, "${stream.index}.${subtitleExt(stream)}")
             if (!file.exists()) runCatching {
                 http.newCall(Request.Builder().url(App.server.subtitleUrl(id, source.id!!, stream)).build()).execute().use { r ->
@@ -416,7 +428,7 @@ object Media {
                 }
             }
             file.takeIf { it.exists() }?.let { stream.index to it }
-        }.toMap()
+        } }.awaitAll().filterNotNull().toMap()
     }
 }
 

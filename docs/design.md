@@ -48,6 +48,7 @@ Libraries → poster grid → series → seasons → episodes.
 - Text subtitles (SRT, VTT, embedded text tracks) are white with a black outline and no background box. The system caption style is ignored. ASS keeps its authored style.
 - A white spinner shows while the item loads and while the player buffers. It does not block taps or gestures.
 - An item that fails to load and is not downloaded says why like a list does, with Retry and Back.
+- A finished download waits at most 2 s for the server before it plays offline.
 - A playback error shows a short sentence for common causes (network, timeout, HTTP status, missing file, unsupported format) and a Retry button. Other errors show a generic sentence with the Media3 error code in small text.
 - Theme follows the system and uses Material You colors.
 
@@ -95,10 +96,10 @@ Rules:
 
 1. Report progress every 10 s, and on pause, seek, backgrounding and stop. Every stop report carries a position.
 2. Never read Next Up or Resume from the server.
-3. With no connection, append events to a local queue. Replay them through `POST /UserItems/{id}/UserData` with PlaybackPositionTicks, Played and LastPlayedDate. One failing item does not hold up the rest; an item the server no longer has (HTTP 404) is dropped from the queue.
+3. With no connection, append events to a local queue. Replay them through `POST /UserItems/{id}/UserData` with PlaybackPositionTicks, Played and LastPlayedDate. Server state for every pending item comes from one list request. One failing item does not hold up the rest; an item the server no longer has (HTTP 404) is dropped from the queue. An unreachable server stops the replay at once instead of timing out once per item.
 4. Conflicts: the newer LastPlayedDate wins.
 5. Offline plays use the server's default limits: under 5 % stores position 0, over 90 % marks played and stores 0.
-6. Opening a list first pushes pending events, then fetches. If the push or fetch fails, show local state marked "not synced".
+6. Opening a list first pushes pending events, then fetches. If the push or fetch fails, show local state marked "not synced". A list visited before in this process shows its last result while this runs.
 7. Read play state only from list endpoints (`/Items?ids=`). On server 12.3.0, `/Items/{id}` and `/UserItems/{id}/UserData` kept returning a state from before a media file was replaced and rescanned, while list endpoints and the database were correct. A restart cleared it.
 8. The SDK's `LocalDateTime` is in the device's zone, not UTC.
 9. Every local play-state change is also written into the download's stored item, and housekeeping refreshes downloaded items from the server, so offline playback resumes from the latest position.

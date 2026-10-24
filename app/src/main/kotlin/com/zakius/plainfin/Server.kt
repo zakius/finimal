@@ -9,6 +9,7 @@ import androidx.lifecycle.ProcessLifecycleOwner
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
@@ -28,12 +29,14 @@ import org.jellyfin.sdk.api.client.extensions.sessionApi
 import org.jellyfin.sdk.api.client.extensions.showApi
 import org.jellyfin.sdk.api.client.extensions.userDataApi
 import org.jellyfin.sdk.api.client.extensions.userViewApi
+import org.jellyfin.sdk.api.okhttp.OkHttpFactory
 import org.jellyfin.sdk.createJellyfin
 import org.jellyfin.sdk.model.ClientInfo
 import org.jellyfin.sdk.model.api.AuthenticateUserByName
 import org.jellyfin.sdk.model.api.BaseItemDto
 import org.jellyfin.sdk.model.api.BaseItemKind
 import org.jellyfin.sdk.model.api.CollectionType
+import org.jellyfin.sdk.model.api.ImageFormat
 import org.jellyfin.sdk.model.api.ImageType
 import org.jellyfin.sdk.model.api.ItemFields
 import org.jellyfin.sdk.model.api.ItemSortBy
@@ -66,8 +69,9 @@ enum class Sort(val label: String, val by: ItemSortBy, val order: SortOrder) {
 class Server(context: Context) {
     private val prefs = App.prefs
     val api = createJellyfin {
-        clientInfo = ClientInfo("plainfin", context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "0")
+        clientInfo = ClientInfo("plainfin", BuildConfig.VERSION_NAME)
         this.context = context
+        apiClientFactory = OkHttpFactory(Media.http) // one connection pool for API, images and streams
     }.createApi(prefs.baseUrl, prefs.token)
 
     /** Keeps reports in order, so a slow progress report can't land after the stop. */
@@ -130,7 +134,9 @@ class Server(context: Context) {
 
     /** Full item (media sources included) with play state from [userData]. */
     suspend fun item(id: String): BaseItemDto = io {
-        api.libraryApi.getItem(UUID.fromString(id), userId).content.copy(userData = userData(UUID.fromString(id)))
+        val uuid = UUID.fromString(id)
+        val data = async { userData(uuid) }
+        api.libraryApi.getItem(uuid, userId).content.copy(userData = data.await())
     }
 
     /**
@@ -141,19 +147,22 @@ class Server(context: Context) {
      */
     private suspend fun userData(id: UUID) = userData(listOf(id))[id]
 
+    /** In chunks: every ID goes in the query string, and servers and proxies cap its length around 8 KB. */
     suspend fun userData(ids: List<UUID>): Map<UUID, UserItemDataDto?> = io {
-        api.libraryApi.getItems(userId = userId, ids = ids, enableUserData = true).content.items.associate { it.id to it.userData }
+        ids.chunked(100).flatMap { chunk ->
+            api.libraryApi.getItems(userId = userId, ids = chunk, enableUserData = true, enableImages = false).content.items.map { it.id to it.userData }
+        }.toMap()
     }
 
     suspend fun seasons(seriesId: String): List<BaseItemDto> =
         io { api.showApi.getSeasons(UUID.fromString(seriesId), userId, enableUserData = true).content.items }
 
-    /** All episodes of a series in season order, or only one season's. [sources] adds media sources (file sizes). */
+    /** All episodes of a series in season order, or only one season's. [sources] adds media sources (file sizes) and the overview, for stored downloads. */
     suspend fun episodes(seriesId: String, seasonId: String? = null, sources: Boolean = false): List<BaseItemDto> =
         io { api.showApi.getEpisodes(
             UUID.fromString(seriesId),
             userId,
-            fields = listOfNotNull(ItemFields.OVERVIEW, ItemFields.MEDIA_SOURCES.takeIf { sources }),
+            fields = if (sources) listOf(ItemFields.OVERVIEW, ItemFields.MEDIA_SOURCES) else emptyList(),
             seasonId = seasonId?.let(UUID::fromString),
             enableUserData = true,
         ).content.items }
@@ -161,8 +170,11 @@ class Server(context: Context) {
     suspend fun introSegment(id: String): MediaSegmentDto? =
         io { api.mediaSegmentApi.getItemSegments(UUID.fromString(id), listOf(MediaSegmentType.INTRO)).content.items.firstOrNull() }
 
-    fun imageUrl(id: UUID, type: ImageType = ImageType.PRIMARY, width: Int = 400) =
-        api.imageApi.getItemImageUrl(id, type, maxWidth = width)
+    /** Null when the item has no such image, so no request is made. The tag changes with the image, keeping caches fresh. */
+    fun imageUrl(item: BaseItemDto, type: ImageType = ImageType.PRIMARY, width: Int = 400) =
+        item.imageTags?.get(type)?.let { tag ->
+            api.imageApi.getItemImageUrl(item.id, type, maxWidth = width, tag = tag, format = ImageFormat.WEBP, quality = 80)
+        }
 
     fun streamUrl(id: String, mediaSourceId: String) =
         "${prefs.baseUrl}/Videos/$id/stream?static=true&mediaSourceId=$mediaSourceId&api_key=${prefs.token}"
@@ -245,15 +257,22 @@ class Server(context: Context) {
     /**
      * Pushes pending states; the newer LastPlayedDate wins. One failing item doesn't hold up the
      * rest: an item the server doesn't have (deleted, or from a server logged into before) is
-     * dropped, and a rejected token ends the session. Returns the first failure, null when all went through.
+     * dropped, and a rejected token ends the session. An unreachable server stops the whole flush
+     * rather than timing out once per item. Returns the first failure, null when all went through.
      */
     suspend fun flush(): Throwable? = io {
+        val pending = withContext(App.disk) { App.pending.all() }
+        if (pending.isEmpty()) return@io null
+        // One request for every item's server state; an item the server lacks is absent and its push 404s.
+        val serverStates = try { userData(pending.keys.map(UUID::fromString)) } catch (e: Exception) {
+            if ((e as? InvalidStatusException)?.status == 401) expire()
+            return@io e
+        }
         var failure: Throwable? = null
-        for ((id, local) in withContext(App.disk) { App.pending.all() }) {
+        for ((id, local) in pending) {
             runCatching {
                 val uuid = UUID.fromString(id)
-                val server = userData(uuid).toPlayState()
-                if (shouldPush(local, server)) {
+                if (shouldPush(local, serverStates[uuid].toPlayState())) {
                     api.userDataApi.updateItemUserData(
                         uuid, userId,
                         UpdateUserItemDataDto(
@@ -267,7 +286,7 @@ class Server(context: Context) {
                 when ((e as? InvalidStatusException)?.status) {
                     404 -> App.pending.confirm(id, local)
                     401 -> { expire(); return@io e }
-                    else -> failure = failure ?: e
+                    else -> { failure = failure ?: e; if (unreachable(e)) return@io e }
                 }
             }
         }

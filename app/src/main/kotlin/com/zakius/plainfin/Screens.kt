@@ -90,19 +90,26 @@ import plainfin.core.PlayState
 import plainfin.core.TICKS_PER_MS
 import kotlin.math.abs
 
+/** Last good result per list and user, so a list you come back to shows at once while it reloads. Main thread only. */
+private val lastGood = HashMap<List<Any?>, Result<*>>()
+
 /**
  * Loads [block] after pushing unsynced progress, so the list never shows state older than this device's.
  * A failed [refresh] of the same [keys] keeps the list it had, with local changes marked "not synced".
+ * Until the load ends, the list from the last visit shows; unsynced local state is drawn over it.
  */
 @Composable
 private fun <T> loadFresh(vararg keys: Any?, refresh: Int, block: suspend () -> T): Result<T>? {
     val k = keys.toList()
-    var last by remember { mutableStateOf<Pair<List<Any?>, Result<T>>?>(null) }
+    val cacheKey = listOf(App.prefs.userId) + k
+    @Suppress("UNCHECKED_CAST")
+    var last by remember { mutableStateOf(lastGood[cacheKey]?.let { k to (it as Result<T>) }) }
     LaunchedEffect(k, refresh) {
         if (last?.second?.isFailure == true) last = null // a retry shows "Loading…" again
         App.server.flush()
         val result = runCatching { block() }
             .onFailure { if (it is InvalidStatusException && it.status == 401) App.server.expire() }
+        if (result.isSuccess) lastGood[cacheKey] = result
         if (result.isSuccess || last?.first != k) last = k to result
     }
     return last?.second
@@ -365,7 +372,7 @@ private fun Poster(
     var menu by remember { mutableStateOf(false) }
     Column(Modifier.combinedClickable(onClick = onClick, onLongClick = onChanged?.let { { menu = true } })) {
         Box {
-            AsyncImage(App.server.imageUrl(item.id), null, contentScale = ContentScale.Crop,
+            AsyncImage(App.server.imageUrl(item), null, contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxWidth().aspectRatio(2f / 3).background(Color.DarkGray))
             download?.let {
                 Text(if (it.fill == Media.Fill.DONE) "↓" else "${it.percent}%", color = Color.White,
@@ -473,7 +480,7 @@ fun EpisodeRow(
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Column(Modifier.width(140.dp)) {
-            AsyncImage(App.server.imageUrl(ep.id, ImageType.PRIMARY, 320), null, contentScale = ContentScale.Crop,
+            AsyncImage(App.server.imageUrl(ep, ImageType.PRIMARY, 320), null, contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9).background(Color.DarkGray))
             ProgressBar(ep, state)
         }
