@@ -48,6 +48,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -56,10 +57,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.vector.addPathNodes
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
@@ -97,6 +102,19 @@ private const val REPORT_INTERVAL_MS = 10_000L
 private const val RESUME_REWIND_MS = 5_000L
 private const val SEEK_MS_PER_WIDTH = 100_000f
 
+/** Chosen speed, kept for the rest of the session so "Play next" does not reset it. */
+private var sessionSpeed = 1f
+
+// Material icons missing from material-icons-core; extended would add thousands of classes for five paths.
+private fun icon(name: String, path: String) = ImageVector.Builder(name, 24.dp, 24.dp, 24f, 24f)
+    .addPath(addPathNodes(path), fill = SolidColor(Color.Black)).build()
+private val PauseIcon = icon("Pause", "M6,19h4V5H6v14zm8,-14v14h4V5h-4z")
+private val RewindIcon = icon("FastRewind", "M11,18V6l-8.5,6 8.5,6zm0.5,-6l8.5,6V6l-8.5,6z")
+private val ForwardIcon = icon("FastForward", "M4,18l8.5,-6L4,6v12zm9,-12v12l8.5,-6L13,6z")
+private val NextIcon = icon("SkipNext", "M6,18l8.5,-6L6,6v12zM16,6v12h2V6h-2z")
+private val FullscreenIcon = icon("Fullscreen", "M7,14H5v5h5v-2H7v-3zm-2,-4h2V7h3V5H5v5zm12,7h-3v2h5v-5h-2v3zM14,5v2h3v3h2V5h-5z")
+private val FullscreenExitIcon = icon("FullscreenExit", "M5,16h3v3h2v-5H5v2zm3,-8H5v2h5V5H8v3zm6,11h2v-3h3v-2h-5v5zm2,-11V5h-2v5h5V8h-3z")
+
 /** Loads the item (server first, download metadata when offline) and the episodes that can follow it. */
 @Composable
 fun PlayerScreen(itemId: String, fromStart: Boolean, onBack: () -> Unit, onPlay: (String) -> Unit) {
@@ -104,6 +122,7 @@ fun PlayerScreen(itemId: String, fromStart: Boolean, onBack: () -> Unit, onPlay:
     var siblings by remember { mutableStateOf<List<BaseItemDto>>(emptyList()) }
     var online by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<String?>(null) }
+    var refresh by remember { mutableIntStateOf(0) }
     LaunchedEffect(itemId) {
         val server = App.server
         val loaded = runCatching { server.flush(); server.item(itemId) }.getOrNull()
@@ -115,7 +134,11 @@ fun PlayerScreen(itemId: String, fromStart: Boolean, onBack: () -> Unit, onPlay:
             else -> loaded ?: downloaded
         }
         if (item == null) error = "Server unreachable and this item is not downloaded."
+    }
+    // Re-fetched after "Mark played" in the episode list.
+    LaunchedEffect(item, refresh) {
         val it = item ?: return@LaunchedEffect
+        val server = App.server
         val seriesId = it.seriesId?.toString()
         if (it.type == BaseItemKind.EPISODE && seriesId != null) {
             siblings = (if (online) runCatching { server.episodes(seriesId) }.getOrNull() else null)
@@ -134,7 +157,7 @@ fun PlayerScreen(itemId: String, fromStart: Boolean, onBack: () -> Unit, onPlay:
         current == null -> Box(Modifier.fillMaxSize().background(Color.Black), contentAlignment = Alignment.Center) {
             CircularProgressIndicator(color = Color.White)
         }
-        else -> Playback(current, siblings, fromStart, online, onBack, onPlay)
+        else -> Playback(current, siblings, fromStart, online, onBack, onPlay, onChanged = { refresh++ })
     }
 }
 
@@ -146,6 +169,7 @@ private fun Playback(
     online: Boolean,
     onBack: () -> Unit,
     onPlay: (String) -> Unit,
+    onChanged: () -> Unit,
 ) {
     val context = LocalContext.current
     val activity = LocalActivity.current!!
@@ -210,6 +234,7 @@ private fun Playback(
                 else -> setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false).setPreferredTextLanguage(sub)
             }
         }.build()
+        player.setPlaybackSpeed(sessionSpeed)
         player.setMediaItem(mediaItem, startMs)
         player.prepare()
         player.play()
@@ -316,7 +341,7 @@ private fun Playback(
             mod, player, playerView, fullscreen, transcoding, Media.key(item).takeUnless { transcoding }, intro, ended, next, playerError,
             onToggleFullscreen = { setFullscreen(!fullscreen) },
             onBack = onBack,
-            onNext = { next?.let { onPlay(it.id.toString()) } },
+            onNext = next?.let { { onPlay(it.id.toString()) } },
             onRetry = { playerError = null; player.prepare() },
             rotationLocked = rotationLocked,
             onRotationLock = {
@@ -340,7 +365,7 @@ private fun Playback(
                     item.overview?.let { Text(it, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(vertical = 8.dp)) }
                 }
                 items(siblings.filter { it.seasonId == item.seasonId }, key = { it.id }) { ep ->
-                    EpisodeRow(ep, downloads[ep.id.toString()], highlighted = ep.id == item.id, onPlay = { onPlay(ep.id.toString()) })
+                    EpisodeRow(ep, downloads[ep.id.toString()], highlighted = ep.id == item.id, onPlay = { onPlay(ep.id.toString()) }, onChanged = onChanged)
                 }
             }
         }
@@ -394,7 +419,7 @@ private fun VideoSurface(
     playerError: PlaybackException?,
     onToggleFullscreen: () -> Unit,
     onBack: () -> Unit,
-    onNext: () -> Unit,
+    onNext: (() -> Unit)?,
     onRetry: () -> Unit,
     rotationLocked: Boolean,
     onRotationLock: () -> Unit,
@@ -540,14 +565,16 @@ private fun VideoSurface(
         }
 
         if (ended) {
-            Row(Modifier.align(Alignment.Center), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            Column(Modifier.align(Alignment.Center).padding(horizontal = 16.dp), Arrangement.spacedBy(8.dp), Alignment.CenterHorizontally) {
+                if (next != null && onNext != null) Button(onClick = onNext) {
+                    Text("Play next: ${episodeLabel(next)}", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
                 FilledTonalButton(onClick = onBack) { Text("Back") }
-                if (next != null) Button(onClick = onNext) { Text("Play next: ${episodeLabel(next)}") }
             }
         } else if (controls) {
             Controls(
                 player, position, duration, buffered, playing, fullscreen, transcoding, rotationLocked,
-                onBack, onToggleFullscreen, onRotationLock, onTracksChosen,
+                onBack, onToggleFullscreen, onRotationLock, onTracksChosen, ::seekBy, onNext,
                 onInteraction = { lastInteraction = System.currentTimeMillis() },
                 subtitleView = playerView.subtitleView,
             )
@@ -569,6 +596,8 @@ private fun Controls(
     onToggleFullscreen: () -> Unit,
     onRotationLock: () -> Unit,
     onTracksChosen: (String?, String?) -> Unit,
+    onSeek: (Long) -> Unit,
+    onNext: (() -> Unit)?,
     onInteraction: () -> Unit,
     subtitleView: SubtitleView?,
 ) {
@@ -594,10 +623,11 @@ private fun Controls(
                             DropdownMenuItem({ Text(if (rotationLocked) "Unlock rotation" else "Lock rotation") }, { onRotationLock(); menu = false })
                         }
                         "speed" -> listOf(0.5f, 0.75f, 1f, 1.25f, 1.5f, 2f).forEach { s ->
-                            DropdownMenuItem({ Text("${s}x") }, { player.setPlaybackSpeed(s); menu = false; sub = null })
+                            val mark = if (player.playbackParameters.speed == s) "✓ " else ""
+                            DropdownMenuItem({ Text("$mark${s}x") }, { sessionSpeed = s; player.setPlaybackSpeed(s); menu = false; sub = null })
                         }
                         "size" -> listOf(50, 75, 100, 125, 150, 200).forEach { s ->
-                            DropdownMenuItem({ Text("$s%") }, {
+                            DropdownMenuItem({ Text((if (App.prefs.subtitleScale == s) "✓ " else "") + "$s%") }, {
                                 App.prefs.subtitleScale = s
                                 subtitleView?.setFractionalTextSize(SubtitleView.DEFAULT_TEXT_SIZE_FRACTION * s / 100f)
                                 menu = false; sub = null
@@ -632,12 +662,19 @@ private fun Controls(
                     }
                 }
             }
-            TextButton(onClick = onToggleFullscreen) { Text(if (fullscreen) "Exit full" else "Full", color = Color.White) }
+            IconButton(onClick = onToggleFullscreen) {
+                Icon(if (fullscreen) FullscreenExitIcon else FullscreenIcon, if (fullscreen) "Exit fullscreen" else "Fullscreen", tint = Color.White)
+            }
         }
 
-        IconButton(onClick = { if (playing) player.pause() else player.play(); onInteraction() }, modifier = Modifier.align(Alignment.Center)) {
-            if (playing) Text("❚❚", color = Color.White, style = MaterialTheme.typography.headlineMedium)
-            else Icon(Icons.Default.PlayArrow, "Play", tint = Color.White)
+        Row(Modifier.align(Alignment.Center), verticalAlignment = Alignment.CenterVertically) {
+            val step = App.prefs.doubleTapSeconds
+            IconButton(onClick = { onSeek(-step * 1000L); onInteraction() }) { Icon(RewindIcon, "Back $step seconds", tint = Color.White) }
+            IconButton(onClick = { if (playing) player.pause() else player.play(); onInteraction() }) {
+                Icon(if (playing) PauseIcon else Icons.Default.PlayArrow, if (playing) "Pause" else "Play", tint = Color.White)
+            }
+            IconButton(onClick = { onSeek(step * 1000L); onInteraction() }) { Icon(ForwardIcon, "Forward $step seconds", tint = Color.White) }
+            if (onNext != null) IconButton(onClick = onNext) { Icon(NextIcon, "Next episode", tint = Color.White) }
         }
 
         Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(horizontal = 12.dp)) {

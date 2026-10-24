@@ -39,7 +39,8 @@ Libraries → poster grid → series → seasons → episodes.
   - Pinch switches between fit and crop.
 - Audio and subtitle choices are remembered per series.
 - Media segments show a "Skip intro" button. It never skips on its own.
-- Player menu: speed, tracks, subtitle size, rotation lock. Subtitle delay is not built yet: Media3 has no subtitle offset, so it needs its own cue timing. Subtitle size applies to text subtitles; ASS keeps its authored size.
+- On-screen controls: back, menu, fullscreen; rewind and forward by the double-tap step, play/pause, and next episode when there is one.
+- Player menu: speed, tracks, subtitle size, rotation lock. The current choice is ticked. Speed carries over to the next episode until the app is closed; it is not saved. Subtitle delay is not built yet: Media3 has no subtitle offset, so it needs its own cue timing. Subtitle size applies to text subtitles; ASS keeps its authored size.
 - A white spinner shows while the item loads and while the player buffers. It does not block taps or gestures.
 - A playback error shows a short sentence for common causes (network, timeout, HTTP status, missing file, unsupported format) and a Retry button. Other errors show a generic sentence with the Media3 error code in small text.
 - Theme follows the system and uses Material You colors.
