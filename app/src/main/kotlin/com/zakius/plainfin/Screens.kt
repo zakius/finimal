@@ -400,9 +400,9 @@ fun SeriesScreen(modifier: Modifier, screen: Screen.Series, push: (Screen) -> Un
         Row(Modifier.padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
             Text("Keep next episodes downloaded:", Modifier.weight(1f))
             fun set(n: Int) {
+                if (keepNext == 0) (ctx as? MainActivity)?.askNotifications()
                 keepNext = n
                 App.prefs.setKeepNext(screen.id, n)
-                if (n > 0) (ctx as? MainActivity)?.askNotifications()
                 scope.launch(Dispatchers.IO) {
                     if (n == 0) Media.releaseKeepNext(screen.id)
                     Housekeeping.enqueue(ctx)

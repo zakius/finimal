@@ -81,7 +81,7 @@ There is one persistent on-disk cache. The key is the item ID plus the media sou
   - Unfinished downloads come first, in the order they will download; finished ones follow, grouped by series.
   - A queued item shows its place in the queue ("queued #2"). When the current network blocks the queue (none, or metered with "download on metered" off), it says so instead. The toast after queuing does the same.
   - Storage use: total downloads, buffer cache against its limit, and free space on the download volume.
-- A running download shows a notification; tapping it opens the Downloads screen. The notification permission (Android 13+) is asked when the user first queues a download, not at start. Denying it does not stop downloads.
+- A running download shows a notification; tapping it opens the Downloads screen. The notification permission (Android 13+) is asked when the user queues downloads or turns "keep next N" on, not at start; Android stops asking after two denials. Denying it does not stop downloads.
 
 ## Sync
 
