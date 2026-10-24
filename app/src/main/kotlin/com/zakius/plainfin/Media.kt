@@ -85,9 +85,18 @@ object Media {
     /** Tags every buffer fill, so [switchStorage] can stop them all. */
     private const val FILL_TAG = "fill"
 
+    /**
+     * The selected SD card was missing at app start. The cache then opens on internal storage for
+     * streaming only: nothing downloads or buffers into it, so nothing downloads twice or is left
+     * behind when the card comes back. Checked again at the next start.
+     */
+    @Volatile var storageMissing = false
+        private set
+
     fun onAppStart(context: Context) {
         ctx = context
         db = StandaloneDatabaseProvider(context)
+        storageMissing = App.prefs.storageIndex >= storageRoots().size
         cache = openCache()
         // Builds before the queue ran one job per download; those would run alongside it.
         downloads().forEach { WorkManager.getInstance(context).cancelUniqueWork("fill-${it.item.id}") }
@@ -117,6 +126,7 @@ object Media {
         val old = cache
         val oldDir = cacheDir()
         App.prefs.storageIndex = index
+        storageMissing = false
         // ponytail: a cancelled worker still mid-write fails on the released cache rather than being awaited.
         old.release()
         SimpleCache.delete(oldDir, db)
@@ -216,6 +226,7 @@ object Media {
     fun downloadsWaitingFor(): String? {
         val cm = ctx.getSystemService(ConnectivityManager::class.java)
         return when {
+            storageMissing -> "waiting for SD card"
             cm.activeNetwork == null -> "waiting for network"
             !App.prefs.downloadOnMetered && cm.isActiveNetworkMetered -> "waiting for unmetered network"
             else -> null
@@ -435,6 +446,7 @@ private suspend fun fillCache(key: String, url: String, position: Long, onProgre
 /** Buffer-to-end for the episode the player has open. */
 class FillWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
     override suspend fun doWork(): Result = try {
+        if (Media.storageMissing) return Result.success()
         val done = fillCache(inputData.getString("key")!!, inputData.getString("url")!!, inputData.getLong("position", 0), null)
         Media.evict()
         if (done) Result.success() else Result.retry()
@@ -446,6 +458,7 @@ class FillWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
 /** Works through the download queue one episode at a time. */
 class DownloadWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
     override suspend fun doWork(): Result {
+        if (Media.storageMissing) return Result.success() // the next app start kicks the queue again
         var current: String? = null
         try {
             while (true) {

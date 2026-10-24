@@ -562,6 +562,8 @@ fun DownloadsScreen(modifier: Modifier, push: (Screen) -> Unit, pop: () -> Unit)
     Column(modifier.fillMaxSize()) {
         Bar("Downloads", pop)
         Text(storage, Modifier.padding(horizontal = 16.dp))
+        if (Media.storageMissing) Text("SD card not available. Downloads wait for it; restart the app after inserting it.",
+            Modifier.padding(horizontal = 16.dp), color = MaterialTheme.colorScheme.error)
         if (statuses != null && downloads.isEmpty()) Empty("Nothing downloaded. Use ⋮ on an episode, long-press a movie, or Download all on a series.")
         else LazyColumn {
             var lastGroup: String? = null
@@ -647,7 +649,7 @@ fun SettingsScreen(modifier: Modifier, pop: () -> Unit, onLoggedOut: () -> Unit)
                     toggle("Download on metered networks", p.downloadOnMetered) { p.downloadOnMetered = it; Media.kickDownloads(restart = true) }
                     stepper("Buffer cache limit (GB)", p.cacheLimitGb, listOf(1, 2, 5, 10, 20, 50, 100)) { p.cacheLimitGb = it }
                     val roots = Media.storageRoots()
-                    if (roots.size > 1) {
+                    if (roots.size > 1 || Media.storageMissing) { // missing: switching back is the way out of a lost card
                         toggle("Store on SD card (switching deletes downloads and the buffer)", p.storageIndex > 0, enabled = !moving) {
                             moveTo = if (it) 1 else 0
                         }

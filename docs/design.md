@@ -69,6 +69,7 @@ There is one persistent on-disk cache. The key is the item ID plus the media sou
 - An interrupted fill resumes from the last byte, including after a crash or reboot.
 - Two toggles, both off by default: "buffer to end on metered" and "download on metered". They follow Android's metered flag, not wifi/cellular. With buffering off on a metered network, the player uses its normal buffer.
 - Downloads are original files in app-specific storage. The SD card can be selected. Switching applies at once and asks first: it deletes every download and the buffer cache instead of moving them (bytes left on the old volume would be orphaned, and the downloads would silently fetch again).
+  - A selected SD card missing at start leaves downloads waiting: the queue and buffering stop, the Downloads screen and queued items say "waiting for SD card", and playback streams. The card is checked again at the next start. Switching to internal storage stays possible, as the way out of a lost card.
 - "Keep next N downloaded" is per series and off by default.
   - Anchor: the last played episode in season order, specials excluded.
   - Checked when the app opens, when an episode ends, and when the network becomes unmetered.
