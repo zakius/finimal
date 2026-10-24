@@ -556,8 +556,8 @@ fun DownloadsScreen(modifier: Modifier, push: (Screen) -> Unit, pop: () -> Unit)
     Column(modifier.fillMaxSize()) {
         Bar("Downloads", pop)
         Text(storage, Modifier.padding(horizontal = 16.dp))
-        if (statuses != null && downloads.isEmpty()) Text("Nothing downloaded. Long-press an episode or movie, or use Download season.", Modifier.padding(16.dp))
-        LazyColumn {
+        if (statuses != null && downloads.isEmpty()) Empty("Nothing downloaded. Use ⋮ on an episode, long-press a movie, or Download all on a series.")
+        else LazyColumn {
             var lastGroup: String? = null
             for ((group, title, status) in downloads) {
                 if (group != lastGroup) {
