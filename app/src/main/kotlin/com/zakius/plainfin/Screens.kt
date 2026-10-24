@@ -524,12 +524,13 @@ private fun ItemMenu(item: BaseItemDto, expanded: Boolean, onDismiss: () -> Unit
 @Composable
 fun DownloadsScreen(modifier: Modifier, push: (Screen) -> Unit, pop: () -> Unit) {
     val statuses = rememberDownloadStatuses()
-    // (group, download): unfinished first in queue order, then finished by series.
+    // (header key, header, download): unfinished first in queue order, then finished by series, movies last.
     val downloads = remember(statuses.mapValues { it.value.fill }) {
         val (done, queue) = Media.downloads().partition { Media.isComplete(Media.key(it.item)) }
-        queue.sortedWith(Media.queueOrder).map { "Queue" to it } +
-            done.sortedWith(compareBy({ it.item.seriesName ?: it.item.name }, { it.item.parentIndexNumber }, { it.item.indexNumber }))
-                .map { (it.item.seriesName ?: "Movies") to it }
+        queue.sortedWith(Media.queueOrder).map { Triple("h-queue", "Queue", it) } +
+            done.sortedWith(compareBy({ it.item.seriesId == null }, { it.item.seriesName }, { it.item.seriesId },
+                { it.item.parentIndexNumber }, { it.item.indexNumber }, { it.item.name }))
+                .map { d -> d.item.seriesId?.let { Triple("h-$it", d.item.seriesName.orEmpty(), d) } ?: Triple("h-movies", "Movies", d) }
     }
     val storage by produceState("", statuses) {
         val (buffered, free) = withContext(Dispatchers.IO) { Media.bufferedBytes() to Media.freeBytes() }
@@ -544,10 +545,10 @@ fun DownloadsScreen(modifier: Modifier, push: (Screen) -> Unit, pop: () -> Unit)
         if (downloads.isEmpty()) Text("Nothing downloaded. Long-press an episode or movie, or use Download season.", Modifier.padding(16.dp))
         LazyColumn {
             var lastGroup: String? = null
-            for ((group, d) in downloads) {
+            for ((group, title, d) in downloads) {
                 if (group != lastGroup) {
                     lastGroup = group
-                    item(key = "h-$group") { Text(group, style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(16.dp, 12.dp, 16.dp, 4.dp)) }
+                    item(key = group) { Text(title, style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(16.dp, 12.dp, 16.dp, 4.dp)) }
                 }
                 item(key = d.item.id) {
                     val id = d.item.id.toString()
