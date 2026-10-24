@@ -7,7 +7,7 @@ A Jellyfin client for Android that goes straight to the library. It prefers a fe
 - Android phone and tablet, portrait and landscape. Minimum API 26. No Google Play Services: it must run on EMUI.
 - One server, one user. Username/password login; the token is stored.
   - A server URL without a scheme tries https first, then http if https can't connect.
-  - Login errors say "Wrong username or password" (HTTP 401). Anything else gets the same sentence as a list that fails to load ("Can't reach the server at <url>", a server error with its status, or a generic message), with the raw error in small text.
+  - Login errors say "Wrong username or password" (HTTP 401). Anything else gets the same sentence as a list that fails to load (can't reach the server, a server error with its status, or a generic message), with the raw error in small text. Can't reach the server also names the URL tried.
 - Movies and TV shows only. Other library types are hidden.
 - Out of scope: Android TV, background audio, picture-in-picture, Quick Connect, home rows, Next Up, Continue Watching.
 - Desktop is a maybe. Keep `core` free of Android imports so a JVM desktop app with libmpv could reuse it.
@@ -72,7 +72,7 @@ There is one persistent on-disk cache. The key is the item ID plus the media sou
   - A selected SD card missing at start leaves downloads waiting: the queue and buffering stop, the Downloads screen and queued items say "waiting for SD card", and playback streams. The card is checked again at the next start. Switching to internal storage stays possible, as the way out of a lost card.
 - "Keep next N downloaded" is per series and off by default.
   - Anchor: the last played episode in season order, specials excluded.
-  - Checked when the app opens, when an episode ends, and when the network becomes unmetered.
+  - Checked when the app opens and whenever playback stops, once a network is up.
   - It deletes only episodes it downloaded itself, after they are marked played.
   - Changing N runs the check at once. Turning it off deletes its played and unfinished downloads; its finished, unplayed ones stay as regular downloads.
 - Deleting a download asks first, naming the item. A dialog, not undo: the bytes go at once.
