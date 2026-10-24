@@ -557,10 +557,10 @@ private fun VideoSurface(
 
         if (waiting && playerError == null && !ended) CircularProgressIndicator(Modifier.align(Alignment.Center), color = Color.White)
 
-        if (introRange != null && position in introRange && !ended) {
-            FilledTonalButton(onClick = { player.seekTo(introRange.last + 1_000) },
-                modifier = Modifier.align(Alignment.BottomEnd).padding(24.dp)) { Text("Skip intro") }
-        }
+        val skipIntro = introRange?.takeIf { position in it && !ended }?.let { { player.seekTo(it.last + 1_000) } }
+        // With controls shown it sits beside the seek bar instead, so the bar and scrim never cover it.
+        if (skipIntro != null && !controls) SkipIntro(skipIntro,
+            Modifier.align(Alignment.BottomEnd).then(if (fullscreen) Modifier.safeDrawingPadding() else Modifier).padding(24.dp))
 
         if (playerError != null) {
             Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -580,7 +580,7 @@ private fun VideoSurface(
         } else if (controls) {
             Controls(
                 player, position, duration, buffered, playing, fullscreen, transcoding, rotationLocked,
-                onBack, onToggleFullscreen, onRotationLock, onTracksChosen, ::seekBy, next?.let { { onPlay(it.id.toString()) } },
+                onBack, onToggleFullscreen, onRotationLock, onTracksChosen, ::seekBy, next?.let { { onPlay(it.id.toString()) } }, skipIntro,
                 onInteraction = { lastInteraction = System.currentTimeMillis() },
                 subtitleView = playerView.subtitleView,
             )
@@ -604,6 +604,7 @@ private fun Controls(
     onTracksChosen: (String?, String?) -> Unit,
     onSeek: (Long) -> Unit,
     onNext: (() -> Unit)?,
+    onSkipIntro: (() -> Unit)?,
     onInteraction: () -> Unit,
     subtitleView: SubtitleView?,
 ) {
@@ -685,15 +686,22 @@ private fun Controls(
         Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(horizontal = 12.dp)) {
             val shown = if (dragging >= 0) dragging.toLong() else position
             Text("${formatMs(shown)} / ${formatMs(duration)}  (buffered ${formatMs(buffered)})", color = Color.White, style = MaterialTheme.typography.labelSmall)
-            Slider(
-                value = shown.toFloat().coerceIn(0f, duration.toFloat().coerceAtLeast(1f)),
-                valueRange = 0f..duration.toFloat().coerceAtLeast(1f),
-                onValueChange = { dragging = it; onInteraction() },
-                onValueChangeFinished = { player.seekTo(dragging.toLong()); dragging = -1f },
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Slider(
+                    value = shown.toFloat().coerceIn(0f, duration.toFloat().coerceAtLeast(1f)),
+                    valueRange = 0f..duration.toFloat().coerceAtLeast(1f),
+                    onValueChange = { dragging = it; onInteraction() },
+                    onValueChangeFinished = { player.seekTo(dragging.toLong()); dragging = -1f },
+                    modifier = Modifier.weight(1f),
+                )
+                if (onSkipIntro != null) SkipIntro(onSkipIntro, Modifier.padding(start = 8.dp))
+            }
         }
     }
 }
+
+@Composable
+private fun SkipIntro(onClick: () -> Unit, modifier: Modifier) = FilledTonalButton(onClick, modifier) { Text("Skip intro") }
 
 /** A menu entry ticked when it is the current choice. */
 @Composable
