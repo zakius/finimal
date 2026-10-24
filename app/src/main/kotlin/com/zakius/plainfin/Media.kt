@@ -229,7 +229,7 @@ object Media {
         WorkManager.getInstance(ctx).enqueueUniqueWork("downloads", if (restart) ExistingWorkPolicy.REPLACE else ExistingWorkPolicy.KEEP, request)
     }
 
-    /** [item] must come from [Server.item] so it carries media sources for offline playback. Also resumes a paused download. */
+    /** [item] must carry media sources ([Server.item], or episodes fetched with sources) for offline playback. Also resumes a paused download. */
     @Synchronized
     fun startDownload(item: BaseItemDto, auto: Boolean) {
         val id = item.id.toString()

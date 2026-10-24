@@ -76,6 +76,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -126,8 +127,9 @@ private suspend fun downloadAll(context: Context, episodes: List<BaseItemDto>) {
     withContext(Dispatchers.IO) {
         for (ep in episodes) {
             if (Media.download(ep.id.toString()) != null) continue
-            runCatching { Media.startDownload(App.server.item(ep.id.toString()), auto = false) }
-                .onSuccess { queued++ }.onFailure { failures += it }
+            // Episodes fetched with sources queue as local writes, so leaving the screen can't stop it partway.
+            runCatching { Media.startDownload(ep.takeIf { it.mediaSources != null } ?: App.server.item(ep.id.toString()), auto = false) }
+                .onSuccess { queued++ }.onFailure { if (it is CancellationException) throw it; failures += it }
         }
     }
     val text = when {
