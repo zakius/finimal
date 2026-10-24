@@ -88,16 +88,38 @@ object Media {
     /** Plain HTTP plus file:// for downloaded subtitles. */
     fun upstreamFactory() = DefaultDataSource.Factory(ctx, OkHttpDataSource.Factory(http))
 
-    fun dataSourceFactory(blockOnCache: Boolean = false): CacheDataSource.Factory =
+    /** For [FillWorker], the only cache writer. Waits for its own earlier locks instead of skipping ranges. */
+    fun writerFactory(): CacheDataSource.Factory =
         CacheDataSource.Factory()
             .setCache(cache)
             .setUpstreamDataSourceFactory(upstreamFactory())
-            .setFlags(if (blockOnCache) CacheDataSource.FLAG_BLOCK_ON_CACHE else CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
+            .setFlags(CacheDataSource.FLAG_BLOCK_ON_CACHE)
+
+    /**
+     * For the player: reads the cache, never writes it. A writing reader locks the whole uncached
+     * rest of the file while its stream is open, which starved the buffer worker until playback
+     * caught up. Read-only, it streams uncached ranges directly and rechecks the cache every 100 KB.
+     */
+    fun playerFactory(): CacheDataSource.Factory =
+        CacheDataSource.Factory()
+            .setCache(cache)
+            .setUpstreamDataSourceFactory(upstreamFactory())
+            .setCacheWriteDataSinkFactory(null)
+            .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
 
     // --- progress ------------------------------------------------------------------------------
 
     fun contentLength(key: String) = ContentMetadata.getContentLength(cache.getContentMetadata(key))
     fun cachedBytes(key: String) = cache.getCachedSpans(key).sumOf { it.length }
+    /** How far, in ms, the disk cache reaches without a gap from [positionMs]; bytes map to time linearly. */
+    fun cachedUntilMs(key: String, positionMs: Long, durationMs: Long): Long {
+        val len = contentLength(key)
+        if (len <= 0 || durationMs <= 0) return 0
+        val start = len * positionMs / durationMs
+        val run = cache.getCachedLength(key, start, len - start).coerceAtLeast(0)
+        return (start + run) * durationMs / len
+    }
+
     fun isComplete(key: String): Boolean {
         val len = contentLength(key)
         return len > 0 && cache.isCached(key, 0, len)
@@ -263,11 +285,11 @@ class FillWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
             }
         }
         return try {
-            // The player may hold a lock on a range while this runs and the writer then skips it, so
-            // loop until the cache really holds everything from the start position.
+            // A range can still come back uncached (e.g. a download replaced a buffer fill mid-write),
+            // so loop until the cache really holds everything from the start position.
             repeat(5) {
                 val writer = CacheWriter(
-                    Media.dataSourceFactory(blockOnCache = true).createDataSource(),
+                    Media.writerFactory().createDataSource(),
                     DataSpec.Builder().setUri(url).setPosition(position).setKey(key).build(),
                     null,
                     progress,

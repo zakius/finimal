@@ -308,7 +308,7 @@ private fun Playback(
 
     val video = @Composable { mod: Modifier ->
         VideoSurface(
-            mod, player, playerView, fullscreen, transcoding, intro, ended, next, playerError,
+            mod, player, playerView, fullscreen, transcoding, Media.key(item).takeUnless { transcoding }, intro, ended, next, playerError,
             onToggleFullscreen = { setFullscreen(!fullscreen) },
             onBack = onBack,
             onNext = { next?.let { onPlay(it.id.toString()) } },
@@ -353,7 +353,7 @@ private fun buildPlayer(context: Context, view: PlayerView, transcoding: Boolean
             context,
             renderType = AssRenderType.OVERLAY_OPEN_GL,
             subtitleView = view.subtitleView,
-            dataSourceFactory = if (transcoding) Media.upstreamFactory() else Media.dataSourceFactory(),
+            dataSourceFactory = if (transcoding) Media.upstreamFactory() else Media.playerFactory(),
             renderersFactory = renderers,
         )
 }
@@ -382,6 +382,7 @@ private fun VideoSurface(
     playerView: PlayerView,
     fullscreen: Boolean,
     transcoding: Boolean,
+    cacheKey: String?,
     intro: MediaSegmentDto?,
     ended: Boolean,
     next: BaseItemDto?,
@@ -412,7 +413,7 @@ private fun VideoSurface(
         while (true) {
             position = player.currentPosition
             duration = player.duration.coerceAtLeast(0)
-            buffered = player.bufferedPosition
+            buffered = maxOf(player.bufferedPosition, cacheKey?.let { Media.cachedUntilMs(it, position, duration) } ?: 0)
             playing = player.isPlaying
             if (controls && playing && System.currentTimeMillis() - lastInteraction > 3_000) controls = false
             delay(250)
