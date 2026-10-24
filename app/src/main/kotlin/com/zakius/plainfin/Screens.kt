@@ -237,7 +237,7 @@ private fun Empty(text: String) = Box(Modifier.fillMaxSize().padding(24.dp), con
 
 @Composable
 fun LoginScreen(modifier: Modifier, onDone: () -> Unit) {
-    var url by rememberSaveable { mutableStateOf(App.prefs.baseUrl ?: "https://") }
+    var url by rememberSaveable { mutableStateOf(App.prefs.baseUrl.orEmpty()) }
     var user by rememberSaveable { mutableStateOf("") }
     var pass by remember { mutableStateOf("") }
     var error by remember { mutableStateOf<Throwable?>(null) }
@@ -257,7 +257,7 @@ fun LoginScreen(modifier: Modifier, onDone: () -> Unit) {
     Column(modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("plainfin", style = MaterialTheme.typography.headlineMedium)
         if (App.server.sessionExpired) Text("The server ended this session. Log in again; unsynced progress is kept.")
-        OutlinedTextField(url, { url = it }, label = { Text("Server URL") }, singleLine = true, enabled = !busy, modifier = Modifier.fillMaxWidth(),
+        OutlinedTextField(url, { url = it }, label = { Text("Server URL") }, placeholder = { Text("jellyfin.example.com:8096") }, singleLine = true, enabled = !busy, modifier = Modifier.fillMaxWidth(),
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Next))
         OutlinedTextField(user, { user = it }, label = { Text("Username") }, singleLine = true, enabled = !busy,
             modifier = Modifier.fillMaxWidth().semantics { contentType = ContentType.Username },
