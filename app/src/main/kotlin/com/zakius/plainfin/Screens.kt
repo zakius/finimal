@@ -159,7 +159,7 @@ private fun DownloadAllButton(label: String, enabled: Boolean, fetch: suspend ()
                     val new = withContext(Dispatchers.IO) { eps.filter { Media.download(it.id.toString()) == null } }
                     if (new.isEmpty()) Toast.makeText(ctx, "Nothing new to download", Toast.LENGTH_SHORT).show() else pending = new
                 }
-                .onFailure { Toast.makeText(ctx, "Couldn't load the episode list", Toast.LENGTH_SHORT).show() }
+                .onFailure { if (it is CancellationException) throw it; Toast.makeText(ctx, loadError(it), Toast.LENGTH_SHORT).show() }
             busy = false
         }
     }) { Text(if (busy) "Queuing…" else label) }
