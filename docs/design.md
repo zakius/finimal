@@ -22,7 +22,8 @@ Libraries → poster grid → series → seasons → episodes.
 
 - Grid: sort by name, date added or release date; an "unplayed only" toggle; search.
 - Episodes: thumbnail, played mark, progress bar.
-- Tap: resume from the saved position minus 5 s. Long-press: start over, mark played/unplayed, download, delete download.
+- Movie posters: played mark, progress bar, download state.
+- Tap: resume from the saved position minus 5 s. Long-press on an episode or movie: start over, mark played/unplayed, download, delete download.
 - End of an episode: a "Play next" button. The next episode comes from season order, never from the server's Next Up.
 
 ## Playback

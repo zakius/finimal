@@ -70,6 +70,7 @@ import org.jellyfin.sdk.api.client.exception.InvalidStatusException
 import org.jellyfin.sdk.model.api.BaseItemDto
 import org.jellyfin.sdk.model.api.BaseItemKind
 import org.jellyfin.sdk.model.api.ImageType
+import plainfin.core.PlayState
 
 /** Loads [block] after pushing unsynced progress, so the list never shows state older than this device's. */
 @Composable
@@ -92,14 +93,15 @@ fun rememberDownloadStatuses(): Map<String, Media.DownloadStatus> =
 
 /** Queues downloads and says how many were queued. */
 private suspend fun downloadAll(context: Context, episodes: List<BaseItemDto>) {
+    val noun = if (episodes.all { it.type == BaseItemKind.MOVIE }) "movie" else "episode"
     val queued = episodes.count { ep ->
         Media.download(ep.id.toString()) == null &&
             runCatching { Media.startDownload(App.server.item(ep.id.toString()), auto = false) }.isSuccess
     }
     val text = when {
         queued == 0 -> "Nothing new to download"
-        queued == 1 -> "Downloading 1 episode"
-        else -> "Downloading $queued episodes"
+        queued == 1 -> "Downloading 1 $noun"
+        else -> "Downloading $queued ${noun}s"
     }
     Toast.makeText(context, text + if (queued > 0 && !App.prefs.downloadOnMetered) " (Wi-Fi only)" else "", Toast.LENGTH_SHORT).show()
 }
@@ -187,10 +189,11 @@ fun LibraryScreen(modifier: Modifier, screen: Screen.Library, push: (Screen) -> 
     var unplayed by rememberSaveable { mutableStateOf(false) }
     var search by rememberSaveable { mutableStateOf("") }
     var query by rememberSaveable { mutableStateOf("") }
+    var refresh by remember { mutableIntStateOf(0) }
     LaunchedEffect(search) { delay(400); query = search }
     val searchOnly = screen.id == null
     val items = if (searchOnly && query.isBlank()) Result.success(emptyList())
-        else loadFresh(screen.id, sort, unplayed, query) { App.server.items(screen.id, sort, unplayed, query) }
+        else loadFresh(screen.id, sort, unplayed, query, refresh) { App.server.items(screen.id, sort, unplayed, query) }
     Column(modifier.fillMaxSize()) {
         Bar(screen.name, pop)
         OutlinedTextField(search, { search = it }, label = { Text("Search") }, singleLine = true,
@@ -199,27 +202,41 @@ fun LibraryScreen(modifier: Modifier, screen: Screen.Library, push: (Screen) -> 
             Sort.entries.forEach { s -> FilterChip(sort == s, { sort = s }, { Text(s.label) }) }
             FilterChip(unplayed, { unplayed = !unplayed }, { Text("Unplayed") })
         }
+        val statuses = rememberDownloadStatuses()
         Loaded(items) { list ->
             LazyVerticalGrid(GridCells.Adaptive(110.dp), Modifier.fillMaxSize().padding(8.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 items(list, key = { it.id }) { item ->
-                    Poster(item) {
-                        if (item.type == BaseItemKind.SERIES) push(Screen.Series(item.id.toString(), item.name.orEmpty()))
-                        else push(Screen.Play(item.id.toString()))
-                    }
+                    if (item.type == BaseItemKind.SERIES) Poster(item, null, onClick = { push(Screen.Series(item.id.toString(), item.name.orEmpty())) })
+                    else Poster(item, statuses[item.id.toString()],
+                        onClick = { push(Screen.Play(item.id.toString())) },
+                        onStartOver = { push(Screen.Play(item.id.toString(), fromStart = true)) },
+                        onChanged = { refresh++ })
                 }
             }
         }
     }
 }
 
+/** Movies (non-null [onChanged]) also get progress, download state and the long-press menu. */
 @Composable
-private fun Poster(item: BaseItemDto, onClick: () -> Unit) {
+private fun Poster(
+    item: BaseItemDto,
+    download: Media.DownloadStatus?,
+    onClick: () -> Unit,
+    onStartOver: (() -> Unit)? = null,
+    onChanged: (() -> Unit)? = null,
+) {
     val (state, unsynced) = item.localState()
-    Column(Modifier.combinedClickable(onClick = onClick)) {
+    var menu by remember { mutableStateOf(false) }
+    Column(Modifier.combinedClickable(onClick = onClick, onLongClick = onChanged?.let { { menu = true } })) {
         Box {
             AsyncImage(App.server.imageUrl(item.id), null, contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxWidth().aspectRatio(2f / 3).background(Color.DarkGray))
+            download?.let {
+                Text(if (it.fill == Media.Fill.DONE) "↓" else "${it.percent}%", color = Color.White,
+                    modifier = Modifier.align(Alignment.TopStart).background(Color(0xAA000000)).padding(horizontal = 6.dp))
+            }
             val badge = when {
                 state?.played == true -> "✓"
                 (item.userData?.unplayedItemCount ?: 0) > 0 -> item.userData!!.unplayedItemCount.toString()
@@ -230,7 +247,9 @@ private fun Poster(item: BaseItemDto, onClick: () -> Unit) {
             }
             if (unsynced) Text("not synced", color = Color.White, style = MaterialTheme.typography.labelSmall,
                 modifier = Modifier.align(Alignment.BottomStart).background(Color(0xAA000000)))
+            onChanged?.let { ItemMenu(item, menu, { menu = false }, download != null, onStartOver, it) }
         }
+        ProgressBar(item, state)
         Text(item.name.orEmpty(), maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall)
     }
 }
@@ -321,11 +340,7 @@ fun EpisodeRow(
     onChanged: () -> Unit = {},
 ) {
     val (state, unsynced) = ep.localState()
-    val id = ep.id.toString()
-    val downloaded = download != null
-    val ctx = LocalContext.current
     var menu by remember { mutableStateOf(false) }
-    val scope = rememberCoroutineScope()
     Box {
         Row(
             Modifier.fillMaxWidth()
@@ -337,10 +352,7 @@ fun EpisodeRow(
             Column(Modifier.width(140.dp)) {
                 AsyncImage(App.server.imageUrl(ep.id, ImageType.PRIMARY, 320), null, contentScale = ContentScale.Crop,
                     modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9).background(Color.DarkGray))
-                val runtime = ep.runTimeTicks ?: 0
-                if (state != null && state.positionTicks > 0 && runtime > 0) {
-                    LinearProgressIndicator({ state.positionTicks.toFloat() / runtime }, Modifier.fillMaxWidth())
-                }
+                ProgressBar(ep, state)
             }
             Column(Modifier.weight(1f)) {
                 Text("${ep.indexNumber ?: ""}. ${ep.name.orEmpty()}", style = MaterialTheme.typography.titleSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
@@ -353,19 +365,36 @@ fun EpisodeRow(
                 Text(bits.joinToString(" · "), style = MaterialTheme.typography.labelSmall)
             }
         }
-        DropdownMenu(menu, { menu = false }) {
-            onStartOver?.let { DropdownMenuItem({ Text("Start over") }, { menu = false; it() }) }
-            val played = state?.played == true
-            DropdownMenuItem({ Text(if (played) "Mark unplayed" else "Mark played") }, {
-                menu = false
-                scope.launch { App.server.setPlayed(id, !played); onChanged() }
-            })
-            if (downloaded) DropdownMenuItem({ Text("Delete download") }, { menu = false; Media.deleteDownload(id); onChanged() })
-            else DropdownMenuItem({ Text("Download") }, {
-                menu = false
-                scope.launch { downloadAll(ctx, listOf(ep)) }
-            })
-        }
+        ItemMenu(ep, menu, { menu = false }, download != null, onStartOver, onChanged)
+    }
+}
+
+@Composable
+private fun ProgressBar(item: BaseItemDto, state: PlayState?) {
+    val runtime = item.runTimeTicks ?: 0
+    if (state != null && state.positionTicks > 0 && runtime > 0) {
+        LinearProgressIndicator({ state.positionTicks.toFloat() / runtime }, Modifier.fillMaxWidth())
+    }
+}
+
+/** Long-press actions of an episode or movie. */
+@Composable
+private fun ItemMenu(item: BaseItemDto, expanded: Boolean, onDismiss: () -> Unit, downloaded: Boolean, onStartOver: (() -> Unit)?, onChanged: () -> Unit) {
+    val id = item.id.toString()
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    DropdownMenu(expanded, onDismiss) {
+        onStartOver?.let { DropdownMenuItem({ Text("Start over") }, { onDismiss(); it() }) }
+        val played = item.localState().first?.played == true
+        DropdownMenuItem({ Text(if (played) "Mark unplayed" else "Mark played") }, {
+            onDismiss()
+            scope.launch { App.server.setPlayed(id, !played); onChanged() }
+        })
+        if (downloaded) DropdownMenuItem({ Text("Delete download") }, { onDismiss(); Media.deleteDownload(id); onChanged() })
+        else DropdownMenuItem({ Text("Download") }, {
+            onDismiss()
+            scope.launch { downloadAll(ctx, listOf(item)) }
+        })
     }
 }
 
@@ -381,7 +410,7 @@ fun DownloadsScreen(modifier: Modifier, push: (Screen) -> Unit, pop: () -> Unit)
     Column(modifier.fillMaxSize()) {
         Bar("Downloads", pop)
         Text("Using ${formatBytes(statuses.values.sumOf { it.bytes })}", Modifier.padding(horizontal = 16.dp))
-        if (downloads.isEmpty()) Text("Nothing downloaded. Long-press an episode or use Download season.", Modifier.padding(16.dp))
+        if (downloads.isEmpty()) Text("Nothing downloaded. Long-press an episode or movie, or use Download season.", Modifier.padding(16.dp))
         LazyColumn {
             var lastGroup: String? = null
             for (d in downloads) {
