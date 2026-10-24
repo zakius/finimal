@@ -6,7 +6,6 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -16,6 +15,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -23,12 +23,16 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -55,21 +59,23 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.autofill.ContentType
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentType
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
-import java.io.IOException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.launch
 import org.jellyfin.sdk.api.client.exception.InvalidStatusException
-import org.jellyfin.sdk.api.client.exception.TimeoutException
 import org.jellyfin.sdk.model.api.BaseItemDto
 import org.jellyfin.sdk.model.api.BaseItemKind
 import org.jellyfin.sdk.model.api.ImageType
@@ -171,7 +177,7 @@ private fun Bar(title: String, onBack: (() -> Unit)?, actions: @Composable () ->
 @Composable
 private fun loadError(e: Throwable) = when {
     e is InvalidStatusException -> "The server returned an error (${e.status})"
-    e is TimeoutException || generateSequence(e) { it.cause }.any { it is IOException } -> "Can't reach the server"
+    unreachable(e) -> "Can't reach the server"
     else -> "Something went wrong loading this"
 }
 
@@ -199,27 +205,45 @@ fun LoginScreen(modifier: Modifier, onDone: () -> Unit) {
     var url by rememberSaveable { mutableStateOf(App.prefs.baseUrl ?: "https://") }
     var user by rememberSaveable { mutableStateOf("") }
     var pass by remember { mutableStateOf("") }
-    var error by remember { mutableStateOf<String?>(null) }
+    var error by remember { mutableStateOf<Throwable?>(null) }
     var busy by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
-    Column(modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    fun submit() {
+        if (busy) return
+        busy = true
+        scope.launch {
+            runCatching { App.server.login(url, user, pass) }
+                .onSuccess { onDone() }
+                .onFailure { error = it }
+            busy = false
+        }
+    }
+    // The padded modifier already includes the IME inset; scrolling keeps the button reachable above it.
+    Column(modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("plainfin", style = MaterialTheme.typography.headlineMedium)
         if (App.server.sessionExpired) Text("The server ended this session. Log in again; unsynced progress is kept.")
-        OutlinedTextField(url, { url = it }, label = { Text("Server URL") }, singleLine = true, modifier = Modifier.fillMaxWidth(),
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri))
-        OutlinedTextField(user, { user = it }, label = { Text("Username") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-        OutlinedTextField(pass, { pass = it }, label = { Text("Password") }, singleLine = true, modifier = Modifier.fillMaxWidth(),
-            visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password))
-        error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-        Button(enabled = !busy, onClick = {
-            busy = true
-            scope.launch {
-                runCatching { App.server.login(url, user, pass) }
-                    .onSuccess { onDone() }
-                    .onFailure { error = it.message ?: it.toString() }
-                busy = false
+        OutlinedTextField(url, { url = it }, label = { Text("Server URL") }, singleLine = true, enabled = !busy, modifier = Modifier.fillMaxWidth(),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Next))
+        OutlinedTextField(user, { user = it }, label = { Text("Username") }, singleLine = true, enabled = !busy,
+            modifier = Modifier.fillMaxWidth().semantics { contentType = ContentType.Username },
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next))
+        OutlinedTextField(pass, { pass = it }, label = { Text("Password") }, singleLine = true, enabled = !busy,
+            modifier = Modifier.fillMaxWidth().semantics { contentType = ContentType.Password },
+            visualTransformation = PasswordVisualTransformation(),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = ImeAction.Done),
+            keyboardActions = KeyboardActions(onDone = { submit() }))
+        error?.let { e ->
+            val known = when {
+                e is InvalidStatusException && e.status == 401 -> "Wrong username or password"
+                unreachable(e) -> "Can't reach the server at ${url.trim()}"
+                else -> null
             }
-        }) { Text("Log in") }
+            Text(known ?: "Couldn't log in", color = MaterialTheme.colorScheme.error)
+            if (known == null) Text(e.message ?: e.javaClass.simpleName, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Button(enabled = !busy, onClick = ::submit) {
+            if (busy) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp) else Text("Log in")
+        }
     }
 }
 

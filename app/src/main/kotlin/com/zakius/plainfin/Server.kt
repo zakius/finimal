@@ -12,10 +12,12 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import java.io.IOException
 import java.time.Instant
 import java.time.LocalDateTime
 import java.time.ZoneId
 import java.util.UUID
+import org.jellyfin.sdk.api.client.exception.TimeoutException
 import org.jellyfin.sdk.api.client.extensions.authenticationApi
 import org.jellyfin.sdk.api.client.extensions.imageApi
 import org.jellyfin.sdk.api.client.extensions.libraryApi
@@ -75,10 +77,18 @@ class Server(context: Context) {
     val loggedIn get() = prefs.token != null
     private val userId get() = UUID.fromString(prefs.userId)
 
+    /** A URL without a scheme tries https, then http (Jellyfin's LAN default) if https can't connect. */
     suspend fun login(url: String, username: String, password: String) {
         val base = url.trim().trimEnd('/')
+        val credentials = AuthenticateUserByName(username, password)
+        if ("://" in base) return login(base, credentials)
+        try { login("https://$base", credentials) }
+        catch (e: Exception) { if (unreachable(e)) login("http://$base", credentials) else throw e }
+    }
+
+    private suspend fun login(base: String, credentials: AuthenticateUserByName) {
         api.update(baseUrl = base, accessToken = null)
-        val auth = io { api.authenticationApi.authenticateUserByName(AuthenticateUserByName(username, password)).content }
+        val auth = io { api.authenticationApi.authenticateUserByName(credentials).content }
         prefs.baseUrl = base
         prefs.token = auth.accessToken
         prefs.userId = auth.user!!.id.toString()
@@ -265,3 +275,6 @@ fun subtitleExt(stream: MediaStream) = when (val c = stream.codec?.lowercase()) 
     "webvtt" -> "vtt"
     else -> c
 }
+
+/** No HTTP answer: timeout, unknown host, refused connection or failed TLS. */
+fun unreachable(e: Throwable) = e is TimeoutException || generateSequence(e) { it.cause }.any { it is IOException }
