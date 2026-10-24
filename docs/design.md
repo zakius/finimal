@@ -23,6 +23,8 @@ A Jellyfin client for Android that goes straight to the library. It prefers a fe
 Libraries → poster grid → series → seasons → episodes.
 
 - Grid: sort by name, date added or release date; an "unplayed only" toggle; search.
+- Search opens with the field focused and the keyboard up, once; coming back to it does not reopen the keyboard.
+- An empty list says why in one centred line (no results for the query, nothing unplayed, empty library, no movie or TV libraries).
 - Episodes: thumbnail, played mark, progress bar.
 - Movie posters: played mark, progress bar, download state.
 - Tap: resume from the saved position minus 5 s. Long-press on an episode or movie: start over, mark played/unplayed, download, delete download.

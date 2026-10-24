@@ -60,9 +60,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.autofill.ContentType
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.semantics.contentType
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.ImeAction
@@ -198,6 +201,10 @@ private fun <T> Loaded(result: Result<T>?, onRetry: () -> Unit, onDownloads: () 
     }
 }
 
+/** Centred note for a list with nothing in it. */
+@Composable
+private fun Empty(text: String) = Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) { Text(text) }
+
 // --- login --------------------------------------------------------------------------------------
 
 @Composable
@@ -260,7 +267,8 @@ fun LibrariesScreen(modifier: Modifier, push: (Screen) -> Unit) {
             IconButton(onClick = { push(Screen.Settings) }) { Icon(Icons.Default.Settings, "Settings") }
         }
         Loaded(libs, { retry++ }, { push(Screen.Downloads) }) { list ->
-            LazyColumn {
+            if (list.isEmpty()) Empty("No movie or TV libraries on this server")
+            else LazyColumn {
                 items(list, key = { it.id }) { lib ->
                     Text(lib.name.orEmpty(), style = MaterialTheme.typography.titleLarge,
                         modifier = Modifier.fillMaxWidth().combinedClickable(onClick = { push(Screen.Library(lib.id.toString(), lib.name.orEmpty())) }).padding(20.dp))
@@ -281,19 +289,31 @@ fun LibraryScreen(modifier: Modifier, screen: Screen.Library, push: (Screen) -> 
     var refresh by remember { mutableIntStateOf(0) }
     LaunchedEffect(search) { delay(400); query = search }
     val searchOnly = screen.id == null
+    val focus = remember { FocusRequester() }
+    val keyboard = LocalSoftwareKeyboardController.current
+    var focusedOnce by rememberSaveable { mutableStateOf(false) } // not again when coming back
+    LaunchedEffect(Unit) { if (searchOnly && !focusedOnce) { focusedOnce = true; focus.requestFocus(); keyboard?.show() } }
     val items = if (searchOnly && query.isBlank()) Result.success(emptyList())
         else loadFresh(screen.id, sort, unplayed, query, refresh) { App.server.items(screen.id, sort, unplayed, query) }
     Column(modifier.fillMaxSize()) {
         Bar(screen.name, pop)
         OutlinedTextField(search, { search = it }, label = { Text("Search") }, singleLine = true,
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp))
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp).focusRequester(focus),
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+            keyboardActions = KeyboardActions(onSearch = { query = search; keyboard?.hide() }))
         if (!searchOnly) Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Sort.entries.forEach { s -> FilterChip(sort == s, { sort = s }, { Text(s.label) }) }
             FilterChip(unplayed, { unplayed = !unplayed }, { Text("Unplayed") })
         }
         val statuses = rememberDownloadStatuses()
         Loaded(items, { refresh++ }, { push(Screen.Downloads) }) { list ->
-            LazyVerticalGrid(GridCells.Adaptive(110.dp), Modifier.fillMaxSize().padding(8.dp),
+            if (list.isEmpty()) Empty(when {
+                query.isNotBlank() -> "No results for “${query.trim()}”"
+                searchOnly -> "Type to search"
+                unplayed -> "Nothing unplayed here"
+                else -> "This library is empty"
+            })
+            else LazyVerticalGrid(GridCells.Adaptive(110.dp), Modifier.fillMaxSize().padding(8.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 items(list, key = { it.id }) { item ->
                     if (item.type == BaseItemKind.SERIES) Poster(item, null, onClick = { push(Screen.Series(item.id.toString(), item.name.orEmpty())) })
@@ -362,7 +382,8 @@ fun SeriesScreen(modifier: Modifier, screen: Screen.Series, push: (Screen) -> Un
             }) { Text("+") }
         }
         Loaded(seasons, { retry++ }, { push(Screen.Downloads) }) { list ->
-            LazyColumn {
+            if (list.isEmpty()) Empty("This series has no seasons")
+            else LazyColumn {
                 items(list, key = { it.id }) { season ->
                     Row(Modifier.fillMaxWidth().combinedClickable(onClick = {
                         push(Screen.Season(screen.id, season.id.toString(), "${screen.name} · ${season.name}"))
@@ -389,7 +410,8 @@ fun SeasonScreen(modifier: Modifier, screen: Screen.Season, push: (Screen) -> Un
             DownloadAllButton("Download season", episodes?.isSuccess == true) { App.server.episodes(screen.seriesId, screen.seasonId, sources = true) }
         }
         Loaded(episodes, { refresh++ }, { push(Screen.Downloads) }) { list ->
-            LazyColumn(state = listState) {
+            if (list.isEmpty()) Empty("This season has no episodes")
+            else LazyColumn(state = listState) {
                 items(list, key = { it.id }) { ep ->
                     EpisodeRow(
                         ep,
