@@ -17,6 +17,7 @@ import java.time.Instant
 import java.time.LocalDateTime
 import java.time.ZoneId
 import java.util.UUID
+import org.jellyfin.sdk.api.client.exception.InvalidStatusException
 import org.jellyfin.sdk.api.client.exception.TimeoutException
 import org.jellyfin.sdk.api.client.extensions.authenticationApi
 import org.jellyfin.sdk.api.client.extensions.imageApi
@@ -234,10 +235,15 @@ class Server(context: Context) {
         flush()
     }
 
-    /** Pushes pending states; the newer LastPlayedDate wins. Returns false while the server is unreachable. */
-    suspend fun flush(): Boolean = io {
+    /**
+     * Pushes pending states; the newer LastPlayedDate wins. One failing item doesn't hold up the
+     * rest: an item the server doesn't have (deleted, or from a server logged into before) is
+     * dropped, and a rejected token ends the session. Returns the first failure, null when all went through.
+     */
+    suspend fun flush(): Throwable? = io {
+        var failure: Throwable? = null
         for ((id, local) in App.pending.all()) {
-            val ok = runCatching {
+            runCatching {
                 val uuid = UUID.fromString(id)
                 val server = userData(uuid).toPlayState()
                 if (shouldPush(local, server)) {
@@ -250,11 +256,15 @@ class Server(context: Context) {
                         ),
                     )
                 }
-            }.isSuccess
-            if (!ok) return@io false
-            App.pending.confirm(id, local)
+            }.onSuccess { App.pending.confirm(id, local) }.onFailure { e ->
+                when ((e as? InvalidStatusException)?.status) {
+                    404 -> App.pending.confirm(id, local)
+                    401 -> { expire(); return@io e }
+                    else -> failure = failure ?: e
+                }
+            }
         }
-        true
+        failure
     }
 }
 
@@ -278,3 +288,6 @@ fun subtitleExt(stream: MediaStream) = when (val c = stream.codec?.lowercase()) 
 
 /** No HTTP answer: timeout, unknown host, refused connection or failed TLS. */
 fun unreachable(e: Throwable) = e is TimeoutException || generateSequence(e) { it.cause }.any { it is IOException }
+
+/** Worth retrying later: no answer, or a server-side error. */
+fun transient(e: Throwable) = unreachable(e) || (e as? InvalidStatusException)?.status?.let { it >= 500 } == true

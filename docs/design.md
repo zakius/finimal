@@ -92,7 +92,7 @@ Rules:
 
 1. Report progress every 10 s, and on pause, seek, backgrounding and stop. Every stop report carries a position.
 2. Never read Next Up or Resume from the server.
-3. With no connection, append events to a local queue. Replay them through `POST /UserItems/{id}/UserData` with PlaybackPositionTicks, Played and LastPlayedDate.
+3. With no connection, append events to a local queue. Replay them through `POST /UserItems/{id}/UserData` with PlaybackPositionTicks, Played and LastPlayedDate. One failing item does not hold up the rest; an item the server no longer has (HTTP 404) is dropped from the queue.
 4. Conflicts: the newer LastPlayedDate wins.
 5. Offline plays use the server's default limits: under 5 % stores position 0, over 90 % marks played and stores 0.
 6. Opening a list first pushes pending events, then fetches. If the push or fetch fails, show local state marked "not synced".

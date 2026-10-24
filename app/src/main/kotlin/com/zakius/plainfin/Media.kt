@@ -454,7 +454,9 @@ class Housekeeping(context: Context, params: WorkerParameters) : CoroutineWorker
     override suspend fun doWork(): Result {
         val server = App.server
         if (!server.loggedIn) return Result.success()
-        if (!server.flush()) return Result.retry()
+        val unsynced = server.flush()
+        if (!server.loggedIn) return Result.success() // the token was rejected; logging in pushes again
+        if (unsynced != null && transient(unsynced)) return Result.retry()
         // Progress made on other devices reaches offline playback through the stored downloads.
         runCatching {
             val ids = Media.downloads().map { it.item.id }

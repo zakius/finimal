@@ -181,11 +181,10 @@ private fun Bar(title: String, onBack: (() -> Unit)?, actions: @Composable () ->
     actions = { actions() },
 )
 
-@Composable
 private fun loadError(e: Throwable) = when {
     e is InvalidStatusException -> "The server returned an error (${e.status})"
     unreachable(e) -> "Can't reach the server"
-    else -> "Something went wrong loading this"
+    else -> "Something went wrong"
 }
 
 @Composable
@@ -510,8 +509,8 @@ private fun ItemMenu(item: BaseItemDto, expanded: Boolean, onDismiss: () -> Unit
             DropdownMenuItem({ Text("Sync now") }, {
                 onDismiss()
                 scope.launch {
-                    val ok = App.server.flush()
-                    Toast.makeText(ctx, if (ok) "Synced" else "Still can't reach the server", Toast.LENGTH_SHORT).show()
+                    val failure = App.server.flush()
+                    Toast.makeText(ctx, failure?.let(::loadError) ?: "Synced", Toast.LENGTH_SHORT).show()
                     onChanged()
                 }
             })
