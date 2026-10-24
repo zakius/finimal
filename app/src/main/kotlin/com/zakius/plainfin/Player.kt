@@ -658,7 +658,7 @@ private fun Controls(
                                             .setOverrideForType(TrackSelectionOverride(group.mediaTrackGroup, i))
                                             .build()
                                         val audioLang = if (type == C.TRACK_TYPE_AUDIO) f.language else selectedLanguage(player, C.TRACK_TYPE_AUDIO)
-                                        val subLang = if (type == C.TRACK_TYPE_TEXT) f.language.orEmpty() else selectedLanguage(player, C.TRACK_TYPE_TEXT)
+                                        val subLang = if (type == C.TRACK_TYPE_TEXT) f.language else selectedLanguage(player, C.TRACK_TYPE_TEXT)
                                         onTracksChosen(audioLang, subLang)
                                         // Re-read from here so the current subtitle line shows now, not at the next one.
                                         if (type == C.TRACK_TYPE_TEXT) player.seekTo(player.currentPosition)
