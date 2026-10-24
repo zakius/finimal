@@ -16,7 +16,7 @@ A Jellyfin client for Android that goes straight to the library. It prefers a fe
 
 - Kotlin, Jetpack Compose, Media3 with the Jellyfin FFmpeg audio decoder, libass-android for ASS/SSA subtitles, jellyfin-sdk-kotlin, WorkManager.
 - License GPL-3.0. Findroid (GPL-3.0) code may be copied. jellyfin-android is GPL-2.0 without "or later", so it is a reference only.
-- Distribution: GitHub Actions builds a signed APK on each tag and attaches it to a release. Updates come through Obtainium.
+- Distribution: GitHub Actions builds one signed APK per ABI (arm64-v8a, armeabi-v7a, x86_64, x86) on each tag and attaches them to a release. Updates come through Obtainium.
 
 ## Navigation
 

@@ -38,6 +38,15 @@ android {
         }
     }
 
+    // Native libs (libass, ffmpeg) are most of the APK: one APK per ABI, libs compressed for a smaller download.
+    splits.abi {
+        isEnable = true
+        reset()
+        include("arm64-v8a", "armeabi-v7a", "x86_64", "x86")
+        isUniversalApk = false
+    }
+    packaging.jniLibs.useLegacyPackaging = true
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_21
         targetCompatibility = JavaVersion.VERSION_21

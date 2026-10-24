@@ -28,9 +28,11 @@ jobs:
         run: |
           echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
           PLAINFIN_KEYSTORE="$RUNNER_TEMP/release.jks" ./gradlew assembleRelease
-          cp app/build/outputs/apk/release/app-release.apk "plainfin-${GITHUB_REF_NAME}.apk"
+          for f in app/build/outputs/apk/release/app-*-release.apk; do
+            abi=${f#*/app-}; cp "$f" "plainfin-${GITHUB_REF_NAME}-${abi%-release.apk}.apk"
+          done
       - name: Publish release
         if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" "plainfin-${GITHUB_REF_NAME}.apk" --generate-notes
+        run: gh release create "$GITHUB_REF_NAME" plainfin-*.apk --generate-notes
