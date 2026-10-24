@@ -22,6 +22,7 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -49,6 +50,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -128,8 +130,8 @@ private fun <T> Loaded(result: Result<T>?, onDownloads: (() -> Unit)? = null, co
 
 @Composable
 fun LoginScreen(modifier: Modifier, onDone: () -> Unit) {
-    var url by remember { mutableStateOf(App.prefs.baseUrl ?: "https://") }
-    var user by remember { mutableStateOf("") }
+    var url by rememberSaveable { mutableStateOf(App.prefs.baseUrl ?: "https://") }
+    var user by rememberSaveable { mutableStateOf("") }
     var pass by remember { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
@@ -181,10 +183,10 @@ fun LibrariesScreen(modifier: Modifier, push: (Screen) -> Unit) {
 /** A library's poster grid; with a null id it searches every library. */
 @Composable
 fun LibraryScreen(modifier: Modifier, screen: Screen.Library, push: (Screen) -> Unit, pop: () -> Unit) {
-    var sort by remember { mutableStateOf(Sort.NAME) }
-    var unplayed by remember { mutableStateOf(false) }
-    var search by remember { mutableStateOf("") }
-    var query by remember { mutableStateOf("") }
+    var sort by rememberSaveable { mutableStateOf(Sort.NAME) }
+    var unplayed by rememberSaveable { mutableStateOf(false) }
+    var search by rememberSaveable { mutableStateOf("") }
+    var query by rememberSaveable { mutableStateOf("") }
     LaunchedEffect(search) { delay(400); query = search }
     val searchOnly = screen.id == null
     val items = if (searchOnly && query.isBlank()) Result.success(emptyList())
@@ -283,6 +285,7 @@ fun SeasonScreen(modifier: Modifier, screen: Screen.Season, push: (Screen) -> Un
     val ctx = LocalContext.current
     val statuses = rememberDownloadStatuses()
     var queuing by remember { mutableStateOf(false) }
+    val listState = rememberLazyListState() // outside Loaded, so a refresh after "Mark played" keeps the scroll
     Column(modifier.fillMaxSize()) {
         Bar(screen.name, pop) {
             TextButton(enabled = !queuing, onClick = {
@@ -291,7 +294,7 @@ fun SeasonScreen(modifier: Modifier, screen: Screen.Season, push: (Screen) -> Un
             }) { Text(if (queuing) "Queuing…" else "Download season") }
         }
         Loaded(episodes, onDownloads = { push(Screen.Downloads) }) { list ->
-            LazyColumn {
+            LazyColumn(state = listState) {
                 items(list, key = { it.id }) { ep ->
                     EpisodeRow(
                         ep,

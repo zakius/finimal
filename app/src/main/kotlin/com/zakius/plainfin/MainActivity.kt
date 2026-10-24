@@ -20,6 +20,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.key
 import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.toMutableStateList
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -67,16 +68,20 @@ private fun Root() {
         )
     ) { listOf(if (App.server.loggedIn) Screen.Libraries else Screen.Login).toMutableStateList() }
 
+    // Each stack entry keeps its UI state (scroll, sort, search) while covered; leaving the stack drops it.
+    val saved = rememberSaveableStateHolder()
+    fun keyOf(i: Int) = "$i:${stack[i]}"
     fun push(s: Screen) = stack.add(s)
-    fun pop() { if (stack.size > 1) stack.removeAt(stack.lastIndex) }
-    fun reset(s: Screen) { stack.clear(); stack.add(s) }
+    fun pop() { if (stack.size > 1) { saved.removeState(keyOf(stack.lastIndex)); stack.removeAt(stack.lastIndex) } }
+    fun reset(s: Screen) { stack.indices.forEach { saved.removeState(keyOf(it)) }; stack.clear(); stack.add(s) }
 
     BackHandler(stack.size > 1) { pop() }
     LaunchedEffect(App.server.sessionExpired) { if (App.server.sessionExpired) reset(Screen.Login) }
     val top = stack.last()
+    val topKey = keyOf(stack.lastIndex)
     val padded = Modifier.safeDrawingPadding()
     // key() gives each screen its own state, so the next episode never inherits the previous player.
-    key(top) { when (top) {
+    key(topKey) { saved.SaveableStateProvider(topKey) { when (top) {
         Screen.Login -> LoginScreen(padded) { reset(Screen.Libraries) }
         Screen.Libraries -> LibrariesScreen(padded, ::push)
         Screen.Downloads -> DownloadsScreen(padded, ::push, ::pop)
@@ -86,5 +91,5 @@ private fun Root() {
         is Screen.Season -> SeasonScreen(padded, top, ::push, ::pop)
         // "Play next" replaces the player instead of stacking players.
         is Screen.Play -> PlayerScreen(top.itemId, top.fromStart, ::pop) { next -> pop(); push(Screen.Play(next)) }
-    } }
+    } } }
 }
