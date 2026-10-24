@@ -207,21 +207,22 @@ class Server(context: Context) {
     }
 
     /**
-     * Saves the stop locally before returning, so a list opened right after already shows it, then
-     * reports it in the background. Always sends a position: without one the server marks the item
-     * played at 0.
+     * Queues the local save on [App.disk] before returning, so a list opened right after flushes it,
+     * then reports the stop. Always sends a position: without one the server marks the item played at 0.
      */
     fun reportStop(id: String, mediaSourceId: String, positionTicks: Long, runtimeTicks: Long?, serverPlayed: Boolean) {
-        val previous = App.pending.get(id)?.played ?: serverPlayed
-        val state = ResumeRules.onStop(PlayState(0, previous, null), positionTicks, runtimeTicks, System.currentTimeMillis())
-        record(id, state)
-        ProcessLifecycleOwner.get().lifecycleScope.launch(Dispatchers.IO) {
-            reports.withLock { runCatching {
-                api.sessionApi.reportPlaybackStopped(
-                    PlaybackStopInfo(itemId = UUID.fromString(id), mediaSourceId = mediaSourceId, positionTicks = positionTicks, failed = false)
-                )
-            }.onSuccess { App.pending.confirm(id, state) } }
-            Housekeeping.enqueue(App.instance)
+        ProcessLifecycleOwner.get().lifecycleScope.launch(App.disk) {
+            val previous = App.pending.get(id)?.played ?: serverPlayed
+            val state = ResumeRules.onStop(PlayState(0, previous, null), positionTicks, runtimeTicks, System.currentTimeMillis())
+            record(id, state)
+            io {
+                reports.withLock { runCatching {
+                    api.sessionApi.reportPlaybackStopped(
+                        PlaybackStopInfo(itemId = UUID.fromString(id), mediaSourceId = mediaSourceId, positionTicks = positionTicks, failed = false)
+                    )
+                }.onSuccess { App.pending.confirm(id, state) } }
+                Housekeeping.enqueue(App.instance)
+            }
         }
     }
 
@@ -230,7 +231,7 @@ class Server(context: Context) {
         private set
 
     /** Every local play-state change: queued for the server and kept with the download for offline resume. */
-    private fun record(id: String, state: PlayState) {
+    private suspend fun record(id: String, state: PlayState): Unit = withContext(App.disk) {
         App.pending.put(id, state)
         Media.rememberState(id, state)
         localChanges++
@@ -248,7 +249,7 @@ class Server(context: Context) {
      */
     suspend fun flush(): Throwable? = io {
         var failure: Throwable? = null
-        for ((id, local) in App.pending.all()) {
+        for ((id, local) in withContext(App.disk) { App.pending.all() }) {
             runCatching {
                 val uuid = UUID.fromString(id)
                 val server = userData(uuid).toPlayState()

@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import androidx.core.content.edit
 import java.io.File
+import kotlinx.coroutines.Dispatchers
 import plainfin.core.PendingStore
 
 /** Process-wide singletons. There is one server and one user, so nothing here needs scoping. */
@@ -22,6 +23,12 @@ class App : Application() {
         val prefs by lazy { Prefs(instance.getSharedPreferences("plainfin", Context.MODE_PRIVATE)) }
         val server by lazy { Server(instance) }
         val pending by lazy { PendingStore(File(instance.filesDir, "pending.json")) }
+
+        /**
+         * IO one task at a time, in the order submitted. Play-state records and [Server.flush]'s read
+         * share it, so a stop recorded on leaving the player lands before the next list flushes.
+         */
+        val disk = Dispatchers.IO.limitedParallelism(1)
     }
 }
 

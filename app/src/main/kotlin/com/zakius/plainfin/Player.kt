@@ -73,6 +73,8 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.ProcessLifecycleOwner
+import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
@@ -129,11 +131,13 @@ fun PlayerScreen(itemId: String, fromStart: Boolean, onBack: () -> Unit, onPlay:
         val server = App.server
         val loaded = runCatching { server.flush(); server.item(itemId) }.getOrNull()
         online = loaded != null
-        // A finished download plays as downloaded, even if the server's file changed since.
-        val downloaded = Media.download(itemId)?.item
-        item = when {
-            downloaded != null && Media.isComplete(Media.key(downloaded)) -> downloaded.copy(userData = loaded?.userData ?: downloaded.userData)
-            else -> loaded ?: downloaded
+        item = withContext(Dispatchers.IO) {
+            // A finished download plays as downloaded, even if the server's file changed since.
+            val downloaded = Media.download(itemId)?.item
+            when {
+                downloaded != null && Media.isComplete(Media.key(downloaded)) -> downloaded.copy(userData = loaded?.userData ?: downloaded.userData)
+                else -> loaded ?: downloaded
+            }
         }
         if (item == null) error = "Server unreachable and this item is not downloaded."
     }
@@ -144,7 +148,7 @@ fun PlayerScreen(itemId: String, fromStart: Boolean, onBack: () -> Unit, onPlay:
         val seriesId = it.seriesId?.toString()
         if (it.type == BaseItemKind.EPISODE && seriesId != null) {
             siblings = (if (online) runCatching { server.episodes(seriesId) }.getOrNull() else null)
-                ?: Media.downloads().map { d -> d.item }.filter { d -> d.seriesId == it.seriesId }
+                ?: withContext(Dispatchers.IO) { Media.downloads() }.map { d -> d.item }.filter { d -> d.seriesId == it.seriesId }
                     .sortedWith(compareBy({ d -> d.parentIndexNumber }, { d -> d.indexNumber }))
         }
     }
@@ -265,10 +269,13 @@ private fun Playback(
 
             override fun onPlaybackStateChanged(state: Int) {
                 if (state == Player.STATE_READY && !transcoding) {
-                    // The player only reads the cache, so the length may not be recorded yet; the server knows it.
-                    val len = Media.contentLength(Media.key(item)).takeIf { it > 0 } ?: source.size ?: 0
                     val fraction = player.currentPosition.toDouble() / player.duration.coerceAtLeast(1)
-                    Media.startBuffer(item, if (len > 0) (len * (fraction - 0.05)).toLong().coerceAtLeast(0) else 0)
+                    // On App.disk, so a start never lands after the stop on leaving.
+                    scope.launch(App.disk) {
+                        // The player only reads the cache, so the length may not be recorded yet; the server knows it.
+                        val len = Media.contentLength(Media.key(item)).takeIf { it > 0 } ?: source.size ?: 0
+                        Media.startBuffer(item, if (len > 0) (len * (fraction - 0.05)).toLong().coerceAtLeast(0) else 0)
+                    }
                 }
                 if (state == Player.STATE_ENDED && !ended) {
                     ended = true
@@ -298,7 +305,7 @@ private fun Playback(
             if (!ended) {
                 App.server.reportStop(id, sourceId, positionTicks(), runtimeTicks, serverPlayed)
             }
-            Media.stopBuffer(id)
+            ProcessLifecycleOwner.get().lifecycleScope.launch(App.disk) { Media.stopBuffer(id) }
             Media.playing = null
             player.release()
         }
