@@ -529,19 +529,18 @@ class Housekeeping(context: Context, params: WorkerParameters) : CoroutineWorker
             val ids = Media.downloads().map { it.item.id }
             if (ids.isNotEmpty()) server.userData(ids).forEach { (id, data) -> Media.rememberState(id.toString(), data.toPlayState()) }
         }
-        runCatching {
-            for ((seriesId, n) in App.prefs.keepNextSeries()) {
-                val episodes = server.episodes(seriesId).filter { it.parentIndexNumber != 0 }
-                val refs = episodes.map { EpisodeRef(it.id.toString(), it.localState().first) }
-                val window = keepNextWindow(refs, n)
-                val have = Media.downloads().associateBy { it.item.id.toString() }
-                window.filter { it !in have }.forEach { Media.startDownload(server.item(it), auto = true) }
-                val auto = have.filterValues { it.auto }.keys
-                keepNextDeletions(auto, refs, window).forEach(Media::deleteDownload)
-            }
-        }.onFailure { return Result.retry() }
+        var retry = false
+        for ((seriesId, n) in App.prefs.keepNextSeries()) runCatching {
+            val episodes = server.episodes(seriesId).filter { it.parentIndexNumber != 0 }
+            val refs = episodes.map { EpisodeRef(it.id.toString(), it.localState().first) }
+            val window = keepNextWindow(refs, n)
+            val have = Media.downloads().associateBy { it.item.id.toString() }
+            window.filter { it !in have }.forEach { Media.startDownload(server.item(it), auto = true) }
+            val auto = have.filterValues { it.auto }.keys
+            keepNextDeletions(auto, refs, window).forEach(Media::deleteDownload)
+        }.onFailure { if (transient(it)) retry = true } // a series gone from the server would fail every retry
         Media.evict()
-        return Result.success()
+        return if (retry) Result.retry() else Result.success()
     }
 
     companion object {
