@@ -98,13 +98,16 @@ private fun <T> loadFresh(vararg keys: Any?, block: suspend () -> T): Result<T>?
             .onFailure { if (it is InvalidStatusException && it.status == 401) App.server.expire() }
     }.value
 
-/** Download statuses, refreshed every second while the screen is shown; null until first read. */
+/**
+ * Download statuses while the screen is shown, null until first read. Re-read on every download
+ * change, and polled every second while one runs, else every 5 s.
+ */
 @Composable
 fun rememberDownloadStatuses(): Map<String, Media.DownloadStatus>? =
-    produceState<Map<String, Media.DownloadStatus>?>(null) {
+    produceState<Map<String, Media.DownloadStatus>?>(null, Media.changes) {
         while (true) {
             value = withContext(Dispatchers.IO) { Media.downloadStatuses() }
-            delay(1_000)
+            delay(if (value.orEmpty().values.any { it.fill == Media.Fill.RUNNING }) 1_000 else 5_000)
         }
     }.value
 

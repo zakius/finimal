@@ -10,6 +10,9 @@ import android.content.Context
 import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
 import android.os.Build
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.setValue
 import androidx.core.app.NotificationCompat
 import androidx.media3.common.C
 import androidx.media3.database.StandaloneDatabaseProvider
@@ -147,7 +150,14 @@ object Media {
 
     private val downloadsDir get() = File(ctx.filesDir, "downloads").apply { mkdirs() }
     private fun metaFile(id: String) = File(downloadsDir, "$id.json")
-    private fun write(d: Download) = metaFile(d.item.id.toString()).writeText(json.encodeToString(d))
+    private fun write(d: Download) {
+        metaFile(d.item.id.toString()).writeText(json.encodeToString(d))
+        changes++
+    }
+
+    /** Bumped on every download change, so open screens re-read statuses at once rather than at the next poll. */
+    var changes by mutableIntStateOf(0)
+        private set
     fun subsDir(id: String) = File(ctx.filesDir, "subs/$id")
 
     fun downloads(): List<Download> =
@@ -234,6 +244,7 @@ object Media {
     fun deleteDownload(id: String) {
         val key = download(id)?.let { key(it.item) }
         metaFile(id).delete()
+        changes++
         if (downloading == id) kickDownloads(restart = true)
         subsDir(id).deleteRecursively()
         if (key != null && playing != key) cache.removeResource(key)
