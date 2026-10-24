@@ -47,6 +47,7 @@ Libraries → poster grid → series → seasons → episodes.
 - Player menu: speed, tracks, subtitle size, rotation lock. The current choice is ticked. Speed carries over to the next episode until the app is closed; it is not saved. Subtitle delay is not built yet: Media3 has no subtitle offset, so it needs its own cue timing. Subtitle size applies to text subtitles; ASS keeps its authored size.
 - Text subtitles (SRT, VTT, embedded text tracks) are white with a black outline and no background box. The system caption style is ignored. ASS keeps its authored style.
 - A white spinner shows while the item loads and while the player buffers. It does not block taps or gestures.
+- An item that fails to load and is not downloaded says why like a list does, with Retry and Back.
 - A playback error shows a short sentence for common causes (network, timeout, HTTP status, missing file, unsupported format) and a Retry button. Other errors show a generic sentence with the Media3 error code in small text.
 - Theme follows the system and uses Material You colors.
 

@@ -97,6 +97,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.jellyfin.sdk.api.client.exception.InvalidStatusException
 import org.jellyfin.sdk.model.api.BaseItemDto
 import org.jellyfin.sdk.model.api.BaseItemKind
 import org.jellyfin.sdk.model.api.MediaSegmentDto
@@ -125,11 +126,15 @@ fun PlayerScreen(itemId: String, fromStart: Boolean, onBack: () -> Unit, onPlay:
     var item by remember { mutableStateOf<BaseItemDto?>(null) }
     var siblings by remember { mutableStateOf<List<BaseItemDto>>(emptyList()) }
     var online by remember { mutableStateOf(true) }
-    var error by remember { mutableStateOf<String?>(null) }
+    var error by remember { mutableStateOf<Throwable?>(null) }
     var refresh by remember { mutableIntStateOf(0) }
-    LaunchedEffect(itemId) {
+    var retry by remember { mutableIntStateOf(0) }
+    LaunchedEffect(itemId, retry) {
+        error = null
         val server = App.server
-        val loaded = runCatching { server.flush(); server.item(itemId) }.getOrNull()
+        val result = runCatching { server.flush(); server.item(itemId) }
+            .onFailure { if (it is InvalidStatusException && it.status == 401) server.expire() }
+        val loaded = result.getOrNull()
         online = loaded != null
         item = withContext(Dispatchers.IO) {
             // A finished download plays as downloaded, even if the server's file changed since.
@@ -139,7 +144,7 @@ fun PlayerScreen(itemId: String, fromStart: Boolean, onBack: () -> Unit, onPlay:
                 else -> loaded ?: downloaded
             }
         }
-        if (item == null) error = "Server unreachable and this item is not downloaded."
+        if (item == null) error = result.exceptionOrNull()
     }
     // Re-fetched after "Mark played" in the episode list.
     LaunchedEffect(item, refresh) {
@@ -154,9 +159,11 @@ fun PlayerScreen(itemId: String, fromStart: Boolean, onBack: () -> Unit, onPlay:
     }
     val current = item
     when {
-        error != null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Text(error!!)
+        error != null -> Column(Modifier.fillMaxSize().padding(24.dp), Arrangement.Center, Alignment.CenterHorizontally) {
+            val e = error!!
+            ErrorText(loadError(e), e.message ?: e.javaClass.simpleName)
+            Row(Modifier.padding(top = 12.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Button(onClick = { retry++ }) { Text("Retry") }
                 TextButton(onClick = onBack) { Text("Back") }
             }
         }

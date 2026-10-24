@@ -200,7 +200,7 @@ private fun Bar(title: String, onBack: (() -> Unit)?, actions: @Composable () ->
     actions = { actions() },
 )
 
-private fun loadError(e: Throwable) = when {
+fun loadError(e: Throwable) = when {
     e is InvalidStatusException -> "The server returned an error (${e.status})"
     unreachable(e) -> "Can't reach the server"
     else -> "Something went wrong"
