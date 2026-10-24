@@ -33,6 +33,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilledTonalButton
@@ -130,7 +131,9 @@ fun PlayerScreen(itemId: String, fromStart: Boolean, onBack: () -> Unit, onPlay:
                 TextButton(onClick = onBack) { Text("Back") }
             }
         }
-        current == null -> Box(Modifier.fillMaxSize().background(Color.Black))
+        current == null -> Box(Modifier.fillMaxSize().background(Color.Black), contentAlignment = Alignment.Center) {
+            CircularProgressIndicator(color = Color.White)
+        }
         else -> Playback(current, siblings, fromStart, online, onBack, onPlay)
     }
 }
@@ -405,6 +408,7 @@ private fun VideoSurface(
     var duration by remember { mutableLongStateOf(0L) }
     var buffered by remember { mutableLongStateOf(0L) }
     var playing by remember { mutableStateOf(false) }
+    var waiting by remember { mutableStateOf(true) }
     var overlay by remember { mutableStateOf<String?>(null) }
     var crop by remember { mutableStateOf(false) }
     var scrubTarget by remember { mutableStateOf<Long?>(null) }
@@ -417,6 +421,8 @@ private fun VideoSurface(
             duration = player.duration.coerceAtLeast(0)
             buffered = maxOf(player.bufferedPosition, cacheKey?.let { Media.cachedUntilMs(it, position, duration) } ?: 0)
             playing = player.isPlaying
+            // Idle is the time before the first prepare (subtitles are fetched first), or after an error.
+            waiting = player.playbackState == Player.STATE_BUFFERING || player.playbackState == Player.STATE_IDLE
             if (controls && playing && System.currentTimeMillis() - lastInteraction > 3_000) controls = false
             delay(250)
         }
@@ -516,6 +522,8 @@ private fun VideoSurface(
             Text(it, color = Color.White, style = MaterialTheme.typography.titleLarge,
                 modifier = Modifier.align(Alignment.Center).background(Color(0x99000000), MaterialTheme.shapes.small).padding(12.dp))
         }
+
+        if (waiting && playerError == null && !ended) CircularProgressIndicator(Modifier.align(Alignment.Center), color = Color.White)
 
         if (introRange != null && position in introRange && !ended) {
             FilledTonalButton(onClick = { player.seekTo(introRange.last + 1_000) },
