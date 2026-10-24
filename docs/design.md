@@ -59,6 +59,8 @@ There is one persistent on-disk cache. The key is the item ID plus the media sou
   - Anchor: the last played episode in season order, specials excluded.
   - Checked when the app opens, when an episode ends, and when the network becomes unmetered.
   - It deletes only episodes it downloaded itself, after they are marked played.
+- Deleting a download asks first, naming the item. A dialog, not undo: the bytes go at once.
+- "Download all" (series) and "Download season" say how many episodes are new, and their total size when the server lists every file's size, before queuing. With nothing new, a toast says so. "Download season" waits for the season to load.
 - One Downloads screen shows the queue, pause/resume, delete and storage use. It is also the offline screen: when the server cannot be reached, only downloads are browsable.
 - A running download shows a notification; tapping it opens the Downloads screen. The notification permission (Android 13+) is asked when the user first queues a download, not at start. Denying it does not stop downloads.
 

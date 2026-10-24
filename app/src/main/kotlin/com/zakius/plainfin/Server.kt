@@ -136,12 +136,12 @@ class Server(context: Context) {
     suspend fun seasons(seriesId: String): List<BaseItemDto> =
         io { api.showApi.getSeasons(UUID.fromString(seriesId), userId, enableUserData = true).content.items }
 
-    /** All episodes of a series in season order, or only one season's. */
-    suspend fun episodes(seriesId: String, seasonId: String? = null): List<BaseItemDto> =
+    /** All episodes of a series in season order, or only one season's. [sources] adds media sources (file sizes). */
+    suspend fun episodes(seriesId: String, seasonId: String? = null, sources: Boolean = false): List<BaseItemDto> =
         io { api.showApi.getEpisodes(
             UUID.fromString(seriesId),
             userId,
-            fields = listOf(ItemFields.OVERVIEW),
+            fields = listOfNotNull(ItemFields.OVERVIEW, ItemFields.MEDIA_SOURCES.takeIf { sources }),
             seasonId = seasonId?.let(UUID::fromString),
             enableUserData = true,
         ).content.items }
