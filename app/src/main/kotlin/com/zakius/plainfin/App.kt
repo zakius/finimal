@@ -61,6 +61,8 @@ class Prefs(private val p: SharedPreferences) {
     var gestureFullscreen by bool("gestureFullscreen", true)
     var doubleTapSeconds by int("doubleTapSeconds", 10)
     var subtitleScale by int("subtitleScale", 100)
+    /** Applied only while a wireless output is connected; see [AudioDelay]. */
+    var audioDelayMs by int("audioDelayMs", 0)
     var storageIndex by int("storageIndex", 0)
 
     /** 0 means "keep next N" is off for the series. */

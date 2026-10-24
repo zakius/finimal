@@ -658,6 +658,9 @@ fun SettingsScreen(modifier: Modifier, pop: () -> Unit, onLoggedOut: () -> Unit)
                     }
                 }
 
+                Text("Playback", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(16.dp))
+                Stepper("Wireless audio delay (ms), for Bluetooth headphones and speakers", p.audioDelayMs, AUDIO_DELAYS_MS) { AudioDelay.set(it); refresh++ }
+
                 Text("Gestures", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(16.dp))
                 toggle("Brightness / volume swipes", p.gestureLevels) { p.gestureLevels = it }
                 toggle("Brightness on the left (volume on the right)", p.brightnessOnLeft, enabled = p.gestureLevels) { p.brightnessOnLeft = it }

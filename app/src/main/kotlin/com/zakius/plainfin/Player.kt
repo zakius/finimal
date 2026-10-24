@@ -114,6 +114,9 @@ private const val SEEK_MS_PER_WIDTH = 100_000f
 /** Chosen speed, kept for the rest of the session so "Play next" does not reset it. */
 private var sessionSpeed = 1f
 
+/** Choices for [AudioDelay]; negative values are for audio that arrives early. */
+val AUDIO_DELAYS_MS = (-200..500 step 50).toList()
+
 // Material icons missing from material-icons-core; extended would add thousands of classes for five paths.
 private fun icon(name: String, path: String) = ImageVector.Builder(name, 24.dp, 24.dp, 24f, 24f)
     .addPath(addPathNodes(path), fill = SolidColor(Color.Black)).build()
@@ -402,7 +405,8 @@ private fun Playback(
 }
 
 private fun buildPlayer(context: Context, view: PlayerView, transcoding: Boolean): ExoPlayer {
-    val renderers = DefaultRenderersFactory(context).setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
+    AudioDelay.watch(context)
+    val renderers = AudioDelay.renderers(context).setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
         .setEnableDecoderFallback(true) // another device decoder before giving up and transcoding
     // The RAM buffer stays modest; buffering to the end happens on disk through FillWorker.
     // A 15 s back buffer lets skip-back and the subtitle re-read seek stay in memory instead of reloading.
@@ -663,6 +667,7 @@ private fun Controls(
                             DropdownMenuItem({ Text("Audio") }, { sub = "audio" })
                             DropdownMenuItem({ Text("Subtitles") }, { sub = "text" })
                             DropdownMenuItem({ Text("Subtitle size: ${App.prefs.subtitleScale}%") }, { sub = "size" })
+                            DropdownMenuItem({ Text("Wireless audio delay: ${App.prefs.audioDelayMs} ms") }, { sub = "delay" })
                             DropdownMenuItem({ Text(if (rotationLocked) "Unlock rotation" else "Lock rotation") }, { onRotationLock(); menu = false })
                         }
                         "speed" -> listOf(0.5f, 0.75f, 1f, 1.25f, 1.5f, 2f).forEach { s ->
@@ -672,6 +677,14 @@ private fun Controls(
                             Choice("$s%", App.prefs.subtitleScale == s) {
                                 App.prefs.subtitleScale = s
                                 subtitleView?.setFractionalTextSize(SubtitleView.DEFAULT_TEXT_SIZE_FRACTION * s / 100f)
+                                menu = false; sub = null
+                            }
+                        }
+                        "delay" -> AUDIO_DELAYS_MS.forEach { d ->
+                            Choice("$d ms", App.prefs.audioDelayMs == d) {
+                                AudioDelay.set(d)
+                                // The audio clock never moves backwards on its own; a seek applies a larger delay at once.
+                                player.seekTo(player.currentPosition)
                                 menu = false; sub = null
                             }
                         }

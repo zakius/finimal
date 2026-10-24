@@ -44,12 +44,13 @@ Libraries → poster grid → series → seasons → episodes.
 - Audio and subtitle choices are remembered per series.
 - Media segments show a "Skip intro" button. It never skips on its own.
 - On-screen controls: back, menu, fullscreen; rewind and forward by the double-tap step, play/pause, and next episode when there is one.
-- Player menu: speed, tracks, subtitle size, rotation lock. The current choice is ticked. Speed carries over to the next episode until the app is closed; it is not saved. Subtitle delay is not built yet: Media3 has no subtitle offset, so it needs its own cue timing. Subtitle size applies to text subtitles; ASS keeps its authored size.
+- Player menu: speed, tracks, subtitle size, wireless audio delay, rotation lock. The current choice is ticked. Speed carries over to the next episode until the app is closed; it is not saved. Subtitle delay is not built yet: Media3 has no subtitle offset, so it needs its own cue timing. Subtitle size applies to text subtitles; ASS keeps its authored size.
 - Text subtitles (SRT, VTT, embedded text tracks) are white with a black outline and no background box. The system caption style is ignored. ASS keeps its authored style.
 - A white spinner shows while the item loads and while the player buffers. It does not block taps or gestures.
 - An item that fails to load and is not downloaded says why like a list does, with Retry and Back.
 - A finished download waits at most 2 s for the server before it plays offline.
 - A playback error shows a short sentence for common causes (network, timeout, HTTP status, missing file, unsupported format) and a Retry button. Other errors show a generic sentence with the Media3 error code in small text.
+- Wireless audio delay (−200 to 500 ms, also in Settings) holds video back to match Bluetooth headphones and speakers. It applies only while a wireless output is connected, so the speaker and wired outputs stay in sync. It works by reporting the audio clock that much behind, which the video follows.
 - Theme follows the system and uses Material You colors.
 
 ## Settings

@@ -13,6 +13,7 @@ Other clients sometimes restart a series from episode 1. The cause is the server
 - Buffers to the end of the episode on disk, so a weak connection doesn't stall playback.
 - Downloads with a queue, pause and resume, SD card storage, and "keep next N episodes downloaded" per series.
 - Offline playback and progress sync once the server is reachable again.
+- A wireless audio delay setting to match Bluetooth headphones and speakers.
 - Fullscreen gestures for brightness, volume, seek, double-tap skip and pinch to crop. Each one can be turned off.
 - A "Skip intro" button from the server's media segments. It never skips on its own.
 - No Google Play Services, so it runs on Huawei/EMUI devices.
