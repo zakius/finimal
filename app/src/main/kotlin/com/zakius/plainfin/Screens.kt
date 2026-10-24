@@ -608,6 +608,18 @@ fun SettingsScreen(modifier: Modifier, pop: () -> Unit, onLoggedOut: () -> Unit)
         Text("${options[i]}")
         TextButton(onClick = { set(options[i + 1]); refresh++ }, enabled = i < options.lastIndex) { Text("+") }
     }
+    val scope = rememberCoroutineScope()
+    var moveTo by remember { mutableStateOf<Int?>(null) }
+    var moving by remember { mutableStateOf(false) }
+    moveTo?.let { target ->
+        val count = remember { Media.downloads().size }
+        val where = if (target > 0) "the SD card" else "internal storage"
+        Confirm("Store on $where? This " + (if (count == 0) "" else "deletes your $count download${if (count == 1) "" else "s"} and ") +
+            "clears the buffer cache; nothing is moved.", "Switch", {
+            moving = true
+            scope.launch { withContext(Dispatchers.IO) { Media.switchStorage(target) }; moving = false; refresh++ }
+        }, { moveTo = null })
+    }
     var confirmLogout by remember { mutableStateOf(false) }
     if (confirmLogout) {
         val unsynced = App.pending.all().size
@@ -626,8 +638,8 @@ fun SettingsScreen(modifier: Modifier, pop: () -> Unit, onLoggedOut: () -> Unit)
                     stepper("Buffer cache limit (GB)", p.cacheLimitGb, listOf(1, 2, 5, 10, 20, 50, 100)) { p.cacheLimitGb = it }
                     val roots = Media.storageRoots()
                     if (roots.size > 1) {
-                        toggle("Store on SD card (after restart; existing downloads stay where they are)", p.storageIndex > 0) {
-                            p.storageIndex = if (it) 1 else 0
+                        toggle("Store on SD card (switching deletes downloads and the buffer)", p.storageIndex > 0, enabled = !moving) {
+                            moveTo = if (it) 1 else 0
                         }
                     }
 

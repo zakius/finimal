@@ -66,7 +66,7 @@ There is one persistent on-disk cache. The key is the item ID plus the media sou
 - Buffered entries are evicted oldest-first above a size limit (default 5 GB; the setting steps through 1, 2, 5, 10, 20, 50, 100 GB). Pinned entries are removed only by the user.
 - An interrupted fill resumes from the last byte, including after a crash or reboot.
 - Two toggles, both off by default: "buffer to end on metered" and "download on metered". They follow Android's metered flag, not wifi/cellular. With buffering off on a metered network, the player uses its normal buffer.
-- Downloads are original files in app-specific storage. The SD card can be selected.
+- Downloads are original files in app-specific storage. The SD card can be selected. Switching applies at once and asks first: it deletes every download and the buffer cache instead of moving them (bytes left on the old volume would be orphaned, and the downloads would silently fetch again).
 - "Keep next N downloaded" is per series and off by default.
   - Anchor: the last played episode in season order, specials excluded.
   - Checked when the app opens, when an episode ends, and when the network becomes unmetered.

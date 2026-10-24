@@ -61,9 +61,10 @@ import plainfin.core.keepNextWindow
  * a cache fill with a metadata file under `downloads/`; that file is what "pinned" means.
  */
 object Media {
-    lateinit var cache: SimpleCache
+    @Volatile lateinit var cache: SimpleCache
         private set
     private lateinit var ctx: Context
+    private lateinit var db: StandaloneDatabaseProvider
     val http = OkHttpClient()
     private val json = Json { ignoreUnknownKeys = true }
 
@@ -79,18 +80,46 @@ object Media {
     /** Cache key of what the player has open; eviction never touches it. */
     @Volatile var playing: String? = null
 
+    /** Tags every buffer fill, so [switchStorage] can stop them all. */
+    private const val FILL_TAG = "fill"
+
     fun onAppStart(context: Context) {
         ctx = context
-        cache = SimpleCache(File(storageRoot(), "media"), NoOpCacheEvictor(), StandaloneDatabaseProvider(context))
+        db = StandaloneDatabaseProvider(context)
+        cache = openCache()
         // Builds before the queue ran one job per download; those would run alongside it.
         downloads().forEach { WorkManager.getInstance(context).cancelUniqueWork("fill-${it.item.id}") }
         kickDownloads(restart = false)
         Housekeeping.enqueue(context)
     }
 
-    /** App-specific storage; index 1+ are removable volumes. Takes effect on the next start. */
+    /** App-specific storage; index 1+ are removable volumes. */
     fun storageRoots(): List<File> = ctx.getExternalFilesDirs(null).filterNotNull().ifEmpty { listOf(ctx.filesDir) }
     private fun storageRoot() = storageRoots().getOrElse(App.prefs.storageIndex) { storageRoots()[0] }
+    private fun cacheDir() = File(storageRoot(), "media")
+    // Each cache folder has its own UID, and the shared database keeps one table per UID.
+    private fun openCache() = SimpleCache(cacheDir(), NoOpCacheEvictor(), db)
+
+    /**
+     * Moves storage to root [index] at once. Bytes are not copied: every download and the buffer
+     * cache are deleted, so nothing is orphaned on the old root or downloaded again unasked.
+     * Deletes many files: call off the main thread.
+     */
+    @Synchronized
+    fun switchStorage(index: Int) {
+        val wm = WorkManager.getInstance(ctx)
+        wm.cancelUniqueWork("downloads")
+        wm.cancelAllWorkByTag(FILL_TAG)
+        downloads().forEach { val id = it.item.id.toString(); metaFile(id).delete(); subsDir(id).deleteRecursively() }
+        changes++
+        val old = cache
+        val oldDir = cacheDir()
+        App.prefs.storageIndex = index
+        // ponytail: a cancelled worker still mid-write fails on the released cache rather than being awaited.
+        old.release()
+        SimpleCache.delete(oldDir, db)
+        cache = openCache()
+    }
 
     /** Plain HTTP plus file:// for downloaded subtitles. */
     fun upstreamFactory() = DefaultDataSource.Factory(ctx, OkHttpDataSource.Factory(http))
@@ -324,6 +353,7 @@ object Media {
         val source = item.mediaSources?.firstOrNull() ?: return
         val id = item.id.toString()
         val request = OneTimeWorkRequestBuilder<FillWorker>()
+            .addTag(FILL_TAG)
             .setInputData(workDataOf("key" to key(item), "url" to App.server.streamUrl(id, source.id!!), "position" to position))
             .setConstraints(Constraints(requiredNetworkType = if (App.prefs.bufferOnMetered) NetworkType.CONNECTED else NetworkType.UNMETERED))
             .build()
