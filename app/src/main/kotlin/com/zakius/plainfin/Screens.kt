@@ -1,5 +1,13 @@
 package com.zakius.plainfin
 
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.foundation.lazy.grid.LazyGridState
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.DisposableEffect
+import android.os.Looper
+import android.os.Handler
+import android.net.Network
+import android.net.ConnectivityManager
 import android.content.Context
 import android.widget.Toast
 import androidx.compose.foundation.background
@@ -227,12 +235,33 @@ fun ErrorText(sentence: String, raw: String?, color: Color = Color.Unspecified) 
     raw?.let { Text(it, color = color, style = MaterialTheme.typography.bodySmall) }
 }
 
+/**
+ * Retries once a different network comes up (back on wifi, out of a dead zone). The network that
+ * was already up is skipped: the system reports it at once, and retrying on it would only fail again.
+ */
+@Composable
+private fun RetryOnNewNetwork(onRetry: () -> Unit) {
+    val context = LocalContext.current
+    val retry by rememberUpdatedState(onRetry)
+    DisposableEffect(Unit) {
+        val cm = context.getSystemService(ConnectivityManager::class.java)
+        val initial = cm.activeNetwork
+        val main = Handler(Looper.getMainLooper())
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) { if (network != initial) main.post { retry() } }
+        }
+        cm.registerDefaultNetworkCallback(callback)
+        onDispose { cm.unregisterNetworkCallback(callback) }
+    }
+}
+
 @Composable
 private fun <T> Loaded(result: Result<T>?, onRetry: () -> Unit, onDownloads: () -> Unit, content: @Composable (T) -> Unit) {
     when {
         result == null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("Loading…") }
         result.isFailure -> Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
             val e = result.exceptionOrNull()!!
+            if (unreachable(e)) RetryOnNewNetwork(onRetry)
             ErrorText(loadError(e), e.message ?: e.javaClass.simpleName)
             Row(Modifier.padding(top = 12.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Button(onClick = onRetry) { Text("Retry") }
@@ -343,6 +372,8 @@ fun LibraryScreen(modifier: Modifier, screen: Screen.Library, push: (Screen) -> 
             FilterChip(unplayed, { unplayed = !unplayed }, { Text("Unplayed") })
         }
         val statuses = rememberDownloadStatuses()
+        // Outside Loaded, so the scroll survives its "Loading…" pass; a new sort, filter or query starts at the top.
+        val gridState = rememberSaveable(sort, unplayed, query, saver = LazyGridState.Saver) { LazyGridState() }
         Loaded(items, { refresh++ }, { push(Screen.Downloads) }) { list ->
             if (list.isEmpty()) Empty(when {
                 query.isNotBlank() -> "No results for “${query.trim()}”"
@@ -350,7 +381,7 @@ fun LibraryScreen(modifier: Modifier, screen: Screen.Library, push: (Screen) -> 
                 unplayed -> "Nothing unplayed here"
                 else -> "This library is empty"
             })
-            else LazyVerticalGrid(GridCells.Adaptive(110.dp), Modifier.fillMaxSize().padding(8.dp),
+            else LazyVerticalGrid(GridCells.Adaptive(110.dp), Modifier.fillMaxSize().padding(8.dp), gridState,
                 horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 items(list, key = { it.id }) { item ->
                     if (item.type == BaseItemKind.SERIES) Poster(item, null, onClick = { push(Screen.Series(item.id.toString(), item.name.orEmpty())) })
@@ -377,13 +408,14 @@ private fun Poster(
     val local by remember(item) { derivedStateOf { item.localState() } }
     val (state, unsynced) = local
     var menu by remember { mutableStateOf(false) }
-    Column(Modifier.combinedClickable(onClick = onClick, onLongClick = onChanged?.let { { menu = true } })) {
+    Column(Modifier.combinedClickable(onClick = onClick, onLongClickLabel = "Actions", onLongClick = onChanged?.let { { menu = true } })) {
         Box {
             AsyncImage(App.server.imageUrl(item), null, contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxWidth().aspectRatio(2f / 3).background(Color.DarkGray))
             download?.let {
                 Text(if (it.fill == Media.Fill.DONE) "↓" else "${it.percent}%", color = Color.White,
-                    modifier = Modifier.align(Alignment.TopStart).background(Color(0xAA000000)).padding(horizontal = 6.dp))
+                    modifier = Modifier.align(Alignment.TopStart).background(Color(0xAA000000)).padding(horizontal = 6.dp)
+                        .semantics { contentDescription = if (it.fill == Media.Fill.DONE) "Downloaded" else "Downloaded ${it.percent}%" })
             }
             val badge = when {
                 state?.played == true -> "✓"
@@ -391,7 +423,8 @@ private fun Poster(
                 else -> null
             }
             badge?.let {
-                Text(it, color = Color.White, modifier = Modifier.align(Alignment.TopEnd).background(Color(0xAA000000)).padding(horizontal = 6.dp))
+                Text(it, color = Color.White, modifier = Modifier.align(Alignment.TopEnd).background(Color(0xAA000000)).padding(horizontal = 6.dp)
+                    .semantics { contentDescription = if (it == "✓") "Played" else "$it unplayed" })
             }
             if (unsynced) Text("not synced", color = Color.White, style = MaterialTheme.typography.labelSmall,
                 modifier = Modifier.align(Alignment.BottomStart).background(Color(0xAA000000)))
@@ -422,16 +455,17 @@ fun SeriesScreen(modifier: Modifier, screen: Screen.Series, push: (Screen) -> Un
                 Housekeeping.enqueue(ctx)
             }
         }
+        val listState = rememberLazyListState() // outside Loaded, so the scroll survives its "Loading…" pass
         Loaded(seasons, { refresh++ }, { push(Screen.Downloads) }) { list ->
             if (list.isEmpty()) Empty("This series has no seasons")
-            else LazyColumn {
+            else LazyColumn(state = listState) {
                 items(list, key = { it.id }) { season ->
                     Row(Modifier.fillMaxWidth().combinedClickable(onClick = {
                         push(Screen.Season(screen.id, season.id.toString(), "${screen.name} · ${season.name}"))
                     }).padding(16.dp)) {
                         Text(season.name.orEmpty(), Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
                         val left = season.userData?.unplayedItemCount ?: 0
-                        Text(if (left == 0) "✓" else "$left unplayed")
+                        Text(if (left == 0) "✓" else "$left unplayed", Modifier.semantics { if (left == 0) contentDescription = "Played" })
                     }
                     HorizontalDivider()
                 }
@@ -484,7 +518,7 @@ fun EpisodeRow(
     Row(
         Modifier.fillMaxWidth()
             .background(if (highlighted) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent)
-            .combinedClickable(onClick = onPlay, onLongClick = { menu = true })
+            .combinedClickable(onClick = onPlay, onLongClickLabel = "Actions", onLongClick = { menu = true })
             .padding(8.dp),
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
@@ -666,6 +700,7 @@ fun SettingsScreen(modifier: Modifier, pop: () -> Unit, onLoggedOut: () -> Unit)
                 toggle("Brightness on the left (volume on the right)", p.brightnessOnLeft, enabled = p.gestureLevels) { p.brightnessOnLeft = it }
                 toggle("Horizontal swipe seeks", p.gestureSeek) { p.gestureSeek = it }
                 toggle("Double-tap skips", p.gestureDoubleTap) { p.gestureDoubleTap = it }
+                toggle("Hold for 2× speed", p.gestureHold) { p.gestureHold = it }
                 Stepper("Skip step (s)", p.doubleTapSeconds, (5..60 step 5).toList()) { p.doubleTapSeconds = it; refresh++ }
                 toggle("Pinch to crop / fit", p.gesturePinch) { p.gesturePinch = it }
                 toggle("Swipe up / down for fullscreen", p.gestureFullscreen) { p.gestureFullscreen = it }
@@ -686,7 +721,7 @@ private fun Stepper(label: String, value: Int, options: List<Int>, show: (Int) -
     Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
         val i = options.indices.minBy { abs(options[it] - value) }
         Text(label, Modifier.weight(1f))
-        TextButton(onClick = { set(options[i - 1]) }, enabled = i > 0) { Text("−") }
+        TextButton(onClick = { set(options[i - 1]) }, enabled = i > 0) { Text("−", Modifier.semantics { contentDescription = "Decrease" }) }
         Text(show(options[i]))
-        TextButton(onClick = { set(options[i + 1]) }, enabled = i < options.lastIndex) { Text("+") }
+        TextButton(onClick = { set(options[i + 1]) }, enabled = i < options.lastIndex) { Text("+", Modifier.semantics { contentDescription = "Increase" }) }
     }

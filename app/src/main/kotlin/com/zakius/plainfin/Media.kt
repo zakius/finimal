@@ -62,6 +62,7 @@ import plainfin.core.EpisodeRef
 import plainfin.core.evictionOrder
 import plainfin.core.keepNextDeletions
 import plainfin.core.keepNextWindow
+import plainfin.core.writeAtomically
 
 /**
  * One persistent cache, keyed by item ID, serves streaming, buffering and downloads. A download is
@@ -205,7 +206,7 @@ object Media {
     private val downloadsDir get() = File(ctx.filesDir, "downloads").apply { mkdirs() }
     private fun metaFile(id: String) = File(downloadsDir, "$id.json")
     private fun write(d: Download) {
-        metaFile(d.item.id.toString()).writeText(json.encodeToString(d))
+        metaFile(d.item.id.toString()).writeAtomically(json.encodeToString(d))
         // Patched rather than cleared: progress reports write every 10 s, and a re-read decodes every file.
         memo = memo?.filterNot { it.item.id == d.item.id }?.plus(d)
         changes++
@@ -426,6 +427,15 @@ object Media {
         evictionOrder(entries, limit, playing).forEach(::removeBytes)
     }
 
+    /** Subtitles fetched for items that were only streamed; downloads and the playing item keep theirs. */
+    fun dropStreamedSubtitles() {
+        val keep = downloads().map { it.item.id.toString() }.toSet()
+        val playing = playing
+        File(ctx.filesDir, "subs").listFiles().orEmpty()
+            .filter { it.name !in keep && playing?.startsWith(it.name) != true }
+            .forEach { it.deleteRecursively() }
+    }
+
     /** External subtitle streams are separate files; fetch them once so playback works offline too. */
     suspend fun fetchSubtitles(item: BaseItemDto): Map<Int, File> = coroutineScope {
         val id = item.id.toString()
@@ -576,7 +586,10 @@ class Housekeeping(context: Context, params: WorkerParameters) : CoroutineWorker
         // Progress made on other devices reaches offline playback through the stored downloads.
         runCatching {
             val ids = Media.downloads().map { it.item.id }
-            if (ids.isNotEmpty()) server.userData(ids).forEach { (id, data) -> Media.rememberState(id.toString(), data.toPlayState()) }
+            // An item still pending has newer local state than the server; the push that failed will retry.
+            if (ids.isNotEmpty()) server.userData(ids).forEach { (id, data) ->
+                if (App.pending.get(id.toString()) == null) Media.rememberState(id.toString(), data.toPlayState())
+            }
         }
         var retry = false
         for ((seriesId, n) in App.prefs.keepNextSeries()) runCatching {
@@ -589,6 +602,7 @@ class Housekeeping(context: Context, params: WorkerParameters) : CoroutineWorker
             keepNextDeletions(auto, refs, window).forEach(Media::deleteDownload)
         }.onFailure { if (transient(it)) retry = true } // a series gone from the server would fail every retry
         Media.evict()
+        Media.dropStreamedSubtitles()
         return if (retry) Result.retry() else Result.success()
     }
 

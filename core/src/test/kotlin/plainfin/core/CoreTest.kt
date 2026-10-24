@@ -71,6 +71,20 @@ class CoreTest {
         assertEquals(listOf("2"), keepNextWindow(eps, 1))
     }
 
+    @Test fun keepNextTiedTimestampsAnchorOnLatestEpisode() {
+        // Marking a season played on the server gives every episode the same LastPlayedDate.
+        val eps = listOf(ep("1", true, 7), ep("2", true, 7), ep("3", true, 7), ep("4"), ep("5"))
+        assertEquals(listOf("4", "5"), keepNextWindow(eps, 2))
+    }
+
+    @Test fun pendingStoreKeepsCorruptFile() {
+        val f = File.createTempFile("pending", ".json").apply { writeText("{not json") }
+        val store = PendingStore(f)
+        assertNull(store.get("x"))
+        store.put("x", PlayState(1, false, 1))
+        assertEquals("{not json", File(f.path + ".corrupt").readText())
+    }
+
     @Test fun keepNextDeletesOnlyPlayedAutoOutsideWindow() {
         val eps = listOf(ep("1", true, 1), ep("2", true, 2), ep("3"), ep("4"))
         val window = keepNextWindow(eps, 1)

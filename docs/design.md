@@ -28,6 +28,7 @@ Libraries → poster grid → series → seasons → episodes.
 - Episodes: thumbnail, played mark, progress bar.
 - Movie posters: played mark, progress bar, download state.
 - Tap: resume from the saved position minus 5 s. The item menu (long-press on an episode or movie, or the ⋮ button on an episode): start over, mark played/unplayed, download, delete download. When the item's progress is not synced, the menu says so and offers "Sync now", which pushes all pending events and toasts the outcome.
+- A list that fails because the server can't be reached retries by itself when a different network comes up.
 - A list that fails to load says why in plain words (can't reach the server, a server error with its status, or a generic message), with the raw error in small text, a Retry button and a Downloads button.
 - End of an episode: a "Play next" button. The next episode comes from season order, never from the server's Next Up.
 
@@ -41,8 +42,9 @@ Libraries → poster grid → series → seasons → episodes.
   - Horizontal swipe seeks.
   - Double-tap skips ±N s. N is the "skip step" setting, shared with the on-screen rewind and forward buttons.
   - Pinch switches between fit and crop.
+  - Press and hold plays at 2x until release; the chosen speed comes back after.
 - Audio and subtitle choices are remembered per series.
-- Media segments show a "Skip intro" button. It never skips on its own.
+- Media segments show a button, never acting on their own: "Skip intro", "Skip recap", and during the credits "Play next" when there is a next episode.
 - On-screen controls: back, menu, fullscreen; rewind and forward by the double-tap step, play/pause, and next episode when there is one.
 - Player menu: speed, tracks, subtitle size, wireless audio delay, rotation lock. The current choice is ticked. Speed carries over to the next episode until the app is closed; it is not saved. Subtitle delay is not built yet: Media3 has no subtitle offset, so it needs its own cue timing. Subtitle size applies to text subtitles; ASS keeps its authored size.
 - Text subtitles (SRT, VTT, embedded text tracks) are white with a black outline and no background box. The system caption style is ignored. ASS keeps its authored style.
@@ -73,7 +75,7 @@ There is one persistent on-disk cache. The key is the item ID plus the media sou
 - Downloads are original files in app-specific storage. The SD card can be selected. Switching applies at once and asks first: it deletes every download and the buffer cache instead of moving them (bytes left on the old volume would be orphaned, and the downloads would silently fetch again).
   - A selected SD card missing at start leaves downloads waiting: the queue and buffering stop, the Downloads screen and queued items say "waiting for SD card", and playback streams. The card is checked again at the next start. Switching to internal storage stays possible, as the way out of a lost card.
 - "Keep next N downloaded" is per series and off by default.
-  - Anchor: the last played episode in season order, specials excluded.
+  - Anchor: the last played episode in season order, specials excluded. Among equal LastPlayedDates (a season marked played on the server) the later episode wins.
   - Checked when the app opens and whenever playback stops, once a network is up.
   - It deletes only episodes it downloaded itself, after they are marked played.
   - Changing N runs the check at once. Turning it off deletes its played and unfinished downloads; its finished, unplayed ones stay as regular downloads.

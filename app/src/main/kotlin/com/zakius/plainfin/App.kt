@@ -8,7 +8,10 @@ import coil3.ImageLoader
 import coil3.PlatformContext
 import coil3.SingletonImageLoader
 import coil3.network.okhttp.OkHttpNetworkFetcherFactory
+import androidx.media3.common.MimeTypes
+import androidx.media3.exoplayer.mediacodec.MediaCodecUtil
 import java.io.File
+import okhttp3.Dispatcher
 import kotlin.concurrent.thread
 import kotlinx.coroutines.Dispatchers
 import plainfin.core.PendingStore
@@ -19,12 +22,21 @@ class App : Application(), SingletonImageLoader.Factory {
         super.onCreate()
         instance = this
         Media.onAppStart(this)
-        thread(name = "warm-server") { server } // builds the API client before the first frame asks for it
+        thread(name = "warm-up") {
+            server // builds the API client before the first frame asks for it
+            warmDecoders()
+        }
     }
 
+    // Shared connections, own dispatcher: a screen of thumbnails must not queue behind or ahead of API calls (5 per host each).
     override fun newImageLoader(context: PlatformContext) = ImageLoader.Builder(context)
-        .components { add(OkHttpNetworkFetcherFactory(callFactory = { Media.http })) }
+        .components { add(OkHttpNetworkFetcherFactory(callFactory = { Media.http.newBuilder().dispatcher(Dispatcher()).build() })) }
         .build()
+
+    /** The first codec-list query in a process takes up to a few hundred ms; Media3 caches it, so the first play skips that. */
+    @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+    private fun warmDecoders() = listOf(MimeTypes.VIDEO_H264, MimeTypes.VIDEO_H265, MimeTypes.VIDEO_AV1, MimeTypes.AUDIO_AAC)
+        .forEach { runCatching { MediaCodecUtil.getDecoderInfos(it, false, false) } }
 
     companion object {
         lateinit var instance: App
@@ -57,6 +69,7 @@ class Prefs(private val p: SharedPreferences) {
     var gestureLevels by bool("gestureLevels", true)
     var gestureSeek by bool("gestureSeek", true)
     var gestureDoubleTap by bool("gestureDoubleTap", true)
+    var gestureHold by bool("gestureHold", true)
     var gesturePinch by bool("gesturePinch", true)
     var gestureFullscreen by bool("gestureFullscreen", true)
     var doubleTapSeconds by int("doubleTapSeconds", 10)

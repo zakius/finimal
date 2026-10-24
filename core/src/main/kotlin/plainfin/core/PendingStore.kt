@@ -1,6 +1,7 @@
 package plainfin.core
 
 import java.io.File
+import java.io.FileOutputStream
 import kotlinx.serialization.json.Json
 
 /**
@@ -11,7 +12,10 @@ import kotlinx.serialization.json.Json
 class PendingStore(private val file: File) {
     private val json = Json { ignoreUnknownKeys = true }
     private val states: MutableMap<String, PlayState> =
-        runCatching { json.decodeFromString<Map<String, PlayState>>(file.readText()) }
+        if (!file.exists()) mutableMapOf()
+        else runCatching { json.decodeFromString<Map<String, PlayState>>(file.readText()) }
+            // Kept aside rather than overwritten by the next save: it may be the only copy of offline progress.
+            .onFailure { file.renameTo(File(file.path + ".corrupt")) }
             .getOrDefault(emptyMap())
             .toMutableMap()
 
@@ -31,9 +35,12 @@ class PendingStore(private val file: File) {
         if (states[itemId] == state && states.remove(itemId) != null) save()
     }
 
-    private fun save() {
-        val tmp = File(file.path + ".tmp")
-        tmp.writeText(json.encodeToString(states.toMap()))
-        if (!tmp.renameTo(file)) error("cannot replace $file")
-    }
+    private fun save() = file.writeAtomically(json.encodeToString(states.toMap()))
+}
+
+/** Through a synced temp file and a rename, so a crash or power loss leaves the old or the new file, never half of one. */
+fun File.writeAtomically(text: String) {
+    val tmp = File("$path.tmp")
+    FileOutputStream(tmp).use { it.write(text.toByteArray()); it.fd.sync() }
+    if (!tmp.renameTo(this)) error("cannot replace $this")
 }

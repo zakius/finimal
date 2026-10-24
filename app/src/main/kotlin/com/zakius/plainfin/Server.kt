@@ -130,13 +130,24 @@ class Server(context: Context) {
             isPlayed = if (unplayedOnly) false else null,
             searchTerm = search.ifBlank { null },
             enableUserData = true,
+            // The grid shows one poster and never a count; whole libraries come back in one response.
+            enableTotalRecordCount = false,
+            enableImageTypes = listOf(ImageType.PRIMARY),
+            imageTypeLimit = 1,
         ).content.items }
 
-    /** Full item (media sources included) with play state from [userData]. */
-    suspend fun item(id: String): BaseItemDto = io {
+    /**
+     * Full item (media sources included) with play state from [userData]. With [flushFirst] the play
+     * state is read after pushing pending states, while the item itself loads alongside the push.
+     */
+    suspend fun item(id: String, flushFirst: Boolean = false): BaseItemDto = io {
         val uuid = UUID.fromString(id)
-        val data = async { userData(uuid) }
-        api.libraryApi.getItem(uuid, userId).content.copy(userData = data.await())
+        val dto = async { api.libraryApi.getItem(uuid, userId).content }
+        val data = if (flushFirst) {
+            flush()?.takeIf(::unreachable)?.let { dto.cancel(); throw it }
+            userData(uuid)
+        } else async { userData(uuid) }.await()
+        dto.await().copy(userData = data)
     }
 
     /**
@@ -167,8 +178,10 @@ class Server(context: Context) {
             enableUserData = true,
         ).content.items }
 
-    suspend fun introSegment(id: String): MediaSegmentDto? =
-        io { api.mediaSegmentApi.getItemSegments(UUID.fromString(id), listOf(MediaSegmentType.INTRO)).content.items.firstOrNull() }
+    /** Intro, recap and credits, where a server plugin has detected them. */
+    suspend fun segments(id: String): List<MediaSegmentDto> = io {
+        api.mediaSegmentApi.getItemSegments(UUID.fromString(id), listOf(MediaSegmentType.INTRO, MediaSegmentType.RECAP, MediaSegmentType.OUTRO)).content.items
+    }
 
     /** Null when the item has no such image, so no request is made. The tag changes with the image, keeping caches fresh. */
     fun imageUrl(item: BaseItemDto, type: ImageType = ImageType.PRIMARY, width: Int = 400) =

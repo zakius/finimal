@@ -58,6 +58,9 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import org.jellyfin.sdk.model.api.MediaSegmentType
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -146,9 +149,9 @@ fun PlayerScreen(itemId: String, fromStart: Boolean, onBack: () -> Unit, onPlay:
         val fetch = process.async { runCatching {
             // Only this item's unsynced state must reach the server before it is read; the rest syncs alongside.
             // Read on App.disk, so a stop recorded on leaving the previous player is seen.
-            if (withContext(App.disk) { App.pending.get(itemId) != null }) server.flush()?.takeIf(::unreachable)?.let { throw it }
-            else process.launch { server.flush() }
-            server.item(itemId)
+            val pending = withContext(App.disk) { App.pending.get(itemId) != null }
+            if (!pending) process.launch { server.flush() }
+            server.item(itemId, flushFirst = pending)
         } }
         // A finished download doesn't wait out network timeouts; it plays offline if the server is slow to answer.
         val result = (if (complete) withTimeoutOrNull(2_000) { fetch.await() } else fetch.await())
@@ -215,7 +218,7 @@ private fun Playback(
     var transcodeFromMs by remember { mutableLongStateOf(0L) }
     var playerError by remember { mutableStateOf<PlaybackException?>(null) }
     var ended by remember { mutableStateOf(false) }
-    var intro by remember { mutableStateOf<MediaSegmentDto?>(null) }
+    var segments by remember { mutableStateOf<List<MediaSegmentDto>>(emptyList()) }
     val scope = rememberCoroutineScope()
 
     val playerView = remember {
@@ -234,6 +237,8 @@ private fun Playback(
 
     // Prepare: external subtitles first (cached on disk), then the media item at the resume point.
     LaunchedEffect(player) {
+        // Set first: eviction and subtitle cleanup leave the playing item alone.
+        Media.playing = Media.key(item)
         val subs = Media.fetchSubtitles(item)
         val streams = externalSubs(item).associateBy { it.index }
         val url = if (transcoding) App.server.transcodeUrl(id, sourceId, null) else App.server.streamUrl(id, sourceId)
@@ -270,9 +275,8 @@ private fun Playback(
         player.setMediaItem(mediaItem, startMs)
         player.prepare()
         player.play()
-        Media.playing = Media.key(item)
         launch { App.server.reportStart(id, sourceId, startMs * TICKS_PER_MS, transcoding) }
-        if (online) intro = runCatching { App.server.introSegment(id) }.getOrNull()
+        if (online) segments = runCatching { App.server.segments(id) }.getOrDefault(emptyList())
     }
 
     fun positionTicks() = player.currentPosition * TICKS_PER_MS
@@ -371,7 +375,7 @@ private fun Playback(
 
     val video = @Composable { mod: Modifier ->
         VideoSurface(
-            mod, player, playerView, fullscreen, transcoding, Media.key(item).takeUnless { transcoding }, intro, ended, next, playerError,
+            mod, player, playerView, fullscreen, transcoding, Media.key(item).takeUnless { transcoding }, segments, ended, next, playerError,
             onToggleFullscreen = { setFullscreen(!fullscreen) },
             onBack = onBack,
             onPlay = onPlay,
@@ -449,7 +453,7 @@ private fun VideoSurface(
     fullscreen: Boolean,
     transcoding: Boolean,
     cacheKey: String?,
-    intro: MediaSegmentDto?,
+    segments: List<MediaSegmentDto>,
     ended: Boolean,
     next: BaseItemDto?,
     playerError: PlaybackException?,
@@ -474,9 +478,11 @@ private fun VideoSurface(
     var crop by remember { mutableStateOf(false) }
     var scrubTarget by remember { mutableStateOf<Long?>(null) }
     var lastInteraction by remember { mutableLongStateOf(System.currentTimeMillis()) }
-    val introRange = remember(intro) { intro?.let { it.startTicks / TICKS_PER_MS until it.endTicks / TICKS_PER_MS - 1_000 } }
+    val ranges = remember(segments) { segments.map { it.type to (it.startTicks / TICKS_PER_MS until it.endTicks / TICKS_PER_MS - 1_000) } }
     // Derived, so the 250 ms position tick doesn't recompose the whole surface while the controls are hidden.
-    val inIntro by remember(introRange) { derivedStateOf { introRange != null && position in introRange } }
+    val segment by remember(ranges) { derivedStateOf { ranges.firstOrNull { position in it.second } } }
+    var fastHold by remember { mutableStateOf(false) }
+    val haptics = LocalHapticFeedback.current
 
     LaunchedEffect(player) {
         while (true) {
@@ -507,6 +513,18 @@ private fun VideoSurface(
             .background(Color.Black)
             .pointerInput(fullscreen) {
                 detectTapGestures(
+                    // Hold for 2x until release; the speed the user chose comes back after.
+                    onLongPress = {
+                        if (prefs.gestureHold) {
+                            fastHold = true
+                            player.setPlaybackSpeed(2f)
+                            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                        }
+                    },
+                    onPress = {
+                        tryAwaitRelease()
+                        if (fastHold) { fastHold = false; player.setPlaybackSpeed(sessionSpeed) }
+                    },
                     onTap = { controls = !controls; lastInteraction = System.currentTimeMillis() },
                     onDoubleTap = { offset ->
                         if (prefs.gestureDoubleTap) seekBy((if (offset.x < size.width / 2) -1 else 1) * prefs.doubleTapSeconds * 1000L)
@@ -594,11 +612,22 @@ private fun VideoSurface(
                 modifier = Modifier.align(Alignment.Center).background(Color(0x99000000), MaterialTheme.shapes.small).padding(12.dp))
         }
 
+        if (fastHold) Text("2× ▶▶", color = Color.White, style = MaterialTheme.typography.titleMedium,
+            modifier = Modifier.align(Alignment.TopCenter).padding(top = 24.dp).background(Color(0x99000000), MaterialTheme.shapes.small).padding(horizontal = 12.dp, vertical = 6.dp))
+
         if (waiting && playerError == null && !ended) CircularProgressIndicator(Modifier.align(Alignment.Center), color = Color.White)
 
-        val skipIntro = introRange?.takeIf { inIntro && !ended }?.let { { player.seekTo(it.last + 1_000) } }
+        // Offered, never done on its own. Credits offer the next episode in season order when there is one.
+        val skip: Skip? = segment?.takeIf { !ended }?.let { (type, range) ->
+            when (type) {
+                MediaSegmentType.INTRO -> Skip("Skip intro") { player.seekTo(range.last + 1_000) }
+                MediaSegmentType.RECAP -> Skip("Skip recap") { player.seekTo(range.last + 1_000) }
+                MediaSegmentType.OUTRO -> next?.let { n -> Skip("Play next: ${episodeLabel(n)}") { onPlay(n.id.toString()) } }
+                else -> null
+            }
+        }
         // With controls shown it sits beside the seek bar instead, so the bar and scrim never cover it.
-        if (skipIntro != null && !controls) SkipIntro(skipIntro,
+        if (skip != null && !controls) SkipButton(skip,
             Modifier.align(Alignment.BottomEnd).then(if (fullscreen) Modifier.safeDrawingPadding() else Modifier).padding(24.dp))
 
         if (playerError != null) {
@@ -619,7 +648,7 @@ private fun VideoSurface(
         } else if (controls) {
             Controls(
                 player, position, duration, buffered, playing, fullscreen, transcoding, rotationLocked,
-                onBack, onToggleFullscreen, onRotationLock, onTracksChosen, ::seekBy, next?.let { { onPlay(it.id.toString()) } }, skipIntro,
+                onBack, onToggleFullscreen, onRotationLock, onTracksChosen, ::seekBy, next?.let { { onPlay(it.id.toString()) } }, skip,
                 onInteraction = { lastInteraction = System.currentTimeMillis() },
                 subtitleView = playerView.subtitleView,
             )
@@ -643,7 +672,7 @@ private fun Controls(
     onTracksChosen: (String?, String?) -> Unit,
     onSeek: (Long) -> Unit,
     onNext: (() -> Unit)?,
-    onSkipIntro: (() -> Unit)?,
+    skip: Skip?,
     onInteraction: () -> Unit,
     subtitleView: SubtitleView?,
 ) {
@@ -745,21 +774,23 @@ private fun Controls(
                     onValueChangeFinished = { player.seekToNearestKeyframe(dragging.toLong()); dragging = -1f },
                     modifier = Modifier.weight(1f),
                 )
-                if (onSkipIntro != null) SkipIntro(onSkipIntro, Modifier.padding(start = 8.dp))
+                if (skip != null) SkipButton(skip, Modifier.padding(start = 8.dp))
             }
         }
     }
 }
 
 @Composable
-private fun SkipIntro(onClick: () -> Unit, modifier: Modifier) = FilledTonalButton(onClick, modifier) { Text("Skip intro") }
+private fun SkipButton(skip: Skip, modifier: Modifier) =
+    FilledTonalButton(skip.onClick, modifier) { Text(skip.label, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+
+private class Skip(val label: String, val onClick: () -> Unit)
 
 /** A menu entry ticked when it is the current choice. */
 @Composable
 private fun Choice(label: String, selected: Boolean, onClick: () -> Unit) =
     DropdownMenuItem({ Text(label) }, onClick, trailingIcon = { if (selected) Icon(Icons.Default.Check, null) })
 
-/** Language of the selected track, "" when that type is off, null when unknown. */
 /** For coarse seeks (slider, swipe): exact seeks decode from the keyframe before, seconds on long-GOP files. Skips stay exact. */
 private fun ExoPlayer.seekToNearestKeyframe(ms: Long) {
     setSeekParameters(SeekParameters.CLOSEST_SYNC)
@@ -767,6 +798,7 @@ private fun ExoPlayer.seekToNearestKeyframe(ms: Long) {
     setSeekParameters(SeekParameters.DEFAULT)
 }
 
+/** Language of the selected track, "" when that type is off, null when unknown. */
 private fun selectedLanguage(player: ExoPlayer, type: Int): String? {
     if (player.trackSelectionParameters.disabledTrackTypes.contains(type)) return ""
     return player.currentTracks.groups.filter { it.type == type && it.isSelected }
