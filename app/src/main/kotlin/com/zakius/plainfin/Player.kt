@@ -47,6 +47,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -138,7 +139,14 @@ fun PlayerScreen(itemId: String, fromStart: Boolean, onBack: () -> Unit, onPlay:
         val downloaded = withContext(Dispatchers.IO) { Media.download(itemId)?.item }
         val complete = downloaded != null && withContext(Dispatchers.IO) { Media.isComplete(Media.key(downloaded)) }
         // Outside this screen's scope, so giving up on a slow server below doesn't cut a flush short.
-        val fetch = ProcessLifecycleOwner.get().lifecycleScope.async { runCatching { server.flush(); server.item(itemId) } }
+        val process = ProcessLifecycleOwner.get().lifecycleScope
+        val fetch = process.async { runCatching {
+            // Only this item's unsynced state must reach the server before it is read; the rest syncs alongside.
+            // Read on App.disk, so a stop recorded on leaving the previous player is seen.
+            if (withContext(App.disk) { App.pending.get(itemId) != null }) server.flush()?.takeIf(::unreachable)?.let { throw it }
+            else process.launch { server.flush() }
+            server.item(itemId)
+        } }
         // A finished download doesn't wait out network timeouts; it plays offline if the server is slow to answer.
         val result = (if (complete) withTimeoutOrNull(2_000) { fetch.await() } else fetch.await())
             ?: Result.failure(java.util.concurrent.TimeoutException("server slow to answer"))
@@ -280,8 +288,8 @@ private fun Playback(
             override fun onPlaybackStateChanged(state: Int) {
                 if (state == Player.STATE_READY && !transcoding) {
                     val fraction = player.currentPosition.toDouble() / player.duration.coerceAtLeast(1)
-                    // On App.disk, so a start never lands after the stop on leaving.
-                    scope.launch(App.disk) {
+                    // On App.buffers, so a start never lands after the stop on leaving.
+                    scope.launch(App.buffers) {
                         // The player only reads the cache, so the length may not be recorded yet; the server knows it.
                         val len = Media.contentLength(Media.key(item)).takeIf { it > 0 } ?: source.size ?: 0
                         // A fixed margin behind the playhead: a share of the file would be a gigabyte behind on a big remux.
@@ -316,7 +324,7 @@ private fun Playback(
             if (!ended) {
                 App.server.reportStop(id, sourceId, positionTicks(), runtimeTicks, serverPlayed)
             }
-            ProcessLifecycleOwner.get().lifecycleScope.launch(App.disk) { Media.stopBuffer(id) }
+            ProcessLifecycleOwner.get().lifecycleScope.launch(App.buffers) { Media.stopBuffer(id) }
             Media.playing = null
             player.release()
         }
@@ -374,12 +382,11 @@ private fun Playback(
         )
     }
 
-    if (fullscreen) {
-        video(Modifier.fillMaxSize())
-    } else {
-        val downloads = rememberDownloadStatuses()
-        Column(Modifier.fillMaxSize().statusBarsPadding()) {
-            video(Modifier.fillMaxWidth().aspectRatio(16f / 9))
+    // One call site for the video, so toggling fullscreen keeps its surface, subtitle overlay and crop state.
+    Column(Modifier.fillMaxSize().then(if (fullscreen) Modifier else Modifier.statusBarsPadding())) {
+        video(if (fullscreen) Modifier.fillMaxSize() else Modifier.fillMaxWidth().aspectRatio(16f / 9))
+        if (!fullscreen) {
+            val downloads = rememberDownloadStatuses()
             LazyColumn(Modifier.fillMaxSize().padding(horizontal = 12.dp)) {
                 item {
                     Text(item.seriesName ?: item.name.orEmpty(), style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(top = 12.dp))
@@ -398,7 +405,9 @@ private fun buildPlayer(context: Context, view: PlayerView, transcoding: Boolean
     val renderers = DefaultRenderersFactory(context).setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
         .setEnableDecoderFallback(true) // another device decoder before giving up and transcoding
     // The RAM buffer stays modest; buffering to the end happens on disk through FillWorker.
-    val load = DefaultLoadControl.Builder().setBufferDurationsMs(30_000, 120_000, 1_000, 2_000).build()
+    // A 15 s back buffer lets skip-back and the subtitle re-read seek stay in memory instead of reloading.
+    val load = DefaultLoadControl.Builder().setBufferDurationsMs(30_000, 120_000, 1_000, 2_000)
+        .setBackBuffer(15_000, true).build()
     return ExoPlayer.Builder(context)
         .setLoadControl(load)
         .setHandleAudioBecomingNoisy(true)
@@ -406,7 +415,7 @@ private fun buildPlayer(context: Context, view: PlayerView, transcoding: Boolean
             context,
             renderType = AssRenderType.OVERLAY_OPEN_GL,
             subtitleView = view.subtitleView,
-            dataSourceFactory = if (transcoding) Media.upstreamFactory() else Media.playerFactory(),
+            dataSourceFactory = if (transcoding) Media.transcodeFactory() else Media.playerFactory(),
             renderersFactory = renderers,
         )
 }
@@ -461,14 +470,16 @@ private fun VideoSurface(
     var crop by remember { mutableStateOf(false) }
     var scrubTarget by remember { mutableStateOf<Long?>(null) }
     var lastInteraction by remember { mutableLongStateOf(System.currentTimeMillis()) }
-    val introRange = intro?.let { it.startTicks / TICKS_PER_MS until it.endTicks / TICKS_PER_MS - 1_000 }
+    val introRange = remember(intro) { intro?.let { it.startTicks / TICKS_PER_MS until it.endTicks / TICKS_PER_MS - 1_000 } }
+    // Derived, so the 250 ms position tick doesn't recompose the whole surface while the controls are hidden.
+    val inIntro by remember(introRange) { derivedStateOf { introRange != null && position in introRange } }
 
     LaunchedEffect(player) {
         while (true) {
             position = player.currentPosition
             duration = player.duration.coerceAtLeast(0)
-            // Off the main thread: cache lookups wait on the lock the fill worker holds while committing to disk.
-            val cached = cacheKey?.let { k -> withContext(Dispatchers.IO) { Media.cachedUntilMs(k, position, duration) } } ?: 0
+            // Only shown with the controls. Off the main thread: cache lookups wait on the fill worker's commit lock.
+            val cached = if (!controls) 0 else cacheKey?.let { k -> withContext(Dispatchers.IO) { Media.cachedUntilMs(k, position, duration) } } ?: 0
             buffered = maxOf(player.bufferedPosition, cached)
             playing = player.isPlaying
             // Idle is the time before the first prepare (subtitles are fetched first), or after an error.
@@ -516,6 +527,9 @@ private fun VideoSurface(
                     val startVol = audio.getStreamVolume(AudioManager.STREAM_MUSIC)
                     val startBright = activity.window.attributes.screenBrightness.takeIf { it >= 0 } ?: 0.5f
                     val brightnessZone = if (prefs.brightnessOnLeft) 0 else 2
+                    // Each apply is a call into the window or audio service; touch events come far faster than the value changes.
+                    var lastPercent = -1
+                    var lastVol = startVol
                     while (true) {
                         val event = awaitPointerEvent()
                         val pressed = event.changes.filter { it.pressed }
@@ -544,12 +558,15 @@ private fun VideoSurface(
                             axis == 2 && fullscreen && zone != 1 && prefs.gestureLevels -> {
                                 val delta = -total.y / (h * 0.8f)
                                 if (zone == brightnessZone) {
-                                    val b = (startBright + delta).coerceIn(0.01f, 1f)
-                                    activity.window.attributes = activity.window.attributes.apply { screenBrightness = b }
-                                    overlay = "Brightness ${(b * 100).toInt()}%"
+                                    val percent = ((startBright + delta).coerceIn(0.01f, 1f) * 100).toInt().coerceAtLeast(1)
+                                    if (percent != lastPercent) {
+                                        lastPercent = percent
+                                        activity.window.attributes = activity.window.attributes.apply { screenBrightness = percent / 100f }
+                                    }
+                                    overlay = "Brightness $percent%"
                                 } else {
                                     val v = (startVol + delta * maxVol).toInt().coerceIn(0, maxVol)
-                                    audio.setStreamVolume(AudioManager.STREAM_MUSIC, v, 0)
+                                    if (v != lastVol) { lastVol = v; audio.setStreamVolume(AudioManager.STREAM_MUSIC, v, 0) }
                                     overlay = "Volume $v / $maxVol"
                                 }
                                 change.consume()
@@ -575,7 +592,7 @@ private fun VideoSurface(
 
         if (waiting && playerError == null && !ended) CircularProgressIndicator(Modifier.align(Alignment.Center), color = Color.White)
 
-        val skipIntro = introRange?.takeIf { position in it && !ended }?.let { { player.seekTo(it.last + 1_000) } }
+        val skipIntro = introRange?.takeIf { inIntro && !ended }?.let { { player.seekTo(it.last + 1_000) } }
         // With controls shown it sits beside the seek bar instead, so the bar and scrim never cover it.
         if (skipIntro != null && !controls) SkipIntro(skipIntro,
             Modifier.align(Alignment.BottomEnd).then(if (fullscreen) Modifier.safeDrawingPadding() else Modifier).padding(24.dp))

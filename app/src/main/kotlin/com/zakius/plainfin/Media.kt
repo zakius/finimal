@@ -37,6 +37,7 @@ import androidx.work.WorkerParameters
 import androidx.work.workDataOf
 import java.io.File
 import java.io.IOException
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -107,8 +108,9 @@ object Media {
         Housekeeping.enqueue(context)
     }
 
-    /** App-specific storage; index 1+ are removable volumes. */
-    fun storageRoots(): List<File> = ctx.getExternalFilesDirs(null).filterNotNull().ifEmpty { listOf(ctx.filesDir) }
+    /** App-specific storage; index 1+ are removable volumes. Read once per process: a card is checked again at the next start. */
+    private val roots by lazy { ctx.getExternalFilesDirs(null).filterNotNull().ifEmpty { listOf(ctx.filesDir) } }
+    fun storageRoots(): List<File> = roots
     private fun storageRoot() = storageRoots().getOrElse(App.prefs.storageIndex) { storageRoots()[0] }
     private fun cacheDir() = File(storageRoot(), "media")
     // Each cache folder has its own UID, and the shared database keeps one table per UID.
@@ -139,6 +141,9 @@ object Media {
 
     /** Plain HTTP plus file:// for downloaded subtitles. */
     fun upstreamFactory() = DefaultDataSource.Factory(ctx, OkHttpDataSource.Factory(http))
+
+    /** The server holds an HLS segment request open until ffmpeg has written it, which can pass OkHttp's 10 s default. */
+    fun transcodeFactory() = DefaultDataSource.Factory(ctx, OkHttpDataSource.Factory(http.newBuilder().readTimeout(30, TimeUnit.SECONDS).build()))
 
     /** For [FillWorker], the only cache writer. Waits for its own earlier locks instead of skipping ranges. */
     fun writerFactory(): CacheDataSource.Factory =
@@ -201,7 +206,8 @@ object Media {
     private fun metaFile(id: String) = File(downloadsDir, "$id.json")
     private fun write(d: Download) {
         metaFile(d.item.id.toString()).writeText(json.encodeToString(d))
-        memo = null
+        // Patched rather than cleared: progress reports write every 10 s, and a re-read decodes every file.
+        memo = memo?.filterNot { it.item.id == d.item.id }?.plus(d)
         changes++
     }
 
@@ -302,16 +308,22 @@ object Media {
         download(id)?.let { write(it.copy(startAt = 0)) }
     }
 
-    @Synchronized
+    /** The bytes go outside the lock: a whole episode is hundreds of fragments, and the player waits on these locks. */
     fun deleteDownload(id: String) {
-        val key = download(id)?.let { key(it.item) }
-        metaFile(id).delete()
-        memo = null
-        changes++
-        if (downloading == id) kickDownloads(restart = true)
+        val key = synchronized(this) {
+            val key = download(id)?.let { key(it.item) }
+            metaFile(id).delete()
+            memo = memo?.filterNot { it.item.id.toString() == id }
+            changes++
+            if (downloading == id) kickDownloads(restart = true)
+            key
+        }
         subsDir(id).deleteRecursively()
-        if (key != null && playing != key) cache.removeResource(key)
+        if (key != null && playing != key) removeBytes(key)
     }
+
+    /** Span by span, so SimpleCache's lock is free between files for the player and the workers. */
+    private fun removeBytes(key: String) = cache.getCachedSpans(key).forEach(cache::removeSpan)
 
     /**
      * "Keep next N" turned off for [seriesId]: its finished, unplayed downloads become regular
@@ -335,6 +347,7 @@ object Media {
             played = state.played,
             lastPlayedDate = state.lastPlayedMs?.let { LocalDateTime.ofInstant(Instant.ofEpochMilli(it), ZoneId.systemDefault()) },
         ) ?: return
+        if (data == d.item.userData) return
         write(d.copy(item = d.item.copy(userData = data)))
     }
 
@@ -352,8 +365,9 @@ object Media {
     /** Status of every download from the cache and the queue. Reads files: call off the main thread. */
     fun downloadStatuses(): Map<String, DownloadStatus> {
         val current = downloading
-        val waitingFor = downloadsWaitingFor()
         val all = downloads()
+        if (all.isEmpty()) return emptyMap()
+        val waitingFor = downloadsWaitingFor()
         val queue = all.filter { !it.paused && it.item.id.toString() != current && !isComplete(key(it.item)) }
             .sortedWith(queueOrder).map { it.item.id.toString() }
         return all.associate { d ->
@@ -409,7 +423,7 @@ object Media {
             val spans = cache.getCachedSpans(key)
             CacheEntry(key, spans.sumOf { it.length }, spans.maxOfOrNull { it.lastTouchTimestamp } ?: 0, key in pinned)
         }
-        evictionOrder(entries, limit, playing).forEach(cache::removeResource)
+        evictionOrder(entries, limit, playing).forEach(::removeBytes)
     }
 
     /** External subtitle streams are separate files; fetch them once so playback works offline too. */
@@ -490,11 +504,15 @@ class DownloadWorker(context: Context, params: WorkerParameters) : CoroutineWork
                 runCatching { setForeground(foregroundInfo(d, null)) }
                 withContext(Dispatchers.IO) { Media.fetchSubtitles(d.item) }
                 var lastUpdate = 0L
+                var lastPercent = -1
                 val progress = CacheWriter.ProgressListener { length, cached, _ ->
                     val now = System.currentTimeMillis()
-                    if (length > 0 && now - lastUpdate > 1_000) {
+                    val percent = if (length > 0) (cached * 100 / length).toInt() else -1
+                    // Only a new percentage: each update makes SystemUI rebuild the notification, for hours.
+                    if (percent >= 0 && percent != lastPercent && now - lastUpdate > 1_000) {
                         lastUpdate = now
-                        setForegroundAsync(foregroundInfo(d, (cached * 100 / length).toInt()))
+                        lastPercent = percent
+                        setForegroundAsync(foregroundInfo(d, percent))
                     }
                 }
                 val key = Media.key(d.item)
@@ -520,9 +538,16 @@ class DownloadWorker(context: Context, params: WorkerParameters) : CoroutineWork
         }
     }
 
+    /** The notification's tap target; the first use also creates the channel, so neither repeats per update. */
+    private val openDownloads by lazy {
+        if (Build.VERSION.SDK_INT >= 26) applicationContext.getSystemService(NotificationManager::class.java)
+            .createNotificationChannel(NotificationChannel("downloads", "Downloads", NotificationManager.IMPORTANCE_LOW))
+        PendingIntent.getActivity(applicationContext, 0,
+            Intent(applicationContext, MainActivity::class.java).putExtra(MainActivity.EXTRA_DOWNLOADS, true),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+    }
+
     private fun foregroundInfo(d: Media.Download, percent: Int?): ForegroundInfo {
-        val nm = applicationContext.getSystemService(NotificationManager::class.java)
-        if (Build.VERSION.SDK_INT >= 26) nm.createNotificationChannel(NotificationChannel("downloads", "Downloads", NotificationManager.IMPORTANCE_LOW))
         val item = d.item
         val name = if (item.type == BaseItemKind.EPISODE) "${item.seriesName} · ${episodeLabel(item)}" else item.name.orEmpty()
         val n = NotificationCompat.Builder(applicationContext, "downloads")
@@ -531,9 +556,7 @@ class DownloadWorker(context: Context, params: WorkerParameters) : CoroutineWork
             .setProgress(100, percent ?: 0, percent == null)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
-            .setContentIntent(PendingIntent.getActivity(applicationContext, 0,
-                Intent(applicationContext, MainActivity::class.java).putExtra(MainActivity.EXTRA_DOWNLOADS, true),
-                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT))
+            .setContentIntent(openDownloads)
             .build()
         return if (Build.VERSION.SDK_INT >= 29) ForegroundInfo(NOTIFICATION_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
         else ForegroundInfo(NOTIFICATION_ID, n)

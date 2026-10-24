@@ -39,6 +39,9 @@ class App : Application(), SingletonImageLoader.Factory {
          * share it, so a stop recorded on leaving the player lands before the next list flushes.
          */
         val disk = Dispatchers.IO.limitedParallelism(1)
+
+        /** Buffer start and stop, in order, apart from [disk] so cache and download locks never hold up play-state records. */
+        val buffers = Dispatchers.IO.limitedParallelism(1)
     }
 }
 

@@ -50,6 +50,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
@@ -91,7 +92,10 @@ import plainfin.core.TICKS_PER_MS
 import kotlin.math.abs
 
 /** Last good result per list and user, so a list you come back to shows at once while it reloads. Main thread only. */
-private val lastGood = HashMap<List<Any?>, Result<*>>()
+private val lastGood = object : LinkedHashMap<List<Any?>, Result<*>>(16, 0.75f, true) {
+    // Every search query and sort is its own entry; keep the recent ones.
+    override fun removeEldestEntry(eldest: MutableMap.MutableEntry<List<Any?>, Result<*>>) = size > 20
+}
 
 /**
  * Loads [block] after pushing unsynced progress, so the list never shows state older than this device's.
@@ -106,8 +110,9 @@ private fun <T> loadFresh(vararg keys: Any?, refresh: Int, block: suspend () -> 
     var last by remember { mutableStateOf(lastGood[cacheKey]?.let { k to (it as Result<T>) }) }
     LaunchedEffect(k, refresh) {
         if (last?.second?.isFailure == true) last = null // a retry shows "Loading…" again
-        App.server.flush()
-        val result = runCatching { block() }
+        val pushed = App.server.flush()
+        // An unreachable server would only time out a second time on the fetch.
+        val result = if (pushed != null && unreachable(pushed)) Result.failure(pushed) else runCatching { block() }
             .onFailure { if (it is InvalidStatusException && it.status == 401) App.server.expire() }
         if (result.isSuccess) lastGood[cacheKey] = result
         if (result.isSuccess || last?.first != k) last = k to result
@@ -368,7 +373,9 @@ private fun Poster(
     onStartOver: (() -> Unit)? = null,
     onChanged: (() -> Unit)? = null,
 ) {
-    val (state, unsynced) = item.localState()
+    // Derived: a local change then recomposes only the row whose state it changed, not every row.
+    val local by remember(item) { derivedStateOf { item.localState() } }
+    val (state, unsynced) = local
     var menu by remember { mutableStateOf(false) }
     Column(Modifier.combinedClickable(onClick = onClick, onLongClick = onChanged?.let { { menu = true } })) {
         Box {
@@ -470,7 +477,9 @@ fun EpisodeRow(
     onStartOver: (() -> Unit)? = null,
     onChanged: () -> Unit = {},
 ) {
-    val (state, unsynced) = ep.localState()
+    // Derived: a local change then recomposes only the row whose state it changed, not every row.
+    val local by remember(ep) { derivedStateOf { ep.localState() } }
+    val (state, unsynced) = local
     var menu by remember { mutableStateOf(false) }
     Row(
         Modifier.fillMaxWidth()
