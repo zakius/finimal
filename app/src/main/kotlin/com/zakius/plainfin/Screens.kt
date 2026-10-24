@@ -98,10 +98,10 @@ private fun <T> loadFresh(vararg keys: Any?, block: suspend () -> T): Result<T>?
             .onFailure { if (it is InvalidStatusException && it.status == 401) App.server.expire() }
     }.value
 
-/** Download statuses, refreshed every second while the screen is shown. */
+/** Download statuses, refreshed every second while the screen is shown; null until first read. */
 @Composable
-fun rememberDownloadStatuses(): Map<String, Media.DownloadStatus> =
-    produceState(emptyMap()) {
+fun rememberDownloadStatuses(): Map<String, Media.DownloadStatus>? =
+    produceState<Map<String, Media.DownloadStatus>?>(null) {
         while (true) {
             value = withContext(Dispatchers.IO) { Media.downloadStatuses() }
             delay(1_000)
@@ -113,10 +113,12 @@ private suspend fun downloadAll(context: Context, episodes: List<BaseItemDto>) {
     val noun = if (episodes.all { it.type == BaseItemKind.MOVIE }) "movie" else "episode"
     var queued = 0
     val failures = mutableListOf<Throwable>()
-    for (ep in episodes) {
-        if (Media.download(ep.id.toString()) != null) continue
-        runCatching { Media.startDownload(App.server.item(ep.id.toString()), auto = false) }
-            .onSuccess { queued++ }.onFailure { failures += it }
+    withContext(Dispatchers.IO) {
+        for (ep in episodes) {
+            if (Media.download(ep.id.toString()) != null) continue
+            runCatching { Media.startDownload(App.server.item(ep.id.toString()), auto = false) }
+                .onSuccess { queued++ }.onFailure { failures += it }
+        }
     }
     val text = when {
         queued == 0 -> failures.firstOrNull()?.let(::loadError) ?: "Nothing new to download"
@@ -142,7 +144,7 @@ private fun DownloadAllButton(label: String, enabled: Boolean, fetch: suspend ()
         scope.launch {
             runCatching { fetch() }
                 .onSuccess { eps ->
-                    val new = eps.filter { Media.download(it.id.toString()) == null }
+                    val new = withContext(Dispatchers.IO) { eps.filter { Media.download(it.id.toString()) == null } }
                     if (new.isEmpty()) Toast.makeText(ctx, "Nothing new to download", Toast.LENGTH_SHORT).show() else pending = new
                 }
                 .onFailure { Toast.makeText(ctx, "Couldn't load the episode list", Toast.LENGTH_SHORT).show() }
@@ -165,9 +167,13 @@ private fun DownloadAllButton(label: String, enabled: Boolean, fetch: suspend ()
 /** Asks before deleting [item]'s download; shows nothing while [item] is null. */
 @Composable
 private fun ConfirmDelete(item: BaseItemDto?, onDismiss: () -> Unit, onDeleted: () -> Unit = {}) {
+    val scope = rememberCoroutineScope()
     item ?: return
     AlertDialog(onDismiss,
-        confirmButton = { TextButton(onClick = { onDismiss(); Media.deleteDownload(item.id.toString()); onDeleted() }) { Text("Delete") } },
+        confirmButton = { TextButton(onClick = {
+            onDismiss()
+            scope.launch { withContext(Dispatchers.IO) { Media.deleteDownload(item.id.toString()) }; onDeleted() }
+        }) { Text("Delete") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
         text = { Text("Delete download of ${itemLabel(item)}?") })
 }
@@ -323,7 +329,7 @@ fun LibraryScreen(modifier: Modifier, screen: Screen.Library, push: (Screen) -> 
                 horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 items(list, key = { it.id }) { item ->
                     if (item.type == BaseItemKind.SERIES) Poster(item, null, onClick = { push(Screen.Series(item.id.toString(), item.name.orEmpty())) })
-                    else Poster(item, statuses[item.id.toString()],
+                    else Poster(item, statuses?.get(item.id.toString()),
                         onClick = { push(Screen.Play(item.id.toString())) },
                         onStartOver = { push(Screen.Play(item.id.toString(), fromStart = true)) },
                         onChanged = { refresh++ })
@@ -375,6 +381,7 @@ fun SeriesScreen(modifier: Modifier, screen: Screen.Series, push: (Screen) -> Un
     val seasons = loadFresh(screen.id, retry) { App.server.seasons(screen.id) }
     var keepNext by remember { mutableIntStateOf(App.prefs.keepNext(screen.id)) }
     val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
     Column(modifier.fillMaxSize()) {
         Bar(screen.name, pop) {
             DownloadAllButton("Download all", true) { App.server.episodes(screen.id, sources = true).filter { it.parentIndexNumber != 0 } }
@@ -384,8 +391,10 @@ fun SeriesScreen(modifier: Modifier, screen: Screen.Series, push: (Screen) -> Un
             fun set(n: Int) {
                 keepNext = n
                 App.prefs.setKeepNext(screen.id, n)
-                if (n == 0) Media.releaseKeepNext(screen.id)
-                Housekeeping.enqueue(ctx)
+                scope.launch(Dispatchers.IO) {
+                    if (n == 0) Media.releaseKeepNext(screen.id)
+                    Housekeeping.enqueue(ctx)
+                }
             }
             TextButton(onClick = { set(keepNext - 1) }, enabled = keepNext > 0) { Text("−") }
             Text(if (keepNext == 0) "off" else "$keepNext")
@@ -425,7 +434,7 @@ fun SeasonScreen(modifier: Modifier, screen: Screen.Season, push: (Screen) -> Un
                 items(list, key = { it.id }) { ep ->
                     EpisodeRow(
                         ep,
-                        statuses[ep.id.toString()],
+                        statuses?.get(ep.id.toString()),
                         onPlay = { push(Screen.Play(ep.id.toString())) },
                         onStartOver = { push(Screen.Play(ep.id.toString(), fromStart = true)) },
                         onChanged = { refresh++ },
@@ -526,17 +535,16 @@ private fun ItemMenu(item: BaseItemDto, expanded: Boolean, onDismiss: () -> Unit
 @Composable
 fun DownloadsScreen(modifier: Modifier, push: (Screen) -> Unit, pop: () -> Unit) {
     val statuses = rememberDownloadStatuses()
-    // (header key, header, download): unfinished first in queue order, then finished by series, movies last.
-    val downloads = remember(statuses.mapValues { it.value.fill }) {
-        val (done, queue) = Media.downloads().partition { Media.isComplete(Media.key(it.item)) }
-        queue.sortedWith(Media.queueOrder).map { Triple("h-queue", "Queue", it) } +
-            done.sortedWith(compareBy({ it.item.seriesId == null }, { it.item.seriesName }, { it.item.seriesId },
-                { it.item.parentIndexNumber }, { it.item.indexNumber }, { it.item.name }))
-                .map { d -> d.item.seriesId?.let { Triple("h-$it", d.item.seriesName.orEmpty(), d) } ?: Triple("h-movies", "Movies", d) }
+    // (header key, header, status): unfinished first in queue order, then finished by series, movies last.
+    val downloads = remember(statuses) {
+        val (done, queue) = statuses.orEmpty().values.partition { it.fill == Media.Fill.DONE }
+        queue.sortedWith(compareBy(Media.queueOrder) { it.download }).map { Triple("h-queue", "Queue", it) } +
+            done.sortedWith(compareBy(Media.shelfOrder) { it.download })
+                .map { s -> s.download.item.seriesId?.let { Triple("h-$it", s.download.item.seriesName.orEmpty(), s) } ?: Triple("h-movies", "Movies", s) }
     }
     val storage by produceState("", statuses) {
         val (buffered, free) = withContext(Dispatchers.IO) { Media.bufferedBytes() to Media.freeBytes() }
-        value = "Downloads ${formatBytes(statuses.values.sumOf { it.bytes })} · buffer ${formatBytes(buffered)} of ${App.prefs.cacheLimitGb} GB · ${formatBytes(free)} free"
+        value = "Downloads ${formatBytes(statuses.orEmpty().values.sumOf { it.bytes })} · buffer ${formatBytes(buffered)} of ${App.prefs.cacheLimitGb} GB · ${formatBytes(free)} free"
     }
     val scope = rememberCoroutineScope()
     var deleting by remember { mutableStateOf<BaseItemDto?>(null) }
@@ -544,32 +552,31 @@ fun DownloadsScreen(modifier: Modifier, push: (Screen) -> Unit, pop: () -> Unit)
     Column(modifier.fillMaxSize()) {
         Bar("Downloads", pop)
         Text(storage, Modifier.padding(horizontal = 16.dp))
-        if (downloads.isEmpty()) Text("Nothing downloaded. Long-press an episode or movie, or use Download season.", Modifier.padding(16.dp))
+        if (statuses != null && downloads.isEmpty()) Text("Nothing downloaded. Long-press an episode or movie, or use Download season.", Modifier.padding(16.dp))
         LazyColumn {
             var lastGroup: String? = null
-            for ((group, title, d) in downloads) {
+            for ((group, title, status) in downloads) {
                 if (group != lastGroup) {
                     lastGroup = group
                     item(key = group) { Text(title, style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(16.dp, 12.dp, 16.dp, 4.dp)) }
                 }
+                val d = status.download
                 item(key = d.item.id) {
                     val id = d.item.id.toString()
-                    val status = statuses[id]
-                    val done = status?.fill == Media.Fill.DONE
                     Row(Modifier.fillMaxWidth().combinedClickable(onClick = { push(Screen.Play(id)) }).padding(horizontal = 16.dp, vertical = 8.dp),
                         verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
                             Text(itemLabel(d.item))
-                            val size = status?.bytes?.takeIf { it > 0 }?.let { " · ${formatBytes(it)}" } ?: ""
-                            Text((status?.label ?: "") + size + if (d.auto) " · kept by keep-next" else "", style = MaterialTheme.typography.labelSmall)
-                            if (status != null && !done) LinearProgressIndicator({ status.percent / 100f }, Modifier.fillMaxWidth().padding(top = 4.dp))
+                            val size = status.bytes.takeIf { it > 0 }?.let { " · ${formatBytes(it)}" } ?: ""
+                            Text(status.label + size + if (d.auto) " · kept by keep-next" else "", style = MaterialTheme.typography.labelSmall)
+                            if (status.fill != Media.Fill.DONE) LinearProgressIndicator({ status.percent / 100f }, Modifier.fillMaxWidth().padding(top = 4.dp))
                         }
-                        when (status?.fill) {
-                            Media.Fill.RUNNING, Media.Fill.QUEUED -> TextButton(onClick = { Media.pauseDownload(id) }) { Text("Pause") }
+                        when (status.fill) {
+                            Media.Fill.RUNNING, Media.Fill.QUEUED -> TextButton(onClick = { scope.launch(Dispatchers.IO) { Media.pauseDownload(id) } }) { Text("Pause") }
                             Media.Fill.PAUSED -> TextButton(onClick = {
-                                scope.launch { Media.startDownload(runCatching { App.server.item(id) }.getOrDefault(d.item), d.auto) }
+                                scope.launch(Dispatchers.IO) { Media.startDownload(runCatching { App.server.item(id) }.getOrDefault(d.item), d.auto) }
                             }) { Text("Resume") }
-                            else -> {}
+                            Media.Fill.DONE -> {}
                         }
                         TextButton(onClick = { deleting = d.item }) { Text("Delete") }
                     }

@@ -161,6 +161,9 @@ object Media {
     @Volatile var downloading: String? = null
 
     val queueOrder = compareBy<Download>({ it.queuedAt }, { it.item.parentIndexNumber }, { it.item.indexNumber })
+    /** Finished downloads: grouped by series in season order, movies last. */
+    val shelfOrder = compareBy<Download>({ it.item.seriesId == null }, { it.item.seriesName }, { it.item.seriesId },
+        { it.item.parentIndexNumber }, { it.item.indexNumber }, { it.item.name })
 
     /** Next unfinished, unpaused download in queue order. */
     fun nextDownload(): Download? =
@@ -263,7 +266,7 @@ object Media {
 
     enum class Fill { DONE, RUNNING, QUEUED, PAUSED }
     /** [position] is 1 for the next queued item; [waitingFor] is [downloadsWaitingFor]. */
-    data class DownloadStatus(val percent: Int, val fill: Fill, val bytes: Long, val position: Int = 0, val waitingFor: String? = null) {
+    data class DownloadStatus(val download: Download, val percent: Int, val fill: Fill, val bytes: Long, val position: Int = 0, val waitingFor: String? = null) {
         val label get() = when (fill) {
             Fill.DONE -> "downloaded"
             Fill.RUNNING -> "${waitingFor ?: "downloading"} $percent%"
@@ -290,7 +293,7 @@ object Media {
                 current == id -> Fill.RUNNING
                 else -> Fill.QUEUED
             }
-            id to DownloadStatus(if (len > 0) (bytes * 100 / len).toInt() else 0, fill, bytes, queue.indexOf(id) + 1, waitingFor)
+            id to DownloadStatus(d, if (len > 0) (bytes * 100 / len).toInt() else 0, fill, bytes, queue.indexOf(id) + 1, waitingFor)
         }
     }
 
