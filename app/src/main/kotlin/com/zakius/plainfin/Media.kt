@@ -24,7 +24,9 @@ import androidx.work.ExistingWorkPolicy
 import androidx.work.ForegroundInfo
 import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkInfo
 import androidx.work.WorkManager
+import androidx.work.WorkQuery
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
 import java.io.File
@@ -37,6 +39,7 @@ import kotlinx.serialization.json.Json
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.jellyfin.sdk.model.api.BaseItemDto
+import org.jellyfin.sdk.model.api.BaseItemKind
 import org.jellyfin.sdk.model.api.MediaStream
 import org.jellyfin.sdk.model.api.MediaStreamType
 import java.time.Instant
@@ -149,6 +152,37 @@ object Media {
 
     fun pauseDownload(id: String) = WorkManager.getInstance(ctx).cancelUniqueWork("fill-$id")
 
+    enum class Fill { DONE, RUNNING, QUEUED, PAUSED }
+    data class DownloadStatus(val percent: Int, val fill: Fill, val bytes: Long) {
+        val label get() = when (fill) {
+            Fill.DONE -> "downloaded"
+            Fill.RUNNING -> "downloading $percent%"
+            Fill.QUEUED -> "queued $percent%" + if (App.prefs.downloadOnMetered) "" else " · Wi-Fi only"
+            Fill.PAUSED -> "paused $percent%"
+        }
+    }
+
+    /** Status of every download, from the cache and WorkManager in one query. Blocking: call off the main thread. */
+    fun downloadStatuses(): Map<String, DownloadStatus> {
+        val active = WorkManager.getInstance(ctx)
+            .getWorkInfos(WorkQuery.fromStates(WorkInfo.State.ENQUEUED, WorkInfo.State.RUNNING, WorkInfo.State.BLOCKED)).get()
+            .flatMap { info -> info.tags.filter { it.startsWith("fill-") }.map { it.removePrefix("fill-") to info.state } }
+            .toMap()
+        return downloads().associate { d ->
+            val id = d.item.id.toString()
+            val key = key(d.item)
+            val len = contentLength(key)
+            val bytes = cachedBytes(key)
+            val fill = when {
+                len > 0 && cache.isCached(key, 0, len) -> Fill.DONE
+                active[id] == WorkInfo.State.RUNNING -> Fill.RUNNING
+                active[id] != null -> Fill.QUEUED
+                else -> Fill.PAUSED
+            }
+            id to DownloadStatus(if (len > 0) (bytes * 100 / len).toInt() else 0, fill, bytes)
+        }
+    }
+
     // --- buffering -------------------------------------------------------------------------------
 
     /** Fills the cache from [position] to the end while the player is open. */
@@ -167,6 +201,7 @@ object Media {
         val request = OneTimeWorkRequestBuilder<FillWorker>()
             .setInputData(workDataOf("id" to id, "key" to key(item), "url" to App.server.streamUrl(id, source.id!!), "position" to position, "pinned" to pinned))
             .setConstraints(Constraints(requiredNetworkType = if (metered) NetworkType.CONNECTED else NetworkType.UNMETERED))
+            .addTag("fill-$id")
             .build()
         // A download replaces a running buffer fill; a buffer fill never replaces a download.
         WorkManager.getInstance(ctx).enqueueUniqueWork("fill-$id", if (pinned) ExistingWorkPolicy.REPLACE else ExistingWorkPolicy.KEEP, request)
@@ -216,8 +251,16 @@ class FillWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
         val pinned = inputData.getBoolean("pinned", false)
         var position = inputData.getLong("position", 0)
         if (pinned) {
-            runCatching { setForeground(foregroundInfo(id)) }
+            runCatching { setForeground(foregroundInfo(id, null)) }
             Media.download(id)?.let { withContext(Dispatchers.IO) { Media.fetchSubtitles(it.item) } }
+        }
+        var lastUpdate = 0L
+        val progress = CacheWriter.ProgressListener { length, cached, _ ->
+            val now = System.currentTimeMillis()
+            if (pinned && length > 0 && now - lastUpdate > 1_000) {
+                lastUpdate = now
+                setForegroundAsync(foregroundInfo(id, (cached * 100 / length).toInt()))
+            }
         }
         return try {
             // The player may hold a lock on a range while this runs and the writer then skips it, so
@@ -227,7 +270,7 @@ class FillWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
                     Media.dataSourceFactory(blockOnCache = true).createDataSource(),
                     DataSpec.Builder().setUri(url).setPosition(position).setKey(key).build(),
                     null,
-                    null,
+                    progress,
                 )
                 runInterruptible(Dispatchers.IO) { writer.cache() }
                 val len = Media.contentLength(key)
@@ -242,14 +285,17 @@ class FillWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
         }
     }
 
-    private fun foregroundInfo(id: String): ForegroundInfo {
+    private fun foregroundInfo(id: String, percent: Int?): ForegroundInfo {
         val nm = applicationContext.getSystemService(NotificationManager::class.java)
         if (Build.VERSION.SDK_INT >= 26) nm.createNotificationChannel(NotificationChannel("downloads", "Downloads", NotificationManager.IMPORTANCE_LOW))
-        val name = Media.download(id)?.item?.name ?: "Downloading"
+        val item = Media.download(id)?.item
+        val name = item?.let { if (it.type == BaseItemKind.EPISODE) "${it.seriesName} · ${episodeLabel(it)}" else it.name } ?: "Downloading"
         val n = NotificationCompat.Builder(applicationContext, "downloads")
             .setSmallIcon(android.R.drawable.stat_sys_download)
             .setContentTitle(name)
+            .setProgress(100, percent ?: 0, percent == null)
             .setOngoing(true)
+            .setOnlyAlertOnce(true)
             .build()
         return if (Build.VERSION.SDK_INT >= 29) ForegroundInfo(id.hashCode(), n, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
         else ForegroundInfo(id.hashCode(), n)

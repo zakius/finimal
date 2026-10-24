@@ -322,6 +322,7 @@ private fun Playback(
         )
     }
 
+    val downloads = rememberDownloadStatuses()
     if (fullscreen) {
         video(Modifier.fillMaxSize())
     } else {
@@ -334,7 +335,7 @@ private fun Playback(
                     item.overview?.let { Text(it, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(vertical = 8.dp)) }
                 }
                 items(siblings.filter { it.seasonId == item.seasonId }, key = { it.id }) { ep ->
-                    EpisodeRow(ep, highlighted = ep.id == item.id, onPlay = { onPlay(ep.id.toString()) })
+                    EpisodeRow(ep, downloads[ep.id.toString()], highlighted = ep.id == item.id, onPlay = { onPlay(ep.id.toString()) })
                 }
             }
         }

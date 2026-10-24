@@ -1,6 +1,9 @@
 package com.zakius.plainfin
 
 import android.content.Context
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.lifecycle.ProcessLifecycleOwner
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.CoroutineScope
@@ -80,11 +83,20 @@ class Server(context: Context) {
         prefs.token = auth.accessToken
         prefs.userId = auth.user!!.id.toString()
         api.update(baseUrl = base, accessToken = auth.accessToken)
+        sessionExpired = false
     }
 
     fun logout() {
         prefs.logout()
         api.update(accessToken = null)
+    }
+
+    /** Set when the server rejects the token; the UI returns to login. Unsynced progress is kept and pushed after. */
+    var sessionExpired by mutableStateOf(false)
+
+    fun expire() {
+        logout()
+        sessionExpired = true
     }
 
     suspend fun libraries(): List<BaseItemDto> =

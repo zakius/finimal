@@ -1,5 +1,7 @@
 package com.zakius.plainfin
 
+import android.content.Context
+import android.widget.Toast
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
@@ -58,8 +60,11 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.launch
+import org.jellyfin.sdk.api.client.exception.InvalidStatusException
 import org.jellyfin.sdk.model.api.BaseItemDto
 import org.jellyfin.sdk.model.api.BaseItemKind
 import org.jellyfin.sdk.model.api.ImageType
@@ -70,7 +75,34 @@ private fun <T> loadFresh(vararg keys: Any?, block: suspend () -> T): Result<T>?
     produceState<Result<T>?>(null, *keys) {
         App.server.flush()
         value = runCatching { block() }
+            .onFailure { if (it is InvalidStatusException && it.status == 401) App.server.expire() }
     }.value
+
+/** Download statuses, refreshed every second while the screen is shown. */
+@Composable
+fun rememberDownloadStatuses(): Map<String, Media.DownloadStatus> =
+    produceState(emptyMap()) {
+        while (true) {
+            value = withContext(Dispatchers.IO) { Media.downloadStatuses() }
+            delay(1_000)
+        }
+    }.value
+
+/** Queues downloads and says how many were queued. */
+private suspend fun downloadAll(context: Context, episodes: List<BaseItemDto>) {
+    val queued = episodes.count { ep ->
+        Media.download(ep.id.toString()) == null &&
+            runCatching { Media.startDownload(App.server.item(ep.id.toString()), auto = false) }.isSuccess
+    }
+    val text = when {
+        queued == 0 -> "Nothing new to download"
+        queued == 1 -> "Downloading 1 episode"
+        else -> "Downloading $queued episodes"
+    }
+    Toast.makeText(context, text + if (queued > 0 && !App.prefs.downloadOnMetered) " (Wi-Fi only)" else "", Toast.LENGTH_SHORT).show()
+}
+
+fun formatBytes(b: Long) = if (b >= 1e9) "%.1f GB".format(b / 1e9) else "%.0f MB".format(b / 1e6)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -104,6 +136,7 @@ fun LoginScreen(modifier: Modifier, onDone: () -> Unit) {
     val scope = rememberCoroutineScope()
     Column(modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("plainfin", style = MaterialTheme.typography.headlineMedium)
+        if (App.server.sessionExpired) Text("The server ended this session. Log in again; unsynced progress is kept.")
         OutlinedTextField(url, { url = it }, label = { Text("Server URL") }, singleLine = true, modifier = Modifier.fillMaxWidth(),
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri))
         OutlinedTextField(user, { user = it }, label = { Text("Username") }, singleLine = true, modifier = Modifier.fillMaxWidth())
@@ -211,8 +244,11 @@ fun SeriesScreen(modifier: Modifier, screen: Screen.Series, push: (Screen) -> Un
         Bar(screen.name, pop) {
             TextButton(enabled = !downloading, onClick = {
                 downloading = true
-                scope.launch { downloadAll(App.server.episodes(screen.id).filter { it.parentIndexNumber != 0 }); downloading = false }
-            }) { Text("Download all") }
+                scope.launch {
+                    runCatching { downloadAll(ctx, App.server.episodes(screen.id).filter { it.parentIndexNumber != 0 }) }
+                    downloading = false
+                }
+            }) { Text(if (downloading) "Queuing…" else "Download all") }
         }
         Row(Modifier.padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
             Text("Keep next episodes downloaded:", Modifier.weight(1f))
@@ -239,24 +275,27 @@ fun SeriesScreen(modifier: Modifier, screen: Screen.Series, push: (Screen) -> Un
     }
 }
 
-private suspend fun downloadAll(episodes: List<BaseItemDto>) {
-    for (ep in episodes) if (Media.download(ep.id.toString()) == null) runCatching { Media.startDownload(App.server.item(ep.id.toString()), auto = false) }
-}
-
 @Composable
 fun SeasonScreen(modifier: Modifier, screen: Screen.Season, push: (Screen) -> Unit, pop: () -> Unit) {
     var refresh by remember { mutableIntStateOf(0) }
     val episodes = loadFresh(screen.seasonId, refresh) { App.server.episodes(screen.seriesId, screen.seasonId) }
     val scope = rememberCoroutineScope()
+    val ctx = LocalContext.current
+    val statuses = rememberDownloadStatuses()
+    var queuing by remember { mutableStateOf(false) }
     Column(modifier.fillMaxSize()) {
         Bar(screen.name, pop) {
-            TextButton(onClick = { scope.launch { downloadAll(episodes?.getOrNull().orEmpty()); refresh++ } }) { Text("Download season") }
+            TextButton(enabled = !queuing, onClick = {
+                queuing = true
+                scope.launch { downloadAll(ctx, episodes?.getOrNull().orEmpty()); queuing = false }
+            }) { Text(if (queuing) "Queuing…" else "Download season") }
         }
         Loaded(episodes, onDownloads = { push(Screen.Downloads) }) { list ->
             LazyColumn {
                 items(list, key = { it.id }) { ep ->
                     EpisodeRow(
                         ep,
+                        statuses[ep.id.toString()],
                         onPlay = { push(Screen.Play(ep.id.toString())) },
                         onStartOver = { push(Screen.Play(ep.id.toString(), fromStart = true)) },
                         onChanged = { refresh++ },
@@ -272,6 +311,7 @@ fun SeasonScreen(modifier: Modifier, screen: Screen.Season, push: (Screen) -> Un
 @Composable
 fun EpisodeRow(
     ep: BaseItemDto,
+    download: Media.DownloadStatus?,
     highlighted: Boolean = false,
     onPlay: () -> Unit,
     onStartOver: (() -> Unit)? = null,
@@ -279,9 +319,8 @@ fun EpisodeRow(
 ) {
     val (state, unsynced) = ep.localState()
     val id = ep.id.toString()
-    val download = Media.download(id)
     val downloaded = download != null
-    val complete = download != null && Media.isComplete(Media.key(download.item))
+    val ctx = LocalContext.current
     var menu by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     Box {
@@ -305,8 +344,7 @@ fun EpisodeRow(
                 val bits = listOfNotNull(
                     ep.runTimeTicks?.let { formatMs(it / 10_000) },
                     "✓ played".takeIf { state?.played == true },
-                    "downloaded".takeIf { complete },
-                    "downloading".takeIf { downloaded && !complete },
+                    download?.label,
                     "not synced".takeIf { unsynced },
                 )
                 Text(bits.joinToString(" · "), style = MaterialTheme.typography.labelSmall)
@@ -322,7 +360,7 @@ fun EpisodeRow(
             if (downloaded) DropdownMenuItem({ Text("Delete download") }, { menu = false; Media.deleteDownload(id); onChanged() })
             else DropdownMenuItem({ Text("Download") }, {
                 menu = false
-                scope.launch { runCatching { Media.startDownload(App.server.item(id), auto = false) }; onChanged() }
+                scope.launch { downloadAll(ctx, listOf(ep)) }
             })
         }
     }
@@ -332,16 +370,15 @@ fun EpisodeRow(
 
 @Composable
 fun DownloadsScreen(modifier: Modifier, push: (Screen) -> Unit, pop: () -> Unit) {
-    var tick by remember { mutableIntStateOf(0) }
-    LaunchedEffect(Unit) { while (true) { delay(1_000); tick++ } }
-    val downloads = remember(tick) {
+    val statuses = rememberDownloadStatuses()
+    val downloads = remember(statuses.keys) {
         Media.downloads().sortedWith(compareBy({ it.item.seriesName ?: it.item.name }, { it.item.parentIndexNumber }, { it.item.indexNumber }))
     }
     val scope = rememberCoroutineScope()
-    val total = remember(tick) { downloads.sumOf { Media.cachedBytes(Media.key(it.item)) } }
     Column(modifier.fillMaxSize()) {
         Bar("Downloads", pop)
-        Text("Using %.1f GB".format(total / 1e9), Modifier.padding(horizontal = 16.dp))
+        Text("Using ${formatBytes(statuses.values.sumOf { it.bytes })}", Modifier.padding(horizontal = 16.dp))
+        if (downloads.isEmpty()) Text("Nothing downloaded. Long-press an episode or use Download season.", Modifier.padding(16.dp))
         LazyColumn {
             var lastGroup: String? = null
             for (d in downloads) {
@@ -352,23 +389,24 @@ fun DownloadsScreen(modifier: Modifier, push: (Screen) -> Unit, pop: () -> Unit)
                 }
                 item(key = d.item.id) {
                     val id = d.item.id.toString()
-                    val key = Media.key(d.item)
-                    val len = Media.contentLength(key)
-                    val pct = if (len > 0) (Media.cachedBytes(key) * 100 / len).toInt() else 0
-                    val done = Media.isComplete(key)
+                    val status = statuses[id]
+                    val done = status?.fill == Media.Fill.DONE
                     Row(Modifier.fillMaxWidth().combinedClickable(onClick = { push(Screen.Play(id)) }).padding(horizontal = 16.dp, vertical = 8.dp),
                         verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
                             Text(if (d.item.type == BaseItemKind.EPISODE) episodeLabel(d.item) else d.item.name.orEmpty())
-                            Text((if (done) "done" else "$pct%") + if (d.auto) " · kept by keep-next" else "", style = MaterialTheme.typography.labelSmall)
+                            val size = status?.bytes?.takeIf { it > 0 }?.let { " · ${formatBytes(it)}" } ?: ""
+                            Text((status?.label ?: "") + size + if (d.auto) " · kept by keep-next" else "", style = MaterialTheme.typography.labelSmall)
+                            if (status != null && !done) LinearProgressIndicator({ status.percent / 100f }, Modifier.fillMaxWidth().padding(top = 4.dp))
                         }
-                        if (!done) {
-                            TextButton(onClick = { Media.pauseDownload(id) }) { Text("Pause") }
-                            TextButton(onClick = {
+                        when (status?.fill) {
+                            Media.Fill.RUNNING, Media.Fill.QUEUED -> TextButton(onClick = { Media.pauseDownload(id) }) { Text("Pause") }
+                            Media.Fill.PAUSED -> TextButton(onClick = {
                                 scope.launch { Media.startDownload(runCatching { App.server.item(id) }.getOrDefault(d.item), d.auto) }
                             }) { Text("Resume") }
+                            else -> {}
                         }
-                        TextButton(onClick = { Media.deleteDownload(id); tick++ }) { Text("Delete") }
+                        TextButton(onClick = { Media.deleteDownload(id) }) { Text("Delete") }
                     }
                 }
             }
