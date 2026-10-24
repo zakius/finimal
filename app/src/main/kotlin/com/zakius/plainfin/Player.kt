@@ -30,6 +30,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.Button
@@ -564,8 +565,7 @@ private fun VideoSurface(
         if (playerError != null) {
             Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
                 val known = playbackError(playerError)
-                Text(known ?: "Playback failed.", color = Color.White)
-                if (known == null) Text(playerError.errorCodeName, color = Color.White, style = MaterialTheme.typography.bodySmall)
+                ErrorText(known ?: "Playback failed.", playerError.errorCodeName.takeIf { known == null }, Color.White)
                 Button(onClick = onRetry) { Text("Retry") }
             }
         }
@@ -629,28 +629,27 @@ private fun Controls(
                             DropdownMenuItem({ Text(if (rotationLocked) "Unlock rotation" else "Lock rotation") }, { onRotationLock(); menu = false })
                         }
                         "speed" -> listOf(0.5f, 0.75f, 1f, 1.25f, 1.5f, 2f).forEach { s ->
-                            val mark = if (player.playbackParameters.speed == s) "✓ " else ""
-                            DropdownMenuItem({ Text("$mark${s}x") }, { sessionSpeed = s; player.setPlaybackSpeed(s); menu = false; sub = null })
+                            Choice("${s}x", player.playbackParameters.speed == s) { sessionSpeed = s; player.setPlaybackSpeed(s); menu = false; sub = null }
                         }
                         "size" -> listOf(50, 75, 100, 125, 150, 200).forEach { s ->
-                            DropdownMenuItem({ Text((if (App.prefs.subtitleScale == s) "✓ " else "") + "$s%") }, {
+                            Choice("$s%", App.prefs.subtitleScale == s) {
                                 App.prefs.subtitleScale = s
                                 subtitleView?.setFractionalTextSize(SubtitleView.DEFAULT_TEXT_SIZE_FRACTION * s / 100f)
                                 menu = false; sub = null
-                            })
+                            }
                         }
                         "audio", "text" -> {
                             val type = if (sub == "audio") C.TRACK_TYPE_AUDIO else C.TRACK_TYPE_TEXT
-                            if (type == C.TRACK_TYPE_TEXT) DropdownMenuItem({ Text((if (C.TRACK_TYPE_TEXT in player.trackSelectionParameters.disabledTrackTypes) "✓ " else "") + "Off") }, {
+                            if (type == C.TRACK_TYPE_TEXT) Choice("Off", C.TRACK_TYPE_TEXT in player.trackSelectionParameters.disabledTrackTypes) {
                                 player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true).build()
                                 onTracksChosen(selectedLanguage(player, C.TRACK_TYPE_AUDIO), "")
                                 menu = false; sub = null
-                            })
+                            }
                             player.currentTracks.groups.filter { it.type == type }.forEach { group ->
                                 for (i in 0 until group.length) {
                                     val f = group.getTrackFormat(i)
                                     val label = listOfNotNull(f.label, f.language, f.codecs).joinToString(" · ").ifEmpty { "Track ${i + 1}" }
-                                    DropdownMenuItem({ Text((if (group.isTrackSelected(i)) "✓ " else "") + label) }, {
+                                    Choice(label, group.isTrackSelected(i)) {
                                         player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
                                             .setTrackTypeDisabled(type, false)
                                             .setOverrideForType(TrackSelectionOverride(group.mediaTrackGroup, i))
@@ -661,7 +660,7 @@ private fun Controls(
                                         // Re-read from here so the current subtitle line shows now, not at the next one.
                                         if (type == C.TRACK_TYPE_TEXT) player.seekTo(player.currentPosition)
                                         menu = false; sub = null
-                                    })
+                                    }
                                 }
                             }
                         }
@@ -695,6 +694,11 @@ private fun Controls(
         }
     }
 }
+
+/** A menu entry ticked when it is the current choice. */
+@Composable
+private fun Choice(label: String, selected: Boolean, onClick: () -> Unit) =
+    DropdownMenuItem({ Text(label) }, onClick, trailingIcon = { if (selected) Icon(Icons.Default.Check, null) })
 
 /** Language of the selected track, "" when that type is off, null when unknown. */
 private fun selectedLanguage(player: ExoPlayer, type: Int): String? {

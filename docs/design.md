@@ -7,7 +7,7 @@ A Jellyfin client for Android that goes straight to the library. It prefers a fe
 - Android phone and tablet, portrait and landscape. Minimum API 26. No Google Play Services: it must run on EMUI.
 - One server, one user. Username/password login; the token is stored.
   - A server URL without a scheme tries https first, then http if https can't connect.
-  - Login errors say "Wrong username or password" (HTTP 401) or "Can't reach the server at <url>"; anything else shows a generic sentence with the raw error in small text.
+  - Login errors say "Wrong username or password" (HTTP 401). Anything else gets the same sentence as a list that fails to load ("Can't reach the server at <url>", a server error with its status, or a generic message), with the raw error in small text.
 - Movies and TV shows only. Other library types are hidden.
 - Out of scope: Android TV, background audio, picture-in-picture, Quick Connect, home rows, Next Up, Continue Watching.
 - Desktop is a maybe. Keep `core` free of Android imports so a JVM desktop app with libmpv could reuse it.

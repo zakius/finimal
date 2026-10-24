@@ -156,29 +156,27 @@ private fun DownloadAllButton(label: String, enabled: Boolean, fetch: suspend ()
     }) { Text(if (busy) "Queuing…" else label) }
     pending?.let { eps ->
         val total = eps.mapNotNull { it.mediaSources?.firstOrNull()?.size }.takeIf { it.size == eps.size }?.sum()
-        AlertDialog({ pending = null },
-            confirmButton = { TextButton(onClick = {
-                pending = null
-                busy = true
-                scope.launch { downloadAll(ctx, eps); busy = false }
-            }) { Text("Download") } },
-            dismissButton = { TextButton(onClick = { pending = null }) { Text("Cancel") } },
-            text = { Text("Download ${eps.size} episode${if (eps.size == 1) "" else "s"}" + (total?.let { ", about ${formatBytes(it)}" } ?: "") + "?") })
+        Confirm("Download ${eps.size} episode${if (eps.size == 1) "" else "s"}" + (total?.let { ", about ${formatBytes(it)}" } ?: "") + "?", "Download", {
+            busy = true
+            scope.launch { downloadAll(ctx, eps); busy = false }
+        }, { pending = null })
     }
 }
+
+@Composable
+private fun Confirm(text: String, confirmLabel: String, onConfirm: () -> Unit, onDismiss: () -> Unit) = AlertDialog(onDismiss,
+    confirmButton = { TextButton(onClick = { onDismiss(); onConfirm() }) { Text(confirmLabel) } },
+    dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    text = { Text(text) })
 
 /** Asks before deleting [item]'s download; shows nothing while [item] is null. */
 @Composable
 private fun ConfirmDelete(item: BaseItemDto?, onDismiss: () -> Unit, onDeleted: () -> Unit = {}) {
     val scope = rememberCoroutineScope()
     item ?: return
-    AlertDialog(onDismiss,
-        confirmButton = { TextButton(onClick = {
-            onDismiss()
-            scope.launch { withContext(Dispatchers.IO) { Media.deleteDownload(item.id.toString()) }; onDeleted() }
-        }) { Text("Delete") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
-        text = { Text("Delete download of ${itemLabel(item)}?") })
+    Confirm("Delete download of ${itemLabel(item)}?", "Delete", {
+        scope.launch { withContext(Dispatchers.IO) { Media.deleteDownload(item.id.toString()) }; onDeleted() }
+    }, onDismiss)
 }
 
 fun itemLabel(item: BaseItemDto) = if (item.type == BaseItemKind.EPISODE) episodeLabel(item) else item.name.orEmpty()
@@ -199,14 +197,20 @@ private fun loadError(e: Throwable) = when {
     else -> "Something went wrong"
 }
 
+/** A plain [sentence], with the [raw] error under it in small text. */
+@Composable
+fun ErrorText(sentence: String, raw: String?, color: Color = Color.Unspecified) {
+    Text(sentence, color = color)
+    raw?.let { Text(it, color = color, style = MaterialTheme.typography.bodySmall) }
+}
+
 @Composable
 private fun <T> Loaded(result: Result<T>?, onRetry: () -> Unit, onDownloads: () -> Unit, content: @Composable (T) -> Unit) {
     when {
         result == null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("Loading…") }
         result.isFailure -> Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
             val e = result.exceptionOrNull()!!
-            Text(loadError(e))
-            Text(e.message ?: e.javaClass.simpleName, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            ErrorText(loadError(e), e.message ?: e.javaClass.simpleName)
             Row(Modifier.padding(top = 12.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Button(onClick = onRetry) { Text("Retry") }
                 TextButton(onClick = onDownloads) { Text("Downloads") }
@@ -255,13 +259,8 @@ fun LoginScreen(modifier: Modifier, onDone: () -> Unit) {
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = ImeAction.Done),
             keyboardActions = KeyboardActions(onDone = { submit() }))
         error?.let { e ->
-            val known = when {
-                e is InvalidStatusException && e.status == 401 -> "Wrong username or password"
-                unreachable(e) -> "Can't reach the server at ${url.trim()}"
-                else -> null
-            }
-            Text(known ?: "Couldn't log in", color = MaterialTheme.colorScheme.error)
-            if (known == null) Text(e.message ?: e.javaClass.simpleName, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (e is InvalidStatusException && e.status == 401) Text("Wrong username or password", color = MaterialTheme.colorScheme.error)
+            else ErrorText(loadError(e) + if (unreachable(e)) " at ${url.trim()}" else "", e.message ?: e.javaClass.simpleName, MaterialTheme.colorScheme.error)
         }
         Button(enabled = !busy, onClick = ::submit) {
             if (busy) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp) else Text("Log in")
@@ -615,13 +614,9 @@ fun SettingsScreen(modifier: Modifier, pop: () -> Unit, onLoggedOut: () -> Unit)
     var confirmLogout by remember { mutableStateOf(false) }
     if (confirmLogout) {
         val unsynced = App.pending.all().size
-        AlertDialog({ confirmLogout = false },
-            confirmButton = { TextButton(onClick = { App.server.logout(); onLoggedOut() }) { Text("Log out") } },
-            dismissButton = { TextButton(onClick = { confirmLogout = false }) { Text("Cancel") } },
-            text = {
-                Text("Log out?" + if (unsynced == 0) "" else
-                    " $unsynced item${if (unsynced == 1) " has" else "s have"} progress not synced yet. It is sent after you log back in to the same server.")
-            })
+        Confirm("Log out?" + if (unsynced == 0) "" else
+            " $unsynced item${if (unsynced == 1) " has" else "s have"} progress not synced yet. It is sent after you log back in to the same server.",
+            "Log out", { App.server.logout(); onLoggedOut() }, { confirmLogout = false })
     }
     Column(modifier.fillMaxSize()) {
         Bar("Settings", pop)
