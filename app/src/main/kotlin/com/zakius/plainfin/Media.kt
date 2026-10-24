@@ -18,6 +18,7 @@ import androidx.media3.common.C
 import androidx.media3.database.StandaloneDatabaseProvider
 import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.DefaultDataSource
+import androidx.media3.datasource.HttpDataSource
 import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.cache.CacheWriter
 import androidx.media3.datasource.cache.ContentMetadata
@@ -35,6 +36,7 @@ import androidx.work.WorkerParameters
 import androidx.work.workDataOf
 import java.io.File
 import java.io.IOException
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withContext
@@ -175,6 +177,8 @@ object Media {
         val paused: Boolean = false,
         /** Byte to fill from first, set while the episode plays so the player's part lands on disk first. */
         val startAt: Long = 0,
+        /** The server refused the file (HTTP 4xx, e.g. deleted there); paused with it. Resuming tries again. */
+        val failed: Boolean = false,
     )
 
     private val downloadsDir get() = File(ctx.filesDir, "downloads").apply { mkdirs() }
@@ -254,6 +258,12 @@ object Media {
      * worker fill from [fromByte] first. Nothing happens when the worker is already on it and that
      * position is cached, so rebuffering doesn't restart the worker.
      */
+    /** Takes [id] out of the queue without restarting the worker that calls this. */
+    @Synchronized
+    fun failDownload(id: String) {
+        download(id)?.let { write(it.copy(paused = true, failed = true)) }
+    }
+
     @Synchronized
     fun prioritize(id: String, fromByte: Long) {
         val d = download(id) ?: return
@@ -311,7 +321,7 @@ object Media {
             Fill.DONE -> "downloaded"
             Fill.RUNNING -> "${waitingFor ?: "downloading"} · $percent%"
             Fill.QUEUED -> "${waitingFor ?: "queued #$position"} · $percent%"
-            Fill.PAUSED -> "paused · $percent%"
+            Fill.PAUSED -> "${if (download.failed) "failed" else "paused"} · $percent%"
         }
     }
 
@@ -439,11 +449,18 @@ class DownloadWorker(context: Context, params: WorkerParameters) : CoroutineWork
         var current: String? = null
         try {
             while (true) {
-                val d = Media.nextDownload() ?: return Result.success()
+                var d = Media.nextDownload() ?: return Result.success()
                 val id = d.item.id.toString()
-                val source = d.item.mediaSources?.firstOrNull() ?: return Result.failure()
                 current = id
                 Media.downloading = id
+                // A file replaced on the server since queuing starts over under its new key.
+                val fresh = try { App.server.item(id) } catch (e: CancellationException) { throw e } catch (e: Exception) { null }
+                if (fresh != null && Media.key(fresh) != Media.key(d.item)) {
+                    Media.startDownload(fresh, d.auto)
+                    d = Media.download(id) ?: continue
+                }
+                val source = d.item.mediaSources?.firstOrNull()
+                if (source == null) { Media.failDownload(id); continue }
                 runCatching { setForeground(foregroundInfo(d, null)) }
                 withContext(Dispatchers.IO) { Media.fetchSubtitles(d.item) }
                 var lastUpdate = 0L
@@ -456,12 +473,18 @@ class DownloadWorker(context: Context, params: WorkerParameters) : CoroutineWork
                 }
                 val key = Media.key(d.item)
                 val url = App.server.streamUrl(id, source.id!!)
-                // From the playhead first while the episode plays, then the rest (cached parts are skipped).
-                if (d.startAt > 0) {
-                    if (!fillCache(key, url, d.startAt, progress)) return Result.retry()
-                    Media.clearStartAt(id)
+                try {
+                    // From the playhead first while the episode plays, then the rest (cached parts are skipped).
+                    if (d.startAt > 0) {
+                        if (!fillCache(key, url, d.startAt, progress)) return Result.retry()
+                        Media.clearStartAt(id)
+                    }
+                    if (!fillCache(key, url, 0, progress)) return Result.retry()
+                } catch (e: HttpDataSource.InvalidResponseCodeException) {
+                    // Refused for this item only; retrying would pick it again forever. A 401 is the token: retry.
+                    if (e.responseCode !in 400..499 || e.responseCode == 401) throw e
+                    Media.failDownload(id)
                 }
-                if (!fillCache(key, url, 0, progress)) return Result.retry()
             }
         } catch (e: IOException) {
             return Result.retry()
