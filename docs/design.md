@@ -37,12 +37,12 @@ Libraries → poster grid → series → seasons → episodes.
   - Pinch switches between fit and crop.
 - Audio and subtitle choices are remembered per series.
 - Media segments show a "Skip intro" button. It never skips on its own.
-- Player menu: speed, tracks, subtitle delay and size, rotation lock.
+- Player menu: speed, tracks, subtitle size, rotation lock. Subtitle delay is not built yet: Media3 has no subtitle offset, so it needs its own cue timing. Subtitle size applies to text subtitles; ASS keeps its authored size.
 - Theme follows the system and uses Material You colors.
 
 ## Buffering and downloads
 
-There is one persistent on-disk cache, keyed by item ID.
+There is one persistent on-disk cache. The key is the item ID plus the media source ETag, so a file replaced on the server never mixes with bytes cached from the old one. A finished download keeps playing its own version.
 
 - Buffering is a background fill of the cache to the end of the episode. Playback reads from the cache.
 - A download is the same fill, marked pinned.
@@ -72,8 +72,11 @@ Rules:
 4. Conflicts: the newer LastPlayedDate wins.
 5. Offline plays use the server's default limits: under 5 % stores position 0, over 90 % marks played and stores 0.
 6. Opening a list first pushes pending events, then fetches. If the push or fetch fails, show local state marked "not synced".
+7. Read play state only from list endpoints (`/Items?ids=`). On server 12.3.0, `/Items/{id}` and `/UserItems/{id}/UserData` kept returning a state from before a media file was replaced and rescanned, while list endpoints and the database were correct. A restart cleared it.
+8. The SDK's `LocalDateTime` is in the device's zone, not UTC.
+9. Every local play-state change is also written into the download's stored item, and housekeeping refreshes downloaded items from the server, so offline playback resumes from the latest position.
 
 ## Testing
 
-- Unit tests in `core`: sync queue, conflict rule, played limits, the keep-next-N anchor, range resume.
+- Unit tests in `core`: sync queue, conflict rule, played limits, the keep-next-N anchor, eviction. Resuming an interrupted fill relies on Media3's `CacheWriter`, which skips cached ranges.
 - A local Jellyfin server in Docker with sample media for end-to-end checks.

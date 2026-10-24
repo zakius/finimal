@@ -1,0 +1,88 @@
+package com.zakius.plainfin
+
+import android.os.Build
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.dynamicDarkColorScheme
+import androidx.compose.material3.dynamicLightColorScheme
+import androidx.compose.material3.lightColorScheme
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.key
+import androidx.compose.runtime.saveable.listSaver
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.toMutableStateList
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
+
+@Serializable
+sealed interface Screen {
+    @Serializable data object Login : Screen
+    @Serializable data object Libraries : Screen
+    @Serializable data object Downloads : Screen
+    @Serializable data object Settings : Screen
+    @Serializable data class Library(val id: String?, val name: String) : Screen
+    @Serializable data class Series(val id: String, val name: String) : Screen
+    @Serializable data class Season(val seriesId: String, val seasonId: String, val name: String) : Screen
+    @Serializable data class Play(val itemId: String, val fromStart: Boolean = false) : Screen
+}
+
+class MainActivity : ComponentActivity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
+        setContent { Theme { Root() } }
+    }
+}
+
+@Composable
+private fun Theme(content: @Composable () -> Unit) {
+    val dark = isSystemInDarkTheme()
+    val ctx = LocalContext.current
+    val colors = when {
+        Build.VERSION.SDK_INT >= 31 -> if (dark) dynamicDarkColorScheme(ctx) else dynamicLightColorScheme(ctx)
+        dark -> darkColorScheme()
+        else -> lightColorScheme()
+    }
+    MaterialTheme(colorScheme = colors) { Surface(Modifier.fillMaxSize(), content = content) }
+}
+
+@Composable
+private fun Root() {
+    val stack = rememberSaveable(
+        saver = listSaver(
+            save = { list -> list.map { Json.encodeToString(Screen.serializer(), it) } },
+            restore = { saved -> saved.map { Json.decodeFromString(Screen.serializer(), it) }.toMutableStateList() },
+        )
+    ) { listOf(if (App.server.loggedIn) Screen.Libraries else Screen.Login).toMutableStateList() }
+
+    fun push(s: Screen) = stack.add(s)
+    fun pop() { if (stack.size > 1) stack.removeAt(stack.lastIndex) }
+    fun reset(s: Screen) { stack.clear(); stack.add(s) }
+
+    BackHandler(stack.size > 1) { pop() }
+    val top = stack.last()
+    val padded = Modifier.safeDrawingPadding()
+    // key() gives each screen its own state, so the next episode never inherits the previous player.
+    key(top) { when (top) {
+        Screen.Login -> LoginScreen(padded) { reset(Screen.Libraries) }
+        Screen.Libraries -> LibrariesScreen(padded, ::push)
+        Screen.Downloads -> DownloadsScreen(padded, ::push, ::pop)
+        Screen.Settings -> SettingsScreen(padded, ::pop) { reset(Screen.Login) }
+        is Screen.Library -> LibraryScreen(padded, top, ::push, ::pop)
+        is Screen.Series -> SeriesScreen(padded, top, ::push, ::pop)
+        is Screen.Season -> SeasonScreen(padded, top, ::push, ::pop)
+        // "Play next" replaces the player instead of stacking players.
+        is Screen.Play -> PlayerScreen(top.itemId, top.fromStart, ::pop) { next -> pop(); push(Screen.Play(next)) }
+    } }
+}
