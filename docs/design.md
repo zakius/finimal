@@ -27,7 +27,7 @@ Libraries → poster grid → series → seasons → episodes.
 - An empty list says why in one centred line (no results for the query, nothing unplayed, empty library, no movie or TV libraries).
 - Episodes: thumbnail, played mark, progress bar.
 - Movie posters: played mark, progress bar, download state.
-- Tap: resume from the saved position minus 5 s. Long-press on an episode or movie: start over, mark played/unplayed, download, delete download.
+- Tap: resume from the saved position minus 5 s. The item menu (long-press on an episode or movie, or the ⋮ button on an episode): start over, mark played/unplayed, download, delete download. When the item's progress is not synced, the menu says so and offers "Sync now", which pushes all pending events and toasts the outcome.
 - A list that fails to load says why in plain words (can't reach the server, a server error with its status, or a generic message), with the raw error in small text, a Retry button and a Downloads button.
 - End of an episode: a "Play next" button. The next episode comes from season order, never from the server's Next Up.
 

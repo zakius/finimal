@@ -30,6 +30,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -433,7 +434,7 @@ fun SeasonScreen(modifier: Modifier, screen: Screen.Season, push: (Screen) -> Un
     }
 }
 
-/** Thumbnail, title, progress and download state. Long-press opens the item's actions. */
+/** Thumbnail, title, progress and download state. The ⋮ button or a long-press opens the item's actions. */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun EpisodeRow(
@@ -446,31 +447,32 @@ fun EpisodeRow(
 ) {
     val (state, unsynced) = ep.localState()
     var menu by remember { mutableStateOf(false) }
-    Box {
-        Row(
-            Modifier.fillMaxWidth()
-                .background(if (highlighted) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent)
-                .combinedClickable(onClick = onPlay, onLongClick = { menu = true })
-                .padding(8.dp),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            Column(Modifier.width(140.dp)) {
-                AsyncImage(App.server.imageUrl(ep.id, ImageType.PRIMARY, 320), null, contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9).background(Color.DarkGray))
-                ProgressBar(ep, state)
-            }
-            Column(Modifier.weight(1f)) {
-                Text("${ep.indexNumber ?: ""}. ${ep.name.orEmpty()}", style = MaterialTheme.typography.titleSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                val bits = listOfNotNull(
-                    ep.runTimeTicks?.let { formatMs(it / 10_000) },
-                    "✓ played".takeIf { state?.played == true },
-                    download?.label,
-                    "not synced".takeIf { unsynced },
-                )
-                Text(bits.joinToString(" · "), style = MaterialTheme.typography.labelSmall)
-            }
+    Row(
+        Modifier.fillMaxWidth()
+            .background(if (highlighted) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent)
+            .combinedClickable(onClick = onPlay, onLongClick = { menu = true })
+            .padding(8.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Column(Modifier.width(140.dp)) {
+            AsyncImage(App.server.imageUrl(ep.id, ImageType.PRIMARY, 320), null, contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9).background(Color.DarkGray))
+            ProgressBar(ep, state)
         }
-        ItemMenu(ep, menu, { menu = false }, download != null, onStartOver, onChanged)
+        Column(Modifier.weight(1f)) {
+            Text("${ep.indexNumber ?: ""}. ${ep.name.orEmpty()}", style = MaterialTheme.typography.titleSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            val bits = listOfNotNull(
+                ep.runTimeTicks?.let { formatMs(it / 10_000) },
+                "✓ played".takeIf { state?.played == true },
+                download?.label,
+                "not synced".takeIf { unsynced },
+            )
+            Text(bits.joinToString(" · "), style = MaterialTheme.typography.labelSmall)
+        }
+        Box {
+            IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, "More options") }
+            ItemMenu(ep, menu, { menu = false }, download != null, onStartOver, onChanged)
+        }
     }
 }
 
@@ -482,7 +484,7 @@ private fun ProgressBar(item: BaseItemDto, state: PlayState?) {
     }
 }
 
-/** Long-press actions of an episode or movie. */
+/** Actions of an episode or movie. */
 @Composable
 private fun ItemMenu(item: BaseItemDto, expanded: Boolean, onDismiss: () -> Unit, downloaded: Boolean, onStartOver: (() -> Unit)?, onChanged: () -> Unit) {
     val id = item.id.toString()
@@ -502,6 +504,18 @@ private fun ItemMenu(item: BaseItemDto, expanded: Boolean, onDismiss: () -> Unit
             onDismiss()
             scope.launch { downloadAll(ctx, listOf(item)) }
         })
+        if (item.localState().second) {
+            HorizontalDivider()
+            DropdownMenuItem({ Text("Progress not synced yet") }, {}, enabled = false)
+            DropdownMenuItem({ Text("Sync now") }, {
+                onDismiss()
+                scope.launch {
+                    val ok = App.server.flush()
+                    Toast.makeText(ctx, if (ok) "Synced" else "Still can't reach the server", Toast.LENGTH_SHORT).show()
+                    onChanged()
+                }
+            })
+        }
     }
 }
 
