@@ -277,12 +277,12 @@ object Media {
 
     enum class Fill { DONE, RUNNING, QUEUED, PAUSED }
     /** [position] is 1 for the next queued item; [waitingFor] is [downloadsWaitingFor]. */
-    data class DownloadStatus(val download: Download, val percent: Int, val fill: Fill, val bytes: Long, val position: Int = 0, val waitingFor: String? = null) {
+    data class DownloadStatus(val download: Download, val percent: Int, val fill: Fill, val bytes: Long, val position: Int, val waitingFor: String?) {
         val label get() = when (fill) {
             Fill.DONE -> "downloaded"
-            Fill.RUNNING -> "${waitingFor ?: "downloading"} $percent%"
+            Fill.RUNNING -> "${waitingFor ?: "downloading"} · $percent%"
             Fill.QUEUED -> "${waitingFor ?: "queued #$position"} · $percent%"
-            Fill.PAUSED -> "paused $percent%"
+            Fill.PAUSED -> "paused · $percent%"
         }
     }
 

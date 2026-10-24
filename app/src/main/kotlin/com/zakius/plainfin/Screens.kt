@@ -2,7 +2,6 @@ package com.zakius.plainfin
 
 import android.content.Context
 import android.widget.Toast
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
@@ -272,15 +271,15 @@ fun LoginScreen(modifier: Modifier, onDone: () -> Unit) {
 
 @Composable
 fun LibrariesScreen(modifier: Modifier, push: (Screen) -> Unit) {
-    var retry by remember { mutableIntStateOf(0) }
-    val libs = loadFresh(retry) { App.server.libraries() }
+    var refresh by remember { mutableIntStateOf(0) }
+    val libs = loadFresh(refresh) { App.server.libraries() }
     Column(modifier.fillMaxSize()) {
         Bar("plainfin", null) {
             TextButton(onClick = { push(Screen.Library(null, "Search")) }) { Text("Search") }
             TextButton(onClick = { push(Screen.Downloads) }) { Text("Downloads") }
             IconButton(onClick = { push(Screen.Settings) }) { Icon(Icons.Default.Settings, "Settings") }
         }
-        Loaded(libs, { retry++ }, { push(Screen.Downloads) }) { list ->
+        Loaded(libs, { refresh++ }, { push(Screen.Downloads) }) { list ->
             if (list.isEmpty()) Empty("No movie or TV libraries on this server")
             else LazyColumn {
                 items(list, key = { it.id }) { lib ->
@@ -370,7 +369,7 @@ private fun Poster(
             }
             if (unsynced) Text("not synced", color = Color.White, style = MaterialTheme.typography.labelSmall,
                 modifier = Modifier.align(Alignment.BottomStart).background(Color(0xAA000000)))
-            onChanged?.let { ItemMenu(item, menu, { menu = false }, download != null, onStartOver, it) }
+            onChanged?.let { ItemMenu(item, state?.played == true, unsynced, menu, { menu = false }, download != null, onStartOver, it) }
         }
         ProgressBar(item, state)
         Text(item.name.orEmpty(), maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall)
@@ -379,8 +378,8 @@ private fun Poster(
 
 @Composable
 fun SeriesScreen(modifier: Modifier, screen: Screen.Series, push: (Screen) -> Unit, pop: () -> Unit) {
-    var retry by remember { mutableIntStateOf(0) }
-    val seasons = loadFresh(screen.id, retry) { App.server.seasons(screen.id) }
+    var refresh by remember { mutableIntStateOf(0) }
+    val seasons = loadFresh(screen.id, refresh) { App.server.seasons(screen.id) }
     var keepNext by remember { mutableIntStateOf(App.prefs.keepNext(screen.id)) }
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -403,7 +402,7 @@ fun SeriesScreen(modifier: Modifier, screen: Screen.Series, push: (Screen) -> Un
             Text(if (keepNext == 0) "off" else "$keepNext")
             TextButton(onClick = { set(keepNext + 1) }, enabled = keepNext < 20) { Text("+") }
         }
-        Loaded(seasons, { retry++ }, { push(Screen.Downloads) }) { list ->
+        Loaded(seasons, { refresh++ }, { push(Screen.Downloads) }) { list ->
             if (list.isEmpty()) Empty("This series has no seasons")
             else LazyColumn {
                 items(list, key = { it.id }) { season ->
@@ -426,7 +425,7 @@ fun SeasonScreen(modifier: Modifier, screen: Screen.Season, push: (Screen) -> Un
     var refresh by remember { mutableIntStateOf(0) }
     val episodes = loadFresh(screen.seasonId, refresh) { App.server.episodes(screen.seriesId, screen.seasonId) }
     val statuses = rememberDownloadStatuses()
-    val listState = rememberLazyListState() // outside Loaded, so a refresh after "Mark played" keeps the scroll
+    val listState = rememberLazyListState() // outside Loaded, so the scroll survives its "Loading…" pass when coming back
     Column(modifier.fillMaxSize()) {
         Bar(screen.name, pop) {
             DownloadAllButton("Download season", episodes?.isSuccess == true) { App.server.episodes(screen.seriesId, screen.seasonId, sources = true) }
@@ -449,7 +448,6 @@ fun SeasonScreen(modifier: Modifier, screen: Screen.Season, push: (Screen) -> Un
 }
 
 /** Thumbnail, title, progress and download state. The ⋮ button or a long-press opens the item's actions. */
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun EpisodeRow(
     ep: BaseItemDto,
@@ -485,7 +483,7 @@ fun EpisodeRow(
         }
         Box {
             IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, "More options") }
-            ItemMenu(ep, menu, { menu = false }, download != null, onStartOver, onChanged)
+            ItemMenu(ep, state?.played == true, unsynced, menu, { menu = false }, download != null, onStartOver, onChanged)
         }
     }
 }
@@ -500,7 +498,7 @@ private fun ProgressBar(item: BaseItemDto, state: PlayState?) {
 
 /** Actions of an episode or movie. */
 @Composable
-private fun ItemMenu(item: BaseItemDto, expanded: Boolean, onDismiss: () -> Unit, downloaded: Boolean, onStartOver: (() -> Unit)?, onChanged: () -> Unit) {
+private fun ItemMenu(item: BaseItemDto, played: Boolean, unsynced: Boolean, expanded: Boolean, onDismiss: () -> Unit, downloaded: Boolean, onStartOver: (() -> Unit)?, onChanged: () -> Unit) {
     val id = item.id.toString()
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -508,7 +506,6 @@ private fun ItemMenu(item: BaseItemDto, expanded: Boolean, onDismiss: () -> Unit
     ConfirmDelete(item.takeIf { confirm }, { confirm = false }, onChanged)
     DropdownMenu(expanded, onDismiss) {
         onStartOver?.let { DropdownMenuItem({ Text("Start over") }, { onDismiss(); it() }) }
-        val played = item.localState().first?.played == true
         DropdownMenuItem({ Text(if (played) "Mark unplayed" else "Mark played") }, {
             onDismiss()
             scope.launch { App.server.setPlayed(id, !played); onChanged() }
@@ -518,7 +515,7 @@ private fun ItemMenu(item: BaseItemDto, expanded: Boolean, onDismiss: () -> Unit
             onDismiss()
             scope.launch { downloadAll(ctx, listOf(item)) }
         })
-        if (item.localState().second) {
+        if (unsynced) {
             HorizontalDivider()
             DropdownMenuItem({ Text("Progress not synced yet") }, {}, enabled = false)
             DropdownMenuItem({ Text("Sync now") }, {
@@ -594,10 +591,10 @@ fun DownloadsScreen(modifier: Modifier, push: (Screen) -> Unit, pop: () -> Unit)
 @Composable
 fun SettingsScreen(modifier: Modifier, pop: () -> Unit, onLoggedOut: () -> Unit) {
     val p = App.prefs
-    var version by remember { mutableIntStateOf(0) } // bumps to redraw after a pref changes
+    var refresh by remember { mutableIntStateOf(0) } // bumps to redraw after a pref changes
     @Composable
     fun toggle(label: String, value: Boolean, enabled: Boolean = true, set: (Boolean) -> Unit) = Row(
-        Modifier.fillMaxWidth().toggleable(value, enabled = enabled, role = Role.Switch) { set(it); version++ }.padding(horizontal = 16.dp, vertical = 4.dp),
+        Modifier.fillMaxWidth().toggleable(value, enabled = enabled, role = Role.Switch) { set(it); refresh++ }.padding(horizontal = 16.dp, vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(label, Modifier.weight(1f), color = if (enabled) Color.Unspecified else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f))
@@ -607,9 +604,9 @@ fun SettingsScreen(modifier: Modifier, pop: () -> Unit, onLoggedOut: () -> Unit)
     fun stepper(label: String, value: Int, options: List<Int>, set: (Int) -> Unit) = Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
         val i = options.indices.minBy { abs(options[it] - value) } // a stored value off the list shows as the nearest
         Text(label, Modifier.weight(1f))
-        TextButton(onClick = { set(options[i - 1]); version++ }, enabled = i > 0) { Text("−") }
+        TextButton(onClick = { set(options[i - 1]); refresh++ }, enabled = i > 0) { Text("−") }
         Text("${options[i]}")
-        TextButton(onClick = { set(options[i + 1]); version++ }, enabled = i < options.lastIndex) { Text("+") }
+        TextButton(onClick = { set(options[i + 1]); refresh++ }, enabled = i < options.lastIndex) { Text("+") }
     }
     var confirmLogout by remember { mutableStateOf(false) }
     if (confirmLogout) {
@@ -621,7 +618,7 @@ fun SettingsScreen(modifier: Modifier, pop: () -> Unit, onLoggedOut: () -> Unit)
     Column(modifier.fillMaxSize()) {
         Bar("Settings", pop)
         LazyColumn {
-            item(version) {
+            item(refresh) {
                 Column {
                     Text("Network", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(16.dp))
                     toggle("Buffer to end on metered networks", p.bufferOnMetered) { p.bufferOnMetered = it }

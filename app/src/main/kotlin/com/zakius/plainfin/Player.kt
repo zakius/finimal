@@ -348,7 +348,7 @@ private fun Playback(
             mod, player, playerView, fullscreen, transcoding, Media.key(item).takeUnless { transcoding }, intro, ended, next, playerError,
             onToggleFullscreen = { setFullscreen(!fullscreen) },
             onBack = onBack,
-            onNext = next?.let { { onPlay(it.id.toString()) } },
+            onPlay = onPlay,
             onRetry = { playerError = null; player.prepare() },
             rotationLocked = rotationLocked,
             onRotationLock = {
@@ -426,7 +426,7 @@ private fun VideoSurface(
     playerError: PlaybackException?,
     onToggleFullscreen: () -> Unit,
     onBack: () -> Unit,
-    onNext: (() -> Unit)?,
+    onPlay: (String) -> Unit,
     onRetry: () -> Unit,
     rotationLocked: Boolean,
     onRotationLock: () -> Unit,
@@ -572,7 +572,7 @@ private fun VideoSurface(
 
         if (ended) {
             Column(Modifier.align(Alignment.Center).padding(horizontal = 16.dp), Arrangement.spacedBy(8.dp), Alignment.CenterHorizontally) {
-                if (next != null && onNext != null) Button(onClick = onNext) {
+                if (next != null) Button(onClick = { onPlay(next.id.toString()) }) {
                     Text("Play next: ${episodeLabel(next)}", maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
                 FilledTonalButton(onClick = onBack) { Text("Back") }
@@ -580,7 +580,7 @@ private fun VideoSurface(
         } else if (controls) {
             Controls(
                 player, position, duration, buffered, playing, fullscreen, transcoding, rotationLocked,
-                onBack, onToggleFullscreen, onRotationLock, onTracksChosen, ::seekBy, onNext,
+                onBack, onToggleFullscreen, onRotationLock, onTracksChosen, ::seekBy, next?.let { { onPlay(it.id.toString()) } },
                 onInteraction = { lastInteraction = System.currentTimeMillis() },
                 subtitleView = playerView.subtitleView,
             )
