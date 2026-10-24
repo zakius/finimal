@@ -439,7 +439,7 @@ fun SettingsScreen(modifier: Modifier, pop: () -> Unit, onLoggedOut: () -> Unit)
                 Column {
                     Text("Network", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(16.dp))
                     toggle("Buffer to end on metered networks", p.bufferOnMetered) { p.bufferOnMetered = it }
-                    toggle("Download on metered networks", p.downloadOnMetered) { p.downloadOnMetered = it; Media.requeueDownloads() }
+                    toggle("Download on metered networks", p.downloadOnMetered) { p.downloadOnMetered = it; Media.kickDownloads(restart = true) }
                     stepper("Buffer cache limit (GB)", p.cacheLimitGb, 1..100, 1) { p.cacheLimitGb = it }
                     val roots = Media.storageRoots()
                     if (roots.size > 1) {

@@ -45,7 +45,8 @@ Libraries → poster grid → series → seasons → episodes.
 There is one persistent on-disk cache. The key is the item ID plus the media source ETag, so a file replaced on the server never mixes with bytes cached from the old one. A finished download keeps playing its own version.
 
 - Buffering is a background fill of the cache to the end of the episode. Playback reads from the cache.
-- A download is the same fill, marked pinned.
+- A download is the same fill, marked pinned. Downloads run one at a time in the order requested. Pause and delete act on one episode; the rest of the queue carries on.
+- Playing an unfinished download moves it to the front, and the worker fills from just before the playhead first (again after a seek into an uncached part), then the rest. The player reads the cache without writing it; the worker is the only writer.
 - Buffered entries are evicted oldest-first above a size limit (default 5 GB). Pinned entries are removed only by the user.
 - An interrupted fill resumes from the last byte, including after a crash or reboot.
 - Two toggles, both off by default: "buffer to end on metered" and "download on metered". They follow Android's metered flag, not wifi/cellular. With buffering off on a metered network, the player uses its normal buffer.

@@ -24,9 +24,7 @@ import androidx.work.ExistingWorkPolicy
 import androidx.work.ForegroundInfo
 import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
-import androidx.work.WorkInfo
 import androidx.work.WorkManager
-import androidx.work.WorkQuery
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
 import java.io.File
@@ -78,6 +76,9 @@ object Media {
     fun onAppStart(context: Context) {
         ctx = context
         cache = SimpleCache(File(storageRoot(), "media"), NoOpCacheEvictor(), StandaloneDatabaseProvider(context))
+        // Builds before the queue ran one job per download; those would run alongside it.
+        downloads().forEach { WorkManager.getInstance(context).cancelUniqueWork("fill-${it.item.id}") }
+        kickDownloads(restart = false)
         Housekeeping.enqueue(context)
     }
 
@@ -127,10 +128,23 @@ object Media {
 
     // --- downloads -------------------------------------------------------------------------------
 
-    @Serializable data class Download(val item: BaseItemDto, val auto: Boolean)
+    /**
+     * A pinned item. Downloads run one at a time, oldest [queuedAt] first; playing an unfinished
+     * download moves it to the front.
+     */
+    @Serializable
+    data class Download(
+        val item: BaseItemDto,
+        val auto: Boolean,
+        val queuedAt: Long = 0,
+        val paused: Boolean = false,
+        /** Byte to fill from first, set while the episode plays so the player's part lands on disk first. */
+        val startAt: Long = 0,
+    )
 
     private val downloadsDir get() = File(ctx.filesDir, "downloads").apply { mkdirs() }
     private fun metaFile(id: String) = File(downloadsDir, "$id.json")
+    private fun write(d: Download) = metaFile(d.item.id.toString()).writeText(json.encodeToString(d))
     fun subsDir(id: String) = File(ctx.filesDir, "subs/$id")
 
     fun downloads(): List<Download> =
@@ -140,21 +154,70 @@ object Media {
     fun download(id: String): Download? =
         metaFile(id).takeIf { it.exists() }?.let { runCatching { json.decodeFromString<Download>(it.readText()) }.getOrNull() }
 
-    /** [item] must come from [Server.item] so it carries media sources for offline playback. */
+    /** The ID the queue worker is writing now. */
+    @Volatile var downloading: String? = null
+
+    /** Next unfinished, unpaused download in queue order. */
+    fun nextDownload(): Download? =
+        downloads().filter { !it.paused && !isComplete(key(it.item)) }
+            .minWithOrNull(compareBy({ it.queuedAt }, { it.item.parentIndexNumber }, { it.item.indexNumber }))
+
+    /**
+     * Starts the queue worker. With [restart] a running worker is stopped first, so it picks again
+     * (after pause, delete, reprioritise or a network-setting change); its partial file is kept.
+     */
+    fun kickDownloads(restart: Boolean) {
+        val request = OneTimeWorkRequestBuilder<DownloadWorker>()
+            .setConstraints(Constraints(requiredNetworkType = if (App.prefs.downloadOnMetered) NetworkType.CONNECTED else NetworkType.UNMETERED))
+            .build()
+        WorkManager.getInstance(ctx).enqueueUniqueWork("downloads", if (restart) ExistingWorkPolicy.REPLACE else ExistingWorkPolicy.KEEP, request)
+    }
+
+    /** [item] must come from [Server.item] so it carries media sources for offline playback. Also resumes a paused download. */
+    @Synchronized
     fun startDownload(item: BaseItemDto, auto: Boolean) {
         val id = item.id.toString()
         val existing = download(id)
         if (existing != null && isComplete(key(existing.item))) return
         // An unfinished download takes the fresh item, so a file changed on the server restarts cleanly.
         existing?.let { if (key(it.item) != key(item)) cache.removeResource(key(it.item)) }
-        metaFile(id).writeText(json.encodeToString(Download(item, existing?.auto ?: auto)))
-        enqueueFill(item, 0, pinned = true)
+        WorkManager.getInstance(ctx).cancelUniqueWork("fill-$id") // the queue takes over from a buffer fill
+        write(Download(item, existing?.auto ?: auto, existing?.queuedAt ?: System.currentTimeMillis(), paused = false))
+        kickDownloads(restart = false)
     }
 
+    @Synchronized
+    fun pauseDownload(id: String) {
+        val d = download(id) ?: return
+        write(d.copy(paused = true))
+        if (downloading == id) kickDownloads(restart = true)
+    }
+
+    /**
+     * Playing an unfinished download moves it to the front, unless the user paused it, and makes the
+     * worker fill from [fromByte] first. Nothing happens when the worker is already on it and that
+     * position is cached, so rebuffering doesn't restart the worker.
+     */
+    @Synchronized
+    fun prioritize(id: String, fromByte: Long) {
+        val d = download(id) ?: return
+        val key = key(d.item)
+        if (d.paused || isComplete(key)) return
+        if (downloading == id && cache.getCachedLength(key, fromByte, Long.MAX_VALUE) > 0) return
+        write(d.copy(queuedAt = Long.MIN_VALUE, startAt = fromByte))
+        kickDownloads(restart = true)
+    }
+
+    @Synchronized
+    fun clearStartAt(id: String) {
+        download(id)?.let { write(it.copy(startAt = 0)) }
+    }
+
+    @Synchronized
     fun deleteDownload(id: String) {
-        WorkManager.getInstance(ctx).cancelUniqueWork("fill-$id")
         val key = download(id)?.let { key(it.item) }
         metaFile(id).delete()
+        if (downloading == id) kickDownloads(restart = true)
         subsDir(id).deleteRecursively()
         if (key != null && playing != key) cache.removeResource(key)
     }
@@ -169,10 +232,8 @@ object Media {
             played = state.played,
             lastPlayedDate = state.lastPlayedMs?.let { LocalDateTime.ofInstant(Instant.ofEpochMilli(it), ZoneId.systemDefault()) },
         ) ?: return
-        metaFile(id).writeText(json.encodeToString(d.copy(item = d.item.copy(userData = data))))
+        write(d.copy(item = d.item.copy(userData = data)))
     }
-
-    fun pauseDownload(id: String) = WorkManager.getInstance(ctx).cancelUniqueWork("fill-$id")
 
     enum class Fill { DONE, RUNNING, QUEUED, PAUSED }
     data class DownloadStatus(val percent: Int, val fill: Fill, val bytes: Long) {
@@ -184,12 +245,9 @@ object Media {
         }
     }
 
-    /** Status of every download, from the cache and WorkManager in one query. Blocking: call off the main thread. */
+    /** Status of every download from the cache and the queue. Reads files: call off the main thread. */
     fun downloadStatuses(): Map<String, DownloadStatus> {
-        val active = WorkManager.getInstance(ctx)
-            .getWorkInfos(WorkQuery.fromStates(WorkInfo.State.ENQUEUED, WorkInfo.State.RUNNING, WorkInfo.State.BLOCKED)).get()
-            .flatMap { info -> info.tags.filter { it.startsWith("fill-") }.map { it.removePrefix("fill-") to info.state } }
-            .toMap()
+        val current = downloading
         return downloads().associate { d ->
             val id = d.item.id.toString()
             val key = key(d.item)
@@ -197,9 +255,9 @@ object Media {
             val bytes = cachedBytes(key)
             val fill = when {
                 len > 0 && cache.isCached(key, 0, len) -> Fill.DONE
-                active[id] == WorkInfo.State.RUNNING -> Fill.RUNNING
-                active[id] != null -> Fill.QUEUED
-                else -> Fill.PAUSED
+                d.paused -> Fill.PAUSED
+                current == id -> Fill.RUNNING
+                else -> Fill.QUEUED
             }
             id to DownloadStatus(if (len > 0) (bytes * 100 / len).toInt() else 0, fill, bytes)
         }
@@ -209,28 +267,23 @@ object Media {
 
     /** Fills the cache from [position] to the end while the player is open. */
     fun startBuffer(item: BaseItemDto, position: Long) {
-        if (download(item.id.toString()) == null) enqueueFill(item, position, pinned = false)
+        val id = item.id.toString()
+        if (download(id) == null) enqueueFill(item, position) else prioritize(id, position)
     }
 
     fun stopBuffer(id: String) {
         if (download(id) == null) WorkManager.getInstance(ctx).cancelUniqueWork("fill-$id")
     }
 
-    private fun enqueueFill(item: BaseItemDto, position: Long, pinned: Boolean) {
+    private fun enqueueFill(item: BaseItemDto, position: Long) {
         val source = item.mediaSources?.firstOrNull() ?: return
         val id = item.id.toString()
-        val metered = if (pinned) App.prefs.downloadOnMetered else App.prefs.bufferOnMetered
         val request = OneTimeWorkRequestBuilder<FillWorker>()
-            .setInputData(workDataOf("id" to id, "key" to key(item), "url" to App.server.streamUrl(id, source.id!!), "position" to position, "pinned" to pinned))
-            .setConstraints(Constraints(requiredNetworkType = if (metered) NetworkType.CONNECTED else NetworkType.UNMETERED))
-            .addTag("fill-$id")
+            .setInputData(workDataOf("key" to key(item), "url" to App.server.streamUrl(id, source.id!!), "position" to position))
+            .setConstraints(Constraints(requiredNetworkType = if (App.prefs.bufferOnMetered) NetworkType.CONNECTED else NetworkType.UNMETERED))
             .build()
-        // A download replaces a running buffer fill; a buffer fill never replaces a download.
-        WorkManager.getInstance(ctx).enqueueUniqueWork("fill-$id", if (pinned) ExistingWorkPolicy.REPLACE else ExistingWorkPolicy.KEEP, request)
+        WorkManager.getInstance(ctx).enqueueUniqueWork("fill-$id", ExistingWorkPolicy.KEEP, request)
     }
-
-    /** Re-enqueues unfinished downloads, e.g. after the metered setting changed. */
-    fun requeueDownloads() = downloads().filter { !isComplete(key(it.item)) }.forEach { enqueueFill(it.item, 0, pinned = true) }
 
     fun evict() {
         val limit = App.prefs.cacheLimitGb * 1_000_000_000L
@@ -265,56 +318,81 @@ object Media {
 fun externalSubs(item: BaseItemDto): List<MediaStream> =
     item.mediaSources?.firstOrNull()?.mediaStreams.orEmpty().filter { it.type == MediaStreamType.SUBTITLE && it.isExternal }
 
+/**
+ * Writes [key] from [position] to the end into the cache; returns once it is all there. A range
+ * can come back uncached (another writer held it), so it loops until the cache holds everything.
+ * An interrupted run keeps every committed 5 MB fragment, and the next run skips them.
+ */
+private suspend fun fillCache(key: String, url: String, position: Long, onProgress: CacheWriter.ProgressListener?): Boolean {
+    repeat(5) {
+        val writer = CacheWriter(
+            Media.writerFactory().createDataSource(),
+            DataSpec.Builder().setUri(url).setPosition(position).setKey(key)
+                .setFlags(DataSpec.FLAG_ALLOW_CACHE_FRAGMENTATION).build(),
+            null,
+            onProgress,
+        )
+        runInterruptible(Dispatchers.IO) { writer.cache() }
+        val len = Media.contentLength(key)
+        if (len > 0 && Media.cache.isCached(key, position, len - position)) return true
+    }
+    return false
+}
+
+/** Buffer-to-end for the episode the player has open. */
 class FillWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
+    override suspend fun doWork(): Result = try {
+        val done = fillCache(inputData.getString("key")!!, inputData.getString("url")!!, inputData.getLong("position", 0), null)
+        Media.evict()
+        if (done) Result.success() else Result.retry()
+    } catch (e: IOException) {
+        Result.retry()
+    }
+}
+
+/** Works through the download queue one episode at a time. */
+class DownloadWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
     override suspend fun doWork(): Result {
-        val id = inputData.getString("id")!!
-        val key = inputData.getString("key")!!
-        val url = inputData.getString("url")!!
-        val pinned = inputData.getBoolean("pinned", false)
-        var position = inputData.getLong("position", 0)
-        if (pinned) {
-            runCatching { setForeground(foregroundInfo(id, null)) }
-            Media.download(id)?.let { withContext(Dispatchers.IO) { Media.fetchSubtitles(it.item) } }
-        }
-        var lastUpdate = 0L
-        val progress = CacheWriter.ProgressListener { length, cached, _ ->
-            val now = System.currentTimeMillis()
-            if (pinned && length > 0 && now - lastUpdate > 1_000) {
-                lastUpdate = now
-                setForegroundAsync(foregroundInfo(id, (cached * 100 / length).toInt()))
-            }
-        }
-        return try {
-            // A range can still come back uncached (e.g. a download replaced a buffer fill mid-write),
-            // so loop until the cache really holds everything from the start position.
-            repeat(5) {
-                val writer = CacheWriter(
-                    Media.writerFactory().createDataSource(),
-                    // Fragmentation commits every 5 MB: progress becomes visible, the player can read
-                    // what's already buffered, and a killed process loses at most one fragment.
-                    DataSpec.Builder().setUri(url).setPosition(position).setKey(key)
-                        .setFlags(DataSpec.FLAG_ALLOW_CACHE_FRAGMENTATION).build(),
-                    null,
-                    progress,
-                )
-                runInterruptible(Dispatchers.IO) { writer.cache() }
-                val len = Media.contentLength(key)
-                if (len > 0 && Media.cache.isCached(key, position, len - position)) {
-                    Media.evict()
-                    return Result.success()
+        var current: String? = null
+        try {
+            while (true) {
+                val d = Media.nextDownload() ?: return Result.success()
+                val id = d.item.id.toString()
+                val source = d.item.mediaSources?.firstOrNull() ?: return Result.failure()
+                current = id
+                Media.downloading = id
+                runCatching { setForeground(foregroundInfo(d, null)) }
+                withContext(Dispatchers.IO) { Media.fetchSubtitles(d.item) }
+                var lastUpdate = 0L
+                val progress = CacheWriter.ProgressListener { length, cached, _ ->
+                    val now = System.currentTimeMillis()
+                    if (length > 0 && now - lastUpdate > 1_000) {
+                        lastUpdate = now
+                        setForegroundAsync(foregroundInfo(d, (cached * 100 / length).toInt()))
+                    }
                 }
+                val key = Media.key(d.item)
+                val url = App.server.streamUrl(id, source.id!!)
+                // From the playhead first while the episode plays, then the rest (cached parts are skipped).
+                if (d.startAt > 0) {
+                    if (!fillCache(key, url, d.startAt, progress)) return Result.retry()
+                    Media.clearStartAt(id)
+                }
+                if (!fillCache(key, url, 0, progress)) return Result.retry()
             }
-            Result.retry()
         } catch (e: IOException) {
-            Result.retry()
+            return Result.retry()
+        } finally {
+            // A replaced worker can finish after its successor started; don't clear the successor's ID.
+            if (Media.downloading == current) Media.downloading = null
         }
     }
 
-    private fun foregroundInfo(id: String, percent: Int?): ForegroundInfo {
+    private fun foregroundInfo(d: Media.Download, percent: Int?): ForegroundInfo {
         val nm = applicationContext.getSystemService(NotificationManager::class.java)
         if (Build.VERSION.SDK_INT >= 26) nm.createNotificationChannel(NotificationChannel("downloads", "Downloads", NotificationManager.IMPORTANCE_LOW))
-        val item = Media.download(id)?.item
-        val name = item?.let { if (it.type == BaseItemKind.EPISODE) "${it.seriesName} · ${episodeLabel(it)}" else it.name } ?: "Downloading"
+        val item = d.item
+        val name = if (item.type == BaseItemKind.EPISODE) "${item.seriesName} · ${episodeLabel(item)}" else item.name.orEmpty()
         val n = NotificationCompat.Builder(applicationContext, "downloads")
             .setSmallIcon(android.R.drawable.stat_sys_download)
             .setContentTitle(name)
@@ -322,9 +400,11 @@ class FillWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .build()
-        return if (Build.VERSION.SDK_INT >= 29) ForegroundInfo(id.hashCode(), n, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
-        else ForegroundInfo(id.hashCode(), n)
+        return if (Build.VERSION.SDK_INT >= 29) ForegroundInfo(NOTIFICATION_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+        else ForegroundInfo(NOTIFICATION_ID, n)
     }
+
+    private companion object { const val NOTIFICATION_ID = 1 }
 }
 
 /** Pushes unsynced progress, applies "keep next N" and trims the cache. Runs whenever a network is up. */

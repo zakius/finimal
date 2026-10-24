@@ -229,7 +229,8 @@ private fun Playback(
 
             override fun onPlaybackStateChanged(state: Int) {
                 if (state == Player.STATE_READY && !transcoding) {
-                    val len = Media.contentLength(Media.key(item))
+                    // The player only reads the cache, so the length may not be recorded yet; the server knows it.
+                    val len = Media.contentLength(Media.key(item)).takeIf { it > 0 } ?: source.size ?: 0
                     val fraction = player.currentPosition.toDouble() / player.duration.coerceAtLeast(1)
                     Media.startBuffer(item, if (len > 0) (len * (fraction - 0.05)).toLong().coerceAtLeast(0) else 0)
                 }
