@@ -62,6 +62,9 @@ There is one persistent on-disk cache. The key is the item ID plus the media sou
 - Deleting a download asks first, naming the item. A dialog, not undo: the bytes go at once.
 - "Download all" (series) and "Download season" say how many episodes are new, and their total size when the server lists every file's size, before queuing. With nothing new, a toast says so. "Download season" waits for the season to load.
 - One Downloads screen shows the queue, pause/resume, delete and storage use. It is also the offline screen: when the server cannot be reached, only downloads are browsable.
+  - Unfinished downloads come first, in the order they will download; finished ones follow, grouped by series.
+  - A queued item shows its place in the queue ("queued #2"). When the current network blocks the queue (none, or metered with "download on metered" off), it says so instead. The toast after queuing does the same.
+  - Storage use: total downloads, buffer cache against its limit, and free space on the download volume.
 - A running download shows a notification; tapping it opens the Downloads screen. The notification permission (Android 13+) is asked when the user first queues a download, not at start. Denying it does not stop downloads.
 
 ## Sync

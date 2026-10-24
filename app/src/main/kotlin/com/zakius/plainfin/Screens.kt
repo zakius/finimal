@@ -108,7 +108,7 @@ private suspend fun downloadAll(context: Context, episodes: List<BaseItemDto>) {
         else -> "Downloading $queued ${noun}s"
     }
     if (queued > 0) (context as? MainActivity)?.askNotifications()
-    Toast.makeText(context, text + if (queued > 0 && !App.prefs.downloadOnMetered) " (Wi-Fi only)" else "", Toast.LENGTH_SHORT).show()
+    Toast.makeText(context, text + (Media.downloadsWaitingFor()?.takeIf { queued > 0 }?.let { " ($it)" } ?: ""), Toast.LENGTH_SHORT).show()
 }
 
 /**
@@ -457,20 +457,27 @@ private fun ItemMenu(item: BaseItemDto, expanded: Boolean, onDismiss: () -> Unit
 @Composable
 fun DownloadsScreen(modifier: Modifier, push: (Screen) -> Unit, pop: () -> Unit) {
     val statuses = rememberDownloadStatuses()
-    val downloads = remember(statuses.keys) {
-        Media.downloads().sortedWith(compareBy({ it.item.seriesName ?: it.item.name }, { it.item.parentIndexNumber }, { it.item.indexNumber }))
+    // (group, download): unfinished first in queue order, then finished by series.
+    val downloads = remember(statuses.mapValues { it.value.fill }) {
+        val (done, queue) = Media.downloads().partition { Media.isComplete(Media.key(it.item)) }
+        queue.sortedWith(Media.queueOrder).map { "Queue" to it } +
+            done.sortedWith(compareBy({ it.item.seriesName ?: it.item.name }, { it.item.parentIndexNumber }, { it.item.indexNumber }))
+                .map { (it.item.seriesName ?: "Movies") to it }
+    }
+    val storage by produceState("", statuses) {
+        val (buffered, free) = withContext(Dispatchers.IO) { Media.bufferedBytes() to Media.freeBytes() }
+        value = "Downloads ${formatBytes(statuses.values.sumOf { it.bytes })} · buffer ${formatBytes(buffered)} of ${App.prefs.cacheLimitGb} GB · ${formatBytes(free)} free"
     }
     val scope = rememberCoroutineScope()
     var deleting by remember { mutableStateOf<BaseItemDto?>(null) }
     ConfirmDelete(deleting, { deleting = null })
     Column(modifier.fillMaxSize()) {
         Bar("Downloads", pop)
-        Text("Using ${formatBytes(statuses.values.sumOf { it.bytes })}", Modifier.padding(horizontal = 16.dp))
+        Text(storage, Modifier.padding(horizontal = 16.dp))
         if (downloads.isEmpty()) Text("Nothing downloaded. Long-press an episode or movie, or use Download season.", Modifier.padding(16.dp))
         LazyColumn {
             var lastGroup: String? = null
-            for (d in downloads) {
-                val group = d.item.seriesName ?: "Movies"
+            for ((group, d) in downloads) {
                 if (group != lastGroup) {
                     lastGroup = group
                     item(key = "h-$group") { Text(group, style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(16.dp, 12.dp, 16.dp, 4.dp)) }

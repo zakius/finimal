@@ -8,6 +8,7 @@ import android.app.PendingIntent
 import android.content.Intent
 import android.content.Context
 import android.content.pm.ServiceInfo
+import android.net.ConnectivityManager
 import android.os.Build
 import androidx.core.app.NotificationCompat
 import androidx.media3.common.C
@@ -159,10 +160,21 @@ object Media {
     /** The ID the queue worker is writing now. */
     @Volatile var downloading: String? = null
 
+    val queueOrder = compareBy<Download>({ it.queuedAt }, { it.item.parentIndexNumber }, { it.item.indexNumber })
+
     /** Next unfinished, unpaused download in queue order. */
     fun nextDownload(): Download? =
-        downloads().filter { !it.paused && !isComplete(key(it.item)) }
-            .minWithOrNull(compareBy({ it.queuedAt }, { it.item.parentIndexNumber }, { it.item.indexNumber }))
+        downloads().filter { !it.paused && !isComplete(key(it.item)) }.minWithOrNull(queueOrder)
+
+    /** Why the queue can't run on the current network, or null when it can. Mirrors [kickDownloads]' constraint. */
+    fun downloadsWaitingFor(): String? {
+        val cm = ctx.getSystemService(ConnectivityManager::class.java)
+        return when {
+            cm.activeNetwork == null -> "waiting for network"
+            !App.prefs.downloadOnMetered && cm.isActiveNetworkMetered -> "waiting for unmetered network"
+            else -> null
+        }
+    }
 
     /**
      * Starts the queue worker. With [restart] a running worker is stopped first, so it picks again
@@ -238,11 +250,12 @@ object Media {
     }
 
     enum class Fill { DONE, RUNNING, QUEUED, PAUSED }
-    data class DownloadStatus(val percent: Int, val fill: Fill, val bytes: Long) {
+    /** [position] is 1 for the next queued item; [waitingFor] is [downloadsWaitingFor]. */
+    data class DownloadStatus(val percent: Int, val fill: Fill, val bytes: Long, val position: Int = 0, val waitingFor: String? = null) {
         val label get() = when (fill) {
             Fill.DONE -> "downloaded"
-            Fill.RUNNING -> "downloading $percent%"
-            Fill.QUEUED -> "queued $percent%" + if (App.prefs.downloadOnMetered) "" else " · Wi-Fi only"
+            Fill.RUNNING -> "${waitingFor ?: "downloading"} $percent%"
+            Fill.QUEUED -> "${waitingFor ?: "queued #$position"} · $percent%"
             Fill.PAUSED -> "paused $percent%"
         }
     }
@@ -250,7 +263,11 @@ object Media {
     /** Status of every download from the cache and the queue. Reads files: call off the main thread. */
     fun downloadStatuses(): Map<String, DownloadStatus> {
         val current = downloading
-        return downloads().associate { d ->
+        val waitingFor = downloadsWaitingFor()
+        val all = downloads()
+        val queue = all.filter { !it.paused && it.item.id.toString() != current && !isComplete(key(it.item)) }
+            .sortedWith(queueOrder).map { it.item.id.toString() }
+        return all.associate { d ->
             val id = d.item.id.toString()
             val key = key(d.item)
             val len = contentLength(key)
@@ -261,7 +278,7 @@ object Media {
                 current == id -> Fill.RUNNING
                 else -> Fill.QUEUED
             }
-            id to DownloadStatus(if (len > 0) (bytes * 100 / len).toInt() else 0, fill, bytes)
+            id to DownloadStatus(if (len > 0) (bytes * 100 / len).toInt() else 0, fill, bytes, queue.indexOf(id) + 1, waitingFor)
         }
     }
 
@@ -286,6 +303,14 @@ object Media {
             .build()
         WorkManager.getInstance(ctx).enqueueUniqueWork("fill-$id", ExistingWorkPolicy.KEEP, request)
     }
+
+    /** Bytes of unpinned (buffered) cache entries, the part [evict] limits. */
+    fun bufferedBytes(): Long {
+        val pinned = downloads().map { key(it.item) }.toSet()
+        return cache.keys.filter { it !in pinned }.sumOf(::cachedBytes)
+    }
+
+    fun freeBytes() = storageRoot().usableSpace
 
     fun evict() {
         val limit = App.prefs.cacheLimitGb * 1_000_000_000L
