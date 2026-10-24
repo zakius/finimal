@@ -84,6 +84,7 @@ import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.AspectRatioFrameLayout
+import androidx.media3.ui.CaptionStyleCompat
 import androidx.media3.ui.PlayerView
 import androidx.media3.ui.SubtitleView
 import io.github.peerless2012.ass.media.kt.buildWithAssSupport
@@ -196,6 +197,11 @@ private fun Playback(
             useController = false
             setShutterBackgroundColor(android.graphics.Color.BLACK)
             subtitleView?.setFractionalTextSize(SubtitleView.DEFAULT_TEXT_SIZE_FRACTION * prefs.subtitleScale / 100f)
+            // Text subtitles: white with a black outline, no box. Embedded styles (italics, cue colours) stay on.
+            subtitleView?.setStyle(CaptionStyleCompat(
+                android.graphics.Color.WHITE, android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT,
+                CaptionStyleCompat.EDGE_TYPE_OUTLINE, android.graphics.Color.BLACK, null,
+            ))
         }
     }
     val player = remember(transcoding) { buildPlayer(context, playerView, transcoding) }
