@@ -24,6 +24,7 @@ Libraries → poster grid → series → seasons → episodes.
 - Episodes: thumbnail, played mark, progress bar.
 - Movie posters: played mark, progress bar, download state.
 - Tap: resume from the saved position minus 5 s. Long-press on an episode or movie: start over, mark played/unplayed, download, delete download.
+- A list that fails to load says why in plain words (can't reach the server, a server error with its status, or a generic message), with the raw error in small text, a Retry button and a Downloads button.
 - End of an episode: a "Play next" button. The next episode comes from season order, never from the server's Next Up.
 
 ## Playback
@@ -39,6 +40,7 @@ Libraries → poster grid → series → seasons → episodes.
 - Audio and subtitle choices are remembered per series.
 - Media segments show a "Skip intro" button. It never skips on its own.
 - Player menu: speed, tracks, subtitle size, rotation lock. Subtitle delay is not built yet: Media3 has no subtitle offset, so it needs its own cue timing. Subtitle size applies to text subtitles; ASS keeps its authored size.
+- A playback error shows a short sentence for common causes (network, timeout, HTTP status, missing file, unsupported format) and a Retry button. Other errors show a generic sentence with the Media3 error code in small text.
 - Theme follows the system and uses Material You colors.
 
 ## Buffering and downloads

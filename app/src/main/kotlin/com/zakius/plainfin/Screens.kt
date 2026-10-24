@@ -62,11 +62,13 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
+import java.io.IOException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.launch
 import org.jellyfin.sdk.api.client.exception.InvalidStatusException
+import org.jellyfin.sdk.api.client.exception.TimeoutException
 import org.jellyfin.sdk.model.api.BaseItemDto
 import org.jellyfin.sdk.model.api.BaseItemKind
 import org.jellyfin.sdk.model.api.ImageType
@@ -76,6 +78,7 @@ import plainfin.core.PlayState
 @Composable
 private fun <T> loadFresh(vararg keys: Any?, block: suspend () -> T): Result<T>? =
     produceState<Result<T>?>(null, *keys) {
+        if (value?.isFailure == true) value = null // a retry shows "Loading…" again
         App.server.flush()
         value = runCatching { block() }
             .onFailure { if (it is InvalidStatusException && it.status == 401) App.server.expire() }
@@ -118,12 +121,24 @@ private fun Bar(title: String, onBack: (() -> Unit)?, actions: @Composable () ->
 )
 
 @Composable
-private fun <T> Loaded(result: Result<T>?, onDownloads: (() -> Unit)? = null, content: @Composable (T) -> Unit) {
+private fun loadError(e: Throwable) = when {
+    e is InvalidStatusException -> "The server returned an error (${e.status})"
+    e is TimeoutException || generateSequence(e) { it.cause }.any { it is IOException } -> "Can't reach the server"
+    else -> "Something went wrong loading this"
+}
+
+@Composable
+private fun <T> Loaded(result: Result<T>?, onRetry: () -> Unit, onDownloads: () -> Unit, content: @Composable (T) -> Unit) {
     when {
         result == null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("Loading…") }
         result.isFailure -> Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
-            Text("Server unreachable: ${result.exceptionOrNull()?.message}")
-            onDownloads?.let { Button(onClick = it, modifier = Modifier.padding(top = 12.dp)) { Text("Downloads") } }
+            val e = result.exceptionOrNull()!!
+            Text(loadError(e))
+            Text(e.message ?: e.javaClass.simpleName, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Row(Modifier.padding(top = 12.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Button(onClick = onRetry) { Text("Retry") }
+                TextButton(onClick = onDownloads) { Text("Downloads") }
+            }
         }
         else -> content(result.getOrThrow())
     }
@@ -164,14 +179,15 @@ fun LoginScreen(modifier: Modifier, onDone: () -> Unit) {
 
 @Composable
 fun LibrariesScreen(modifier: Modifier, push: (Screen) -> Unit) {
-    val libs = loadFresh { App.server.libraries() }
+    var retry by remember { mutableIntStateOf(0) }
+    val libs = loadFresh(retry) { App.server.libraries() }
     Column(modifier.fillMaxSize()) {
         Bar("plainfin", null) {
             TextButton(onClick = { push(Screen.Library(null, "Search")) }) { Text("Search") }
             TextButton(onClick = { push(Screen.Downloads) }) { Text("Downloads") }
             IconButton(onClick = { push(Screen.Settings) }) { Icon(Icons.Default.Settings, "Settings") }
         }
-        Loaded(libs, onDownloads = { push(Screen.Downloads) }) { list ->
+        Loaded(libs, { retry++ }, { push(Screen.Downloads) }) { list ->
             LazyColumn {
                 items(list, key = { it.id }) { lib ->
                     Text(lib.name.orEmpty(), style = MaterialTheme.typography.titleLarge,
@@ -204,7 +220,7 @@ fun LibraryScreen(modifier: Modifier, screen: Screen.Library, push: (Screen) -> 
             FilterChip(unplayed, { unplayed = !unplayed }, { Text("Unplayed") })
         }
         val statuses = rememberDownloadStatuses()
-        Loaded(items) { list ->
+        Loaded(items, { refresh++ }, { push(Screen.Downloads) }) { list ->
             LazyVerticalGrid(GridCells.Adaptive(110.dp), Modifier.fillMaxSize().padding(8.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 items(list, key = { it.id }) { item ->
@@ -257,7 +273,8 @@ private fun Poster(
 
 @Composable
 fun SeriesScreen(modifier: Modifier, screen: Screen.Series, push: (Screen) -> Unit, pop: () -> Unit) {
-    val seasons = loadFresh(screen.id) { App.server.seasons(screen.id) }
+    var retry by remember { mutableIntStateOf(0) }
+    val seasons = loadFresh(screen.id, retry) { App.server.seasons(screen.id) }
     var keepNext by remember { mutableIntStateOf(App.prefs.keepNext(screen.id)) }
     var downloading by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
@@ -280,7 +297,7 @@ fun SeriesScreen(modifier: Modifier, screen: Screen.Series, push: (Screen) -> Un
                 keepNext = (keepNext + 1).coerceAtMost(20); App.prefs.setKeepNext(screen.id, keepNext); Housekeeping.enqueue(ctx)
             }) { Text("+") }
         }
-        Loaded(seasons) { list ->
+        Loaded(seasons, { retry++ }, { push(Screen.Downloads) }) { list ->
             LazyColumn {
                 items(list, key = { it.id }) { season ->
                     Row(Modifier.fillMaxWidth().combinedClickable(onClick = {
@@ -313,7 +330,7 @@ fun SeasonScreen(modifier: Modifier, screen: Screen.Season, push: (Screen) -> Un
                 scope.launch { downloadAll(ctx, episodes?.getOrNull().orEmpty()); queuing = false }
             }) { Text(if (queuing) "Queuing…" else "Download season") }
         }
-        Loaded(episodes, onDownloads = { push(Screen.Downloads) }) { list ->
+        Loaded(episodes, { refresh++ }, { push(Screen.Downloads) }) { list ->
             LazyColumn(state = listState) {
                 items(list, key = { it.id }) { ep ->
                     EpisodeRow(

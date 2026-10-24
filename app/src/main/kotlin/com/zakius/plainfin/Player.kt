@@ -73,6 +73,7 @@ import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.TrackSelectionOverride
+import androidx.media3.datasource.HttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
@@ -158,7 +159,7 @@ private fun Playback(
 
     var transcoding by remember { mutableStateOf(false) }
     var transcodeFromMs by remember { mutableLongStateOf(0L) }
-    var playerError by remember { mutableStateOf<String?>(null) }
+    var playerError by remember { mutableStateOf<PlaybackException?>(null) }
     var ended by remember { mutableStateOf(false) }
     var intro by remember { mutableStateOf<MediaSegmentDto?>(null) }
     val scope = rememberCoroutineScope()
@@ -252,7 +253,7 @@ private fun Playback(
                     transcodeFromMs = player.currentPosition
                     transcoding = true
                 }
-                else playerError = error.errorCodeName
+                else playerError = error
             }
         }
         player.addListener(listener)
@@ -387,7 +388,7 @@ private fun VideoSurface(
     intro: MediaSegmentDto?,
     ended: Boolean,
     next: BaseItemDto?,
-    playerError: String?,
+    playerError: PlaybackException?,
     onToggleFullscreen: () -> Unit,
     onBack: () -> Unit,
     onNext: () -> Unit,
@@ -523,7 +524,9 @@ private fun VideoSurface(
 
         if (playerError != null) {
             Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
-                Text("Playback error: $playerError", color = Color.White)
+                val known = playbackError(playerError)
+                Text(known ?: "Playback failed.", color = Color.White)
+                if (known == null) Text(playerError.errorCodeName, color = Color.White, style = MaterialTheme.typography.bodySmall)
                 Button(onClick = onRetry) { Text("Retry") }
             }
         }
@@ -647,4 +650,17 @@ private fun selectedLanguage(player: ExoPlayer, type: Int): String? {
     if (player.trackSelectionParameters.disabledTrackTypes.contains(type)) return ""
     return player.currentTracks.groups.filter { it.type == type && it.isSelected }
         .firstNotNullOfOrNull { g -> (0 until g.length).firstOrNull { g.isTrackSelected(it) }?.let { g.getTrackFormat(it).language } }
+}
+
+/** A plain sentence for common playback failures; null for the rest. */
+private fun playbackError(e: PlaybackException) = when (e.errorCode) {
+    PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED -> "Can't reach the server."
+    PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT, PlaybackException.ERROR_CODE_TIMEOUT -> "The server took too long to respond."
+    PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS ->
+        "The server returned an error" + ((e.cause as? HttpDataSource.InvalidResponseCodeException)?.let { " (${it.responseCode})." } ?: ".")
+    PlaybackException.ERROR_CODE_IO_FILE_NOT_FOUND -> "The file is missing."
+    PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED, PlaybackException.ERROR_CODE_DECODING_FORMAT_EXCEEDS_CAPABILITIES,
+    PlaybackException.ERROR_CODE_DECODER_INIT_FAILED, PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED ->
+        "This device can't play this file."
+    else -> null
 }
