@@ -101,7 +101,7 @@ import org.jellyfin.sdk.api.client.exception.InvalidStatusException
 import org.jellyfin.sdk.model.api.BaseItemDto
 import org.jellyfin.sdk.model.api.BaseItemKind
 import org.jellyfin.sdk.model.api.MediaSegmentDto
-import plainfin.core.TICKS_PER_SECOND
+import plainfin.core.TICKS_PER_MS
 
 private const val REPORT_INTERVAL_MS = 10_000L
 private const val RESUME_REWIND_MS = 5_000L
@@ -242,7 +242,7 @@ private fun Playback(
                     .build()
             })
             .build()
-        val resumeMs = if (fromStart) 0 else (item.localState().first?.positionTicks ?: 0) / (TICKS_PER_SECOND / 1000)
+        val resumeMs = if (fromStart) 0 else (item.localState().first?.positionTicks ?: 0) / TICKS_PER_MS
         val startMs = if (transcoding) transcodeFromMs else (resumeMs - RESUME_REWIND_MS).coerceAtLeast(0)
         player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().apply {
             prefs.audioLang(seriesKey)?.let { setPreferredAudioLanguage(it) }
@@ -257,11 +257,11 @@ private fun Playback(
         player.prepare()
         player.play()
         Media.playing = Media.key(item)
-        App.server.reportStart(id, sourceId, startMs * 10_000, transcoding)
+        App.server.reportStart(id, sourceId, startMs * TICKS_PER_MS, transcoding)
         if (online) intro = runCatching { App.server.introSegment(id) }.getOrNull()
     }
 
-    fun positionTicks() = player.currentPosition * 10_000
+    fun positionTicks() = player.currentPosition * TICKS_PER_MS
     fun report() = scope.launch { App.server.reportProgress(id, sourceId, positionTicks(), !player.isPlaying, transcoding, serverPlayed) }
 
     DisposableEffect(player) {
@@ -342,12 +342,9 @@ private fun Playback(
         if (!rotationLocked) activity.requestedOrientation =
             if (on) ActivityInfo.SCREEN_ORIENTATION_USER_LANDSCAPE else ActivityInfo.SCREEN_ORIENTATION_USER_PORTRAIT
     }
-    DisposableEffect(fullscreen) {
-        systemBars(activity, hidden = fullscreen)
-        activity.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        onDispose { }
-    }
+    LaunchedEffect(fullscreen) { systemBars(activity, hidden = fullscreen) }
     DisposableEffect(Unit) {
+        activity.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         onDispose {
             systemBars(activity, hidden = false)
             activity.window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -459,7 +456,7 @@ private fun VideoSurface(
     var crop by remember { mutableStateOf(false) }
     var scrubTarget by remember { mutableStateOf<Long?>(null) }
     var lastInteraction by remember { mutableLongStateOf(System.currentTimeMillis()) }
-    val introRange = intro?.let { it.startTicks / 10_000 until it.endTicks / 10_000 - 1_000 }
+    val introRange = intro?.let { it.startTicks / TICKS_PER_MS until it.endTicks / TICKS_PER_MS - 1_000 }
 
     LaunchedEffect(player) {
         while (true) {

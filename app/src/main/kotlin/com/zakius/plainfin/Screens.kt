@@ -51,6 +51,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
@@ -86,6 +87,7 @@ import org.jellyfin.sdk.model.api.BaseItemDto
 import org.jellyfin.sdk.model.api.BaseItemKind
 import org.jellyfin.sdk.model.api.ImageType
 import plainfin.core.PlayState
+import plainfin.core.TICKS_PER_MS
 import kotlin.math.abs
 
 /**
@@ -146,12 +148,12 @@ private suspend fun downloadAll(context: Context, episodes: List<BaseItemDto>) {
  * their total size when every file's size is known.
  */
 @Composable
-private fun DownloadAllButton(label: String, enabled: Boolean, fetch: suspend () -> List<BaseItemDto>) {
+private fun DownloadAllButton(label: String, fetch: suspend () -> List<BaseItemDto>) {
     var busy by remember { mutableStateOf(false) }
     var pending by remember { mutableStateOf<List<BaseItemDto>?>(null) }
     val scope = rememberCoroutineScope()
     val ctx = LocalContext.current
-    TextButton(enabled = enabled && !busy, onClick = {
+    TextButton(enabled = !busy, onClick = {
         busy = true
         scope.launch {
             runCatching { fetch() }
@@ -395,22 +397,16 @@ fun SeriesScreen(modifier: Modifier, screen: Screen.Series, push: (Screen) -> Un
     val scope = rememberCoroutineScope()
     Column(modifier.fillMaxSize()) {
         Bar(screen.name, pop) {
-            DownloadAllButton("Download all", true) { App.server.episodes(screen.id, sources = true).filter { it.parentIndexNumber != 0 } }
+            DownloadAllButton("Download all") { App.server.episodes(screen.id, sources = true).filter { it.parentIndexNumber != 0 } }
         }
-        Row(Modifier.padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("Keep next episodes downloaded:", Modifier.weight(1f))
-            fun set(n: Int) {
-                if (keepNext == 0) (ctx as? MainActivity)?.askNotifications()
-                keepNext = n
-                App.prefs.setKeepNext(screen.id, n)
-                scope.launch(Dispatchers.IO) {
-                    if (n == 0) Media.releaseKeepNext(screen.id)
-                    Housekeeping.enqueue(ctx)
-                }
+        Stepper("Keep next episodes downloaded:", keepNext, (0..20).toList(), { if (it == 0) "off" else "$it" }) { n ->
+            if (keepNext == 0) (ctx as? MainActivity)?.askNotifications()
+            keepNext = n
+            App.prefs.setKeepNext(screen.id, n)
+            scope.launch(Dispatchers.IO) {
+                if (n == 0) Media.releaseKeepNext(screen.id)
+                Housekeeping.enqueue(ctx)
             }
-            TextButton(onClick = { set(keepNext - 1) }, enabled = keepNext > 0) { Text("−") }
-            Text(if (keepNext == 0) "off" else "$keepNext")
-            TextButton(onClick = { set(keepNext + 1) }, enabled = keepNext < 20) { Text("+") }
         }
         Loaded(seasons, { refresh++ }, { push(Screen.Downloads) }) { list ->
             if (list.isEmpty()) Empty("This series has no seasons")
@@ -438,7 +434,7 @@ fun SeasonScreen(modifier: Modifier, screen: Screen.Season, push: (Screen) -> Un
     val listState = rememberLazyListState() // outside Loaded, so the scroll survives its "Loading…" pass when coming back
     Column(modifier.fillMaxSize()) {
         Bar(screen.name, pop) {
-            DownloadAllButton("Download season", episodes?.isSuccess == true) { App.server.episodes(screen.seriesId, screen.seasonId, sources = true) }
+            DownloadAllButton("Download season") { App.server.episodes(screen.seriesId, screen.seasonId, sources = true) }
         }
         Loaded(episodes, { refresh++ }, { push(Screen.Downloads) }) { list ->
             if (list.isEmpty()) Empty("This season has no episodes")
@@ -484,7 +480,7 @@ fun EpisodeRow(
         Column(Modifier.weight(1f)) {
             Text("${ep.indexNumber ?: ""}. ${ep.name.orEmpty()}", style = MaterialTheme.typography.titleSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
             val bits = listOfNotNull(
-                ep.runTimeTicks?.let { formatMs(it / 10_000) },
+                ep.runTimeTicks?.let { formatMs(it / TICKS_PER_MS) },
                 "✓ played".takeIf { state?.played == true },
                 download?.label,
                 "not synced".takeIf { unsynced },
@@ -612,14 +608,6 @@ fun SettingsScreen(modifier: Modifier, pop: () -> Unit, onLoggedOut: () -> Unit)
         Text(label, Modifier.weight(1f), color = if (enabled) Color.Unspecified else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f))
         Switch(value, null, enabled = enabled)
     }
-    @Composable
-    fun stepper(label: String, value: Int, options: List<Int>, set: (Int) -> Unit) = Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-        val i = options.indices.minBy { abs(options[it] - value) } // a stored value off the list shows as the nearest
-        Text(label, Modifier.weight(1f))
-        TextButton(onClick = { set(options[i - 1]); refresh++ }, enabled = i > 0) { Text("−") }
-        Text("${options[i]}")
-        TextButton(onClick = { set(options[i + 1]); refresh++ }, enabled = i < options.lastIndex) { Text("+") }
-    }
     val scope = rememberCoroutineScope()
     var moveTo by remember { mutableStateOf<Int?>(null) }
     var moving by remember { mutableStateOf(false) }
@@ -641,36 +629,45 @@ fun SettingsScreen(modifier: Modifier, pop: () -> Unit, onLoggedOut: () -> Unit)
     }
     Column(modifier.fillMaxSize()) {
         Bar("Settings", pop)
-        LazyColumn {
-            item(refresh) {
-                Column {
-                    Text("Network", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(16.dp))
-                    toggle("Buffer to end on metered networks", p.bufferOnMetered) { p.bufferOnMetered = it }
-                    toggle("Download on metered networks", p.downloadOnMetered) { p.downloadOnMetered = it; Media.kickDownloads(restart = true) }
-                    stepper("Buffer cache limit (GB)", p.cacheLimitGb, listOf(1, 2, 5, 10, 20, 50, 100)) { p.cacheLimitGb = it }
-                    val roots = Media.storageRoots()
-                    if (roots.size > 1 || Media.storageMissing) { // missing: switching back is the way out of a lost card
-                        toggle("Store on SD card (switching deletes downloads and the buffer)", p.storageIndex > 0, enabled = !moving) {
-                            moveTo = if (it) 1 else 0
-                        }
+        Column(Modifier.verticalScroll(rememberScrollState())) {
+            key(refresh) {
+                Text("Network", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(16.dp))
+                toggle("Buffer to end on metered networks", p.bufferOnMetered) { p.bufferOnMetered = it }
+                toggle("Download on metered networks", p.downloadOnMetered) { p.downloadOnMetered = it; Media.kickDownloads(restart = true) }
+                Stepper("Buffer cache limit (GB)", p.cacheLimitGb, listOf(1, 2, 5, 10, 20, 50, 100)) { p.cacheLimitGb = it; refresh++ }
+                val roots = Media.storageRoots()
+                if (roots.size > 1 || Media.storageMissing) { // missing: switching back is the way out of a lost card
+                    toggle("Store on SD card (switching deletes downloads and the buffer)", p.storageIndex > 0, enabled = !moving) {
+                        moveTo = if (it) 1 else 0
                     }
-
-                    Text("Gestures", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(16.dp))
-                    toggle("Brightness / volume swipes", p.gestureLevels) { p.gestureLevels = it }
-                    toggle("Brightness on the left (volume on the right)", p.brightnessOnLeft, enabled = p.gestureLevels) { p.brightnessOnLeft = it }
-                    toggle("Horizontal swipe seeks", p.gestureSeek) { p.gestureSeek = it }
-                    toggle("Double-tap skips", p.gestureDoubleTap) { p.gestureDoubleTap = it }
-                    stepper("Skip step (s)", p.doubleTapSeconds, (5..60 step 5).toList()) { p.doubleTapSeconds = it }
-                    toggle("Pinch to crop / fit", p.gesturePinch) { p.gesturePinch = it }
-                    toggle("Swipe up / down for fullscreen", p.gestureFullscreen) { p.gestureFullscreen = it }
-
-                    Text("Account", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(16.dp))
-                    Text(p.baseUrl.orEmpty(), Modifier.padding(horizontal = 16.dp))
-                    TextButton(onClick = { confirmLogout = true }, Modifier.padding(horizontal = 8.dp)) { Text("Log out") }
-                    Text("plainfin ${BuildConfig.VERSION_NAME}", Modifier.padding(16.dp), style = MaterialTheme.typography.labelSmall)
-                    Spacer(Modifier.padding(24.dp))
                 }
+
+                Text("Gestures", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(16.dp))
+                toggle("Brightness / volume swipes", p.gestureLevels) { p.gestureLevels = it }
+                toggle("Brightness on the left (volume on the right)", p.brightnessOnLeft, enabled = p.gestureLevels) { p.brightnessOnLeft = it }
+                toggle("Horizontal swipe seeks", p.gestureSeek) { p.gestureSeek = it }
+                toggle("Double-tap skips", p.gestureDoubleTap) { p.gestureDoubleTap = it }
+                Stepper("Skip step (s)", p.doubleTapSeconds, (5..60 step 5).toList()) { p.doubleTapSeconds = it; refresh++ }
+                toggle("Pinch to crop / fit", p.gesturePinch) { p.gesturePinch = it }
+                toggle("Swipe up / down for fullscreen", p.gestureFullscreen) { p.gestureFullscreen = it }
+
+                Text("Account", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(16.dp))
+                Text(p.baseUrl.orEmpty(), Modifier.padding(horizontal = 16.dp))
+                TextButton(onClick = { confirmLogout = true }, Modifier.padding(horizontal = 8.dp)) { Text("Log out") }
+                Text("plainfin ${BuildConfig.VERSION_NAME}", Modifier.padding(16.dp), style = MaterialTheme.typography.labelSmall)
+                Spacer(Modifier.padding(24.dp))
             }
         }
     }
 }
+
+/** − value + over [options]; a stored value off the list shows as the nearest. */
+@Composable
+private fun Stepper(label: String, value: Int, options: List<Int>, show: (Int) -> String = Int::toString, set: (Int) -> Unit) =
+    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+        val i = options.indices.minBy { abs(options[it] - value) }
+        Text(label, Modifier.weight(1f))
+        TextButton(onClick = { set(options[i - 1]) }, enabled = i > 0) { Text("−") }
+        Text(show(options[i]))
+        TextButton(onClick = { set(options[i + 1]) }, enabled = i < options.lastIndex) { Text("+") }
+    }
