@@ -111,15 +111,18 @@ fun rememberDownloadStatuses(): Map<String, Media.DownloadStatus> =
 /** Queues downloads and says how many were queued. */
 private suspend fun downloadAll(context: Context, episodes: List<BaseItemDto>) {
     val noun = if (episodes.all { it.type == BaseItemKind.MOVIE }) "movie" else "episode"
-    val queued = episodes.count { ep ->
-        Media.download(ep.id.toString()) == null &&
-            runCatching { Media.startDownload(App.server.item(ep.id.toString()), auto = false) }.isSuccess
+    var queued = 0
+    val failures = mutableListOf<Throwable>()
+    for (ep in episodes) {
+        if (Media.download(ep.id.toString()) != null) continue
+        runCatching { Media.startDownload(App.server.item(ep.id.toString()), auto = false) }
+            .onSuccess { queued++ }.onFailure { failures += it }
     }
     val text = when {
-        queued == 0 -> "Nothing new to download"
+        queued == 0 -> failures.firstOrNull()?.let(::loadError) ?: "Nothing new to download"
         queued == 1 -> "Downloading 1 $noun"
         else -> "Downloading $queued ${noun}s"
-    }
+    } + if (queued > 0 && failures.isNotEmpty()) ", ${failures.size} failed" else ""
     if (queued > 0) (context as? MainActivity)?.askNotifications()
     Toast.makeText(context, text + (Media.downloadsWaitingFor()?.takeIf { queued > 0 }?.let { " ($it)" } ?: ""), Toast.LENGTH_SHORT).show()
 }

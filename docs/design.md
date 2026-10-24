@@ -73,7 +73,7 @@ There is one persistent on-disk cache. The key is the item ID plus the media sou
   - It deletes only episodes it downloaded itself, after they are marked played.
   - Changing N runs the check at once. Turning it off deletes its played and unfinished downloads; its finished, unplayed ones stay as regular downloads.
 - Deleting a download asks first, naming the item. A dialog, not undo: the bytes go at once.
-- "Download all" (series) and "Download season" say how many episodes are new, and their total size when the server lists every file's size, before queuing. With nothing new, a toast says so. "Download season" waits for the season to load.
+- "Download all" (series) and "Download season" say how many episodes are new, and their total size when the server lists every file's size, before queuing. With nothing new, a toast says so; when the items can't be fetched, it says why instead. "Download season" waits for the season to load.
 - One Downloads screen shows the queue, pause/resume, delete and storage use. It is also the offline screen: when the server cannot be reached, only downloads are browsable.
   - Unfinished downloads come first, in the order they will download; finished ones follow, grouped by series.
   - A queued item shows its place in the queue ("queued #2"). When the current network blocks the queue (none, or metered with "download on metered" off), it says so instead. The toast after queuing does the same.
