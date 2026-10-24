@@ -87,15 +87,23 @@ import org.jellyfin.sdk.model.api.ImageType
 import plainfin.core.PlayState
 import kotlin.math.abs
 
-/** Loads [block] after pushing unsynced progress, so the list never shows state older than this device's. */
+/**
+ * Loads [block] after pushing unsynced progress, so the list never shows state older than this device's.
+ * A failed [refresh] of the same [keys] keeps the list it had, with local changes marked "not synced".
+ */
 @Composable
-private fun <T> loadFresh(vararg keys: Any?, block: suspend () -> T): Result<T>? =
-    produceState<Result<T>?>(null, *keys) {
-        if (value?.isFailure == true) value = null // a retry shows "Loading…" again
+private fun <T> loadFresh(vararg keys: Any?, refresh: Int, block: suspend () -> T): Result<T>? {
+    val k = keys.toList()
+    var last by remember { mutableStateOf<Pair<List<Any?>, Result<T>>?>(null) }
+    LaunchedEffect(k, refresh) {
+        if (last?.second?.isFailure == true) last = null // a retry shows "Loading…" again
         App.server.flush()
-        value = runCatching { block() }
+        val result = runCatching { block() }
             .onFailure { if (it is InvalidStatusException && it.status == 401) App.server.expire() }
-    }.value
+        if (result.isSuccess || last?.first != k) last = k to result
+    }
+    return last?.second
+}
 
 /**
  * Download statuses while the screen is shown, null until first read. Re-read on every download
@@ -272,7 +280,7 @@ fun LoginScreen(modifier: Modifier, onDone: () -> Unit) {
 @Composable
 fun LibrariesScreen(modifier: Modifier, push: (Screen) -> Unit) {
     var refresh by remember { mutableIntStateOf(0) }
-    val libs = loadFresh(refresh) { App.server.libraries() }
+    val libs = loadFresh(refresh = refresh) { App.server.libraries() }
     Column(modifier.fillMaxSize()) {
         Bar("plainfin", null) {
             TextButton(onClick = { push(Screen.Library(null, "Search")) }) { Text("Search") }
@@ -307,7 +315,7 @@ fun LibraryScreen(modifier: Modifier, screen: Screen.Library, push: (Screen) -> 
     var focusedOnce by rememberSaveable { mutableStateOf(false) } // not again when coming back
     LaunchedEffect(Unit) { if (searchOnly && !focusedOnce) { focusedOnce = true; focus.requestFocus(); keyboard?.show() } }
     val items = if (searchOnly && query.isBlank()) Result.success(emptyList())
-        else loadFresh(screen.id, sort, unplayed, query, refresh) { App.server.items(screen.id, sort, unplayed, query) }
+        else loadFresh(screen.id, sort, unplayed, query, refresh = refresh) { App.server.items(screen.id, sort, unplayed, query) }
     Column(modifier.fillMaxSize()) {
         Bar(screen.name, pop)
         OutlinedTextField(search, { search = it }, label = { Text("Search") }, singleLine = true,
@@ -379,7 +387,7 @@ private fun Poster(
 @Composable
 fun SeriesScreen(modifier: Modifier, screen: Screen.Series, push: (Screen) -> Unit, pop: () -> Unit) {
     var refresh by remember { mutableIntStateOf(0) }
-    val seasons = loadFresh(screen.id, refresh) { App.server.seasons(screen.id) }
+    val seasons = loadFresh(screen.id, refresh = refresh) { App.server.seasons(screen.id) }
     var keepNext by remember { mutableIntStateOf(App.prefs.keepNext(screen.id)) }
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -423,7 +431,7 @@ fun SeriesScreen(modifier: Modifier, screen: Screen.Series, push: (Screen) -> Un
 @Composable
 fun SeasonScreen(modifier: Modifier, screen: Screen.Season, push: (Screen) -> Unit, pop: () -> Unit) {
     var refresh by remember { mutableIntStateOf(0) }
-    val episodes = loadFresh(screen.seasonId, refresh) { App.server.episodes(screen.seriesId, screen.seasonId) }
+    val episodes = loadFresh(screen.seasonId, refresh = refresh) { App.server.episodes(screen.seriesId, screen.seasonId) }
     val statuses = rememberDownloadStatuses()
     val listState = rememberLazyListState() // outside Loaded, so the scroll survives its "Loading…" pass when coming back
     Column(modifier.fillMaxSize()) {

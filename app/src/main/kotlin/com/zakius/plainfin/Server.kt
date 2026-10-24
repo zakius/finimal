@@ -2,6 +2,7 @@ package com.zakius.plainfin
 
 import android.content.Context
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.ProcessLifecycleOwner
@@ -224,10 +225,15 @@ class Server(context: Context) {
         }
     }
 
+    /** Bumped on every local play-state change; [localState] reads it so rows redraw without a refetch. */
+    var localChanges by mutableIntStateOf(0)
+        private set
+
     /** Every local play-state change: queued for the server and kept with the download for offline resume. */
     private fun record(id: String, state: PlayState) {
         App.pending.put(id, state)
         Media.rememberState(id, state)
+        localChanges++
     }
 
     suspend fun setPlayed(id: String, played: Boolean) {
@@ -276,6 +282,7 @@ fun UserItemDataDto?.toPlayState(): PlayState? = this?.let {
 
 /** Server state with any unsynced local state on top. The flag marks items that differ from the server. */
 fun BaseItemDto.localState(): Pair<PlayState?, Boolean> {
+    App.server.localChanges // a composable caller redraws on the next local change
     val local = App.pending.get(id.toString())
     return (local ?: userData.toPlayState()) to (local != null)
 }
