@@ -236,6 +236,18 @@ object Media {
         if (key != null && playing != key) cache.removeResource(key)
     }
 
+    /**
+     * "Keep next N" turned off for [seriesId]: its finished, unplayed downloads become regular
+     * downloads; the played and unfinished ones are deleted.
+     */
+    @Synchronized
+    fun releaseKeepNext(seriesId: String) {
+        for (d in downloads().filter { it.auto && it.item.seriesId?.toString() == seriesId }) {
+            if (d.item.userData?.played != true && isComplete(key(d.item))) write(d.copy(auto = false))
+            else deleteDownload(d.item.id.toString())
+        }
+    }
+
     /** Keeps a download's stored play state current, so offline playback resumes where the user left off. */
     @Synchronized
     fun rememberState(id: String, state: PlayState?) {

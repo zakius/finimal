@@ -39,7 +39,7 @@ Libraries → poster grid → series → seasons → episodes.
   - Vertical swipe on the side zones: brightness and volume. Which side controls which is a setting.
   - Swipe down in the center zone exits fullscreen.
   - Horizontal swipe seeks.
-  - Double-tap skips ±N s (N is a setting).
+  - Double-tap skips ±N s. N is the "skip step" setting, shared with the on-screen rewind and forward buttons.
   - Pinch switches between fit and crop.
 - Audio and subtitle choices are remembered per series.
 - Media segments show a "Skip intro" button. It never skips on its own.
@@ -49,6 +49,12 @@ Libraries → poster grid → series → seasons → episodes.
 - A playback error shows a short sentence for common causes (network, timeout, HTTP status, missing file, unsupported format) and a Retry button. Other errors show a generic sentence with the Media3 error code in small text.
 - Theme follows the system and uses Material You colors.
 
+## Settings
+
+- A whole row toggles its switch. A setting that depends on a gesture turned off is greyed out.
+- Log out asks first. When progress is not synced yet, the dialog says how many items, and that they are sent after logging back in to the same server.
+- The app version shows at the bottom.
+
 ## Buffering and downloads
 
 There is one persistent on-disk cache. The key is the item ID plus the media source ETag, so a file replaced on the server never mixes with bytes cached from the old one. A finished download keeps playing its own version.
@@ -56,7 +62,7 @@ There is one persistent on-disk cache. The key is the item ID plus the media sou
 - Buffering is a background fill of the cache to the end of the episode. Playback reads from the cache.
 - A download is the same fill, marked pinned. Downloads run one at a time in the order requested. Pause and delete act on one episode; the rest of the queue carries on.
 - Playing an unfinished download moves it to the front, and the worker fills from just before the playhead first (again after a seek into an uncached part), then the rest. The player reads the cache without writing it; the worker is the only writer.
-- Buffered entries are evicted oldest-first above a size limit (default 5 GB). Pinned entries are removed only by the user.
+- Buffered entries are evicted oldest-first above a size limit (default 5 GB; the setting steps through 1, 2, 5, 10, 20, 50, 100 GB). Pinned entries are removed only by the user.
 - An interrupted fill resumes from the last byte, including after a crash or reboot.
 - Two toggles, both off by default: "buffer to end on metered" and "download on metered". They follow Android's metered flag, not wifi/cellular. With buffering off on a metered network, the player uses its normal buffer.
 - Downloads are original files in app-specific storage. The SD card can be selected.
@@ -64,6 +70,7 @@ There is one persistent on-disk cache. The key is the item ID plus the media sou
   - Anchor: the last played episode in season order, specials excluded.
   - Checked when the app opens, when an episode ends, and when the network becomes unmetered.
   - It deletes only episodes it downloaded itself, after they are marked played.
+  - Changing N runs the check at once. Turning it off deletes its played and unfinished downloads; its finished, unplayed ones stay as regular downloads.
 - Deleting a download asks first, naming the item. A dialog, not undo: the bytes go at once.
 - "Download all" (series) and "Download season" say how many episodes are new, and their total size when the server lists every file's size, before queuing. With nothing new, a toast says so. "Download season" waits for the season to load.
 - One Downloads screen shows the queue, pause/resume, delete and storage use. It is also the offline screen: when the server cannot be reached, only downloads are browsable.

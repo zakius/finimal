@@ -6,6 +6,7 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -66,6 +67,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentType
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.ImeAction
@@ -83,6 +85,7 @@ import org.jellyfin.sdk.model.api.BaseItemDto
 import org.jellyfin.sdk.model.api.BaseItemKind
 import org.jellyfin.sdk.model.api.ImageType
 import plainfin.core.PlayState
+import kotlin.math.abs
 
 /** Loads [block] after pushing unsynced progress, so the list never shows state older than this device's. */
 @Composable
@@ -375,11 +378,15 @@ fun SeriesScreen(modifier: Modifier, screen: Screen.Series, push: (Screen) -> Un
         }
         Row(Modifier.padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
             Text("Keep next episodes downloaded:", Modifier.weight(1f))
-            TextButton(onClick = { keepNext = (keepNext - 1).coerceAtLeast(0); App.prefs.setKeepNext(screen.id, keepNext) }) { Text("−") }
+            fun set(n: Int) {
+                keepNext = n
+                App.prefs.setKeepNext(screen.id, n)
+                if (n == 0) Media.releaseKeepNext(screen.id)
+                Housekeeping.enqueue(ctx)
+            }
+            TextButton(onClick = { set(keepNext - 1) }, enabled = keepNext > 0) { Text("−") }
             Text(if (keepNext == 0) "off" else "$keepNext")
-            TextButton(onClick = {
-                keepNext = (keepNext + 1).coerceAtMost(20); App.prefs.setKeepNext(screen.id, keepNext); Housekeeping.enqueue(ctx)
-            }) { Text("+") }
+            TextButton(onClick = { set(keepNext + 1) }, enabled = keepNext < 20) { Text("+") }
         }
         Loaded(seasons, { retry++ }, { push(Screen.Downloads) }) { list ->
             if (list.isEmpty()) Empty("This series has no seasons")
@@ -562,16 +569,31 @@ fun SettingsScreen(modifier: Modifier, pop: () -> Unit, onLoggedOut: () -> Unit)
     val p = App.prefs
     var version by remember { mutableIntStateOf(0) } // bumps to redraw after a pref changes
     @Composable
-    fun toggle(label: String, value: Boolean, set: (Boolean) -> Unit) = Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text(label, Modifier.weight(1f))
-        Switch(value, { set(it); version++ })
+    fun toggle(label: String, value: Boolean, enabled: Boolean = true, set: (Boolean) -> Unit) = Row(
+        Modifier.fillMaxWidth().toggleable(value, enabled = enabled, role = Role.Switch) { set(it); version++ }.padding(horizontal = 16.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(label, Modifier.weight(1f), color = if (enabled) Color.Unspecified else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f))
+        Switch(value, null, enabled = enabled)
     }
     @Composable
-    fun stepper(label: String, value: Int, range: IntRange, step: Int, set: (Int) -> Unit) = Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+    fun stepper(label: String, value: Int, options: List<Int>, set: (Int) -> Unit) = Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+        val i = options.indices.minBy { abs(options[it] - value) } // a stored value off the list shows as the nearest
         Text(label, Modifier.weight(1f))
-        TextButton(onClick = { set((value - step).coerceIn(range)); version++ }) { Text("−") }
-        Text("$value")
-        TextButton(onClick = { set((value + step).coerceIn(range)); version++ }) { Text("+") }
+        TextButton(onClick = { set(options[i - 1]); version++ }, enabled = i > 0) { Text("−") }
+        Text("${options[i]}")
+        TextButton(onClick = { set(options[i + 1]); version++ }, enabled = i < options.lastIndex) { Text("+") }
+    }
+    var confirmLogout by remember { mutableStateOf(false) }
+    if (confirmLogout) {
+        val unsynced = App.pending.all().size
+        AlertDialog({ confirmLogout = false },
+            confirmButton = { TextButton(onClick = { App.server.logout(); onLoggedOut() }) { Text("Log out") } },
+            dismissButton = { TextButton(onClick = { confirmLogout = false }) { Text("Cancel") } },
+            text = {
+                Text("Log out?" + if (unsynced == 0) "" else
+                    " $unsynced item${if (unsynced == 1) " has" else "s have"} progress not synced yet. It is sent after you log back in to the same server.")
+            })
     }
     Column(modifier.fillMaxSize()) {
         Bar("Settings", pop)
@@ -581,7 +603,7 @@ fun SettingsScreen(modifier: Modifier, pop: () -> Unit, onLoggedOut: () -> Unit)
                     Text("Network", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(16.dp))
                     toggle("Buffer to end on metered networks", p.bufferOnMetered) { p.bufferOnMetered = it }
                     toggle("Download on metered networks", p.downloadOnMetered) { p.downloadOnMetered = it; Media.kickDownloads(restart = true) }
-                    stepper("Buffer cache limit (GB)", p.cacheLimitGb, 1..100, 1) { p.cacheLimitGb = it }
+                    stepper("Buffer cache limit (GB)", p.cacheLimitGb, listOf(1, 2, 5, 10, 20, 50, 100)) { p.cacheLimitGb = it }
                     val roots = Media.storageRoots()
                     if (roots.size > 1) {
                         toggle("Store on SD card (after restart; existing downloads stay where they are)", p.storageIndex > 0) {
@@ -591,16 +613,17 @@ fun SettingsScreen(modifier: Modifier, pop: () -> Unit, onLoggedOut: () -> Unit)
 
                     Text("Gestures", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(16.dp))
                     toggle("Brightness / volume swipes", p.gestureLevels) { p.gestureLevels = it }
-                    toggle("Brightness on the left (volume on the right)", p.brightnessOnLeft) { p.brightnessOnLeft = it }
+                    toggle("Brightness on the left (volume on the right)", p.brightnessOnLeft, enabled = p.gestureLevels) { p.brightnessOnLeft = it }
                     toggle("Horizontal swipe seeks", p.gestureSeek) { p.gestureSeek = it }
                     toggle("Double-tap skips", p.gestureDoubleTap) { p.gestureDoubleTap = it }
-                    stepper("Double-tap skip (s)", p.doubleTapSeconds, 5..60, 5) { p.doubleTapSeconds = it }
+                    stepper("Skip step (s)", p.doubleTapSeconds, (5..60 step 5).toList()) { p.doubleTapSeconds = it }
                     toggle("Pinch to crop / fit", p.gesturePinch) { p.gesturePinch = it }
                     toggle("Swipe up / down for fullscreen", p.gestureFullscreen) { p.gestureFullscreen = it }
 
                     Text("Account", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(16.dp))
                     Text(p.baseUrl.orEmpty(), Modifier.padding(horizontal = 16.dp))
-                    TextButton(onClick = { App.server.logout(); onLoggedOut() }, Modifier.padding(horizontal = 8.dp)) { Text("Log out") }
+                    TextButton(onClick = { confirmLogout = true }, Modifier.padding(horizontal = 8.dp)) { Text("Log out") }
+                    Text("plainfin ${BuildConfig.VERSION_NAME}", Modifier.padding(16.dp), style = MaterialTheme.typography.labelSmall)
                     Spacer(Modifier.padding(24.dp))
                 }
             }
