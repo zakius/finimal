@@ -627,7 +627,8 @@ private fun Controls(
     var dragging by remember { mutableFloatStateOf(-1f) }
     // Auto-hide would close an open menu.
     LaunchedEffect(menu) { while (menu) { onInteraction(); delay(1_000) } }
-    Box(Modifier.fillMaxSize().background(Color(0x55000000)).safeDrawingPadding()) {
+    // Portrait already sits below the status bar; the rest of the safe area is below the video.
+    Box(Modifier.fillMaxSize().background(Color(0x55000000)).then(if (fullscreen) Modifier.safeDrawingPadding() else Modifier)) {
         Row(Modifier.align(Alignment.TopStart).fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = Color.White) }
             if (transcoding) Text("Transcoding: buffering to the end is best-effort", color = Color.White, style = MaterialTheme.typography.labelSmall)
