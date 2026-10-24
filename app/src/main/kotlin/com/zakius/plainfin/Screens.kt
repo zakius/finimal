@@ -394,6 +394,7 @@ fun SeriesScreen(modifier: Modifier, screen: Screen.Series, push: (Screen) -> Un
             fun set(n: Int) {
                 keepNext = n
                 App.prefs.setKeepNext(screen.id, n)
+                if (n > 0) (ctx as? MainActivity)?.askNotifications()
                 scope.launch(Dispatchers.IO) {
                     if (n == 0) Media.releaseKeepNext(screen.id)
                     Housekeeping.enqueue(ctx)
