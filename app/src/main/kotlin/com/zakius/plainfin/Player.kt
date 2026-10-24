@@ -641,7 +641,7 @@ private fun Controls(
                         }
                         "audio", "text" -> {
                             val type = if (sub == "audio") C.TRACK_TYPE_AUDIO else C.TRACK_TYPE_TEXT
-                            if (type == C.TRACK_TYPE_TEXT) DropdownMenuItem({ Text("Off") }, {
+                            if (type == C.TRACK_TYPE_TEXT) DropdownMenuItem({ Text((if (C.TRACK_TYPE_TEXT in player.trackSelectionParameters.disabledTrackTypes) "✓ " else "") + "Off") }, {
                                 player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true).build()
                                 onTracksChosen(selectedLanguage(player, C.TRACK_TYPE_AUDIO), "")
                                 menu = false; sub = null
