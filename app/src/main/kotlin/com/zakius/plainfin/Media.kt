@@ -4,6 +4,8 @@ package com.zakius.plainfin
 
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
+import android.content.Intent
 import android.content.Context
 import android.content.pm.ServiceInfo
 import android.os.Build
@@ -399,6 +401,9 @@ class DownloadWorker(context: Context, params: WorkerParameters) : CoroutineWork
             .setProgress(100, percent ?: 0, percent == null)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
+            .setContentIntent(PendingIntent.getActivity(applicationContext, 0,
+                Intent(applicationContext, MainActivity::class.java).putExtra(MainActivity.EXTRA_DOWNLOADS, true),
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT))
             .build()
         return if (Build.VERSION.SDK_INT >= 29) ForegroundInfo(NOTIFICATION_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
         else ForegroundInfo(NOTIFICATION_ID, n)

@@ -57,6 +57,7 @@ There is one persistent on-disk cache. The key is the item ID plus the media sou
   - Checked when the app opens, when an episode ends, and when the network becomes unmetered.
   - It deletes only episodes it downloaded itself, after they are marked played.
 - One Downloads screen shows the queue, pause/resume, delete and storage use. It is also the offline screen: when the server cannot be reached, only downloads are browsable.
+- A running download shows a notification; tapping it opens the Downloads screen. The notification permission (Android 13+) is asked when the user first queues a download, not at start. Denying it does not stop downloads.
 
 ## Sync
 

@@ -1,11 +1,14 @@
 package com.zakius.plainfin
 
+import android.Manifest
+import android.content.Intent
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.safeDrawingPadding
@@ -17,7 +20,10 @@ import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
@@ -40,11 +46,28 @@ sealed interface Screen {
 }
 
 class MainActivity : ComponentActivity() {
+    // Denied is fine: downloads run without the notification. Android stops asking after two denials.
+    private val notifications = registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
+    private var openDownloads by mutableStateOf(false)
+
+    fun askNotifications() {
+        if (Build.VERSION.SDK_INT >= 33) notifications.launch(Manifest.permission.POST_NOTIFICATIONS)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        setContent { Theme { Root() } }
+        // A recreated activity has its stack restored; don't push Downloads again.
+        if (savedInstanceState == null) openDownloads = intent.getBooleanExtra(EXTRA_DOWNLOADS, false)
+        setContent { Theme { Root(openDownloads) { openDownloads = false } } }
     }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        if (intent.getBooleanExtra(EXTRA_DOWNLOADS, false)) openDownloads = true
+    }
+
+    companion object { const val EXTRA_DOWNLOADS = "downloads" }
 }
 
 @Composable
@@ -60,7 +83,7 @@ private fun Theme(content: @Composable () -> Unit) {
 }
 
 @Composable
-private fun Root() {
+private fun Root(openDownloads: Boolean, openedDownloads: () -> Unit) {
     val stack = rememberSaveable(
         saver = listSaver(
             save = { list -> list.map { Json.encodeToString(Screen.serializer(), it) } },
@@ -76,6 +99,10 @@ private fun Root() {
     fun reset(s: Screen) { stack.indices.forEach { saved.removeState(keyOf(it)) }; stack.clear(); stack.add(s) }
 
     BackHandler(stack.size > 1) { pop() }
+    LaunchedEffect(openDownloads) {
+        if (openDownloads && App.server.loggedIn && stack.last() != Screen.Downloads) push(Screen.Downloads)
+        openedDownloads()
+    }
     LaunchedEffect(App.server.sessionExpired) { if (App.server.sessionExpired) reset(Screen.Login) }
     val top = stack.last()
     val topKey = keyOf(stack.lastIndex)

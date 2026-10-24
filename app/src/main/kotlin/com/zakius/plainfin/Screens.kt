@@ -103,6 +103,7 @@ private suspend fun downloadAll(context: Context, episodes: List<BaseItemDto>) {
         queued == 1 -> "Downloading 1 $noun"
         else -> "Downloading $queued ${noun}s"
     }
+    if (queued > 0) (context as? MainActivity)?.askNotifications()
     Toast.makeText(context, text + if (queued > 0 && !App.prefs.downloadOnMetered) " (Wi-Fi only)" else "", Toast.LENGTH_SHORT).show()
 }
 
