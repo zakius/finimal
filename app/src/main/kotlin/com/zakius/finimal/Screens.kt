@@ -128,6 +128,14 @@ object ListSnapshots {
     fun read(key: List<Any?>): List<BaseItemDto>? = runCatching { json.decodeFromString<List<BaseItemDto>>(file(key).readText()) }.getOrNull()
     fun write(key: List<Any?>, list: List<BaseItemDto>) { runCatching { dir.mkdirs(); file(key).writeAtomically(json.encodeToString(list)) } }
     fun clear() { dir.deleteRecursively() }
+
+    /** Libraries, the usual first screen, read at app start off the main thread, so the first frame can show it. */
+    fun prefetchLibraries() {
+        val key = listOf(App.prefs.baseUrl, App.prefs.userId)
+        read(key)?.let { prefetched = key to it }
+    }
+    @Volatile private var prefetched: Pair<List<Any?>, List<BaseItemDto>>? = null
+    fun takePrefetched(key: List<Any?>) = prefetched?.takeIf { it.first == key }?.second?.also { prefetched = null }
 }
 
 /** A list, and why the refresh behind it failed when it is an older copy. */
@@ -142,7 +150,7 @@ class Load(val result: Result<List<BaseItemDto>>?, val refreshError: Throwable?)
 private fun loadFresh(vararg keys: Any?, refresh: Int, persist: Boolean = true, block: suspend () -> List<BaseItemDto>): Load {
     val k = keys.toList()
     val cacheKey = listOf(App.prefs.baseUrl, App.prefs.userId) + k
-    var last by remember { mutableStateOf(lastGood[cacheKey]?.let { k to Result.success(it) }) }
+    var last by remember { mutableStateOf((lastGood[cacheKey] ?: ListSnapshots.takePrefetched(cacheKey))?.let { k to Result.success(it) }) }
     var refreshError by remember { mutableStateOf<Throwable?>(null) }
     LaunchedEffect(k, refresh) {
         refreshError = null

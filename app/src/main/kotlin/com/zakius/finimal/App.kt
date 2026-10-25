@@ -27,7 +27,10 @@ class App : Application(), SingletonImageLoader.Factory, Configuration.Provider 
         super.onCreate()
         instance = this
         Media.onAppStart(this)
-        thread(name = "warm-up") { server } // the first list load needs the API client right after the first frame
+        thread(name = "warm-up") {
+            if (prefs.loggedIn) ListSnapshots.prefetchLibraries()
+            server // the first list load needs the API client right after the first frame
+        }
     }
 
     /**
