@@ -98,7 +98,7 @@ class Server(context: Context) {
     /** The SDK's HTTP calls block the calling thread. */
     private suspend fun <T> io(block: suspend CoroutineScope.() -> T): T = withContext(Dispatchers.IO, block)
 
-    val loggedIn get() = prefs.token != null
+    val loggedIn get() = prefs.loggedIn
     private val userId get() = UUID.fromString(prefs.userId)
 
     /** A URL without a scheme tries https, then http (Jellyfin's LAN default) if https can't connect. */
@@ -116,7 +116,7 @@ class Server(context: Context) {
         val auth = io { api.authenticationApi.authenticateUserByName(credentials).content }
         prefs.login(base, auth.accessToken, auth.user!!.id.toString())
         api.update(baseUrl = base, accessToken = auth.accessToken)
-        sessionExpired = false
+        App.sessionExpired = false
     }
 
     fun logout() {
@@ -126,12 +126,9 @@ class Server(context: Context) {
         api.update(accessToken = null)
     }
 
-    /** Set when the server rejects the token; the UI returns to login. Unsynced progress is kept and pushed after. */
-    var sessionExpired by mutableStateOf(false)
-
     fun expire() {
         logout()
-        sessionExpired = true
+        App.sessionExpired = true
     }
 
     suspend fun libraries(): List<BaseItemDto> =

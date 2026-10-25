@@ -80,7 +80,7 @@ There is one persistent on-disk cache. The key is the item ID plus the media sou
 - A queued download fetches its item again when it starts, so a file replaced on the server since queuing downloads under its new key.
 - Playing an unfinished download moves it to the front, and the worker fills from just before the playhead first (again after a seek into an uncached part), then the rest. The player reads the cache without writing it; the worker is the only writer.
 - Buffered entries are evicted oldest-first above a size limit (default 5 GB; the setting steps through 1, 2, 5, 10, 20, 50, 100 GB), counting buffered bytes only. The limit drops further to keep max(2 GB, 5 % of the volume) free. Pinned entries are removed only by the user. An entry is pinned by its download record's file name, so a record that no longer decodes (renamed to `.corrupt`) still keeps its bytes.
-- An interrupted fill resumes from the last byte, including after a crash or reboot. A buffer fill does not outlive the app: app start cancels any left over. A seek past the cached part restarts it there.
+- An interrupted fill resumes from the last byte, including after a crash or reboot. A buffer fill does not outlive the app: one left by an earlier process ends as soon as it runs, and app start cancels the rest. A seek past the cached part restarts it there.
 - Two toggles, both off by default: "buffer to end on metered" and "download on metered". They follow Android's metered flag, not wifi/cellular. With buffering off on a metered network, the player uses its normal buffer.
 - Downloads are original files in app-specific storage. The SD card can be selected. Switching applies at once and asks first: it deletes every download and the buffer cache instead of moving them (bytes left on the old volume would be orphaned, and the downloads would silently fetch again).
   - A selected SD card missing at start leaves downloads waiting: the queue and buffering stop, the Downloads screen and queued items say "waiting for SD card", and playback streams. The card is checked again at the next start. Switching to internal storage stays possible, as the way out of a lost card.
@@ -129,3 +129,10 @@ Rules:
 
 - Unit tests in `core`: sync queue, conflict rule, played limits, the keep-next-N anchor, eviction. Resuming an interrupted fill relies on Media3's `CacheWriter`, which skips cached ranges.
 - A local Jellyfin server in Docker with sample media for end-to-end checks.
+
+## Start-up
+
+- Release APKs embed the baseline profile at `assets/art-profile/baseline.prof` (`tools/release.sh`), so Android 15+ compiles the app when it is installed. `app/src/main/baseline-prof.txt` covers finimal and the libraries its launch and first list load run through.
+- Only what the first frame needs runs before it. WorkManager starts on first use, emoji2's start-up step is removed, and the WorkManager calls, the codec-list read and the queue kick wait for MainActivity's first frame (`App.afterFirstFrame`). The first composition reads login state from the preferences, not from the API client.
+- The splash goes without Android's fade-out, and the starting window follows the system's light or dark mode.
+- Measuring: install with `adb install --no-incremental` (an incremental install skips compilation), then take the median `am start -W` TotalTime of at least 10 cold starts.

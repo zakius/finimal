@@ -390,7 +390,7 @@ fun LoginScreen(modifier: Modifier, onDone: () -> Unit) {
     // The padded modifier already includes the IME inset; scrolling keeps the button reachable above it.
     Column(modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("finimal", style = MaterialTheme.typography.headlineMedium)
-        if (App.server.sessionExpired) Text("The server ended this session. Log in again; unsynced progress is kept.")
+        if (App.sessionExpired) Text("The server ended this session. Log in again; unsynced progress is kept.")
         OutlinedTextField(url, { url = it; error = null }, label = { Text("Server URL") }, placeholder = { Text("jellyfin.example.com:8096") }, singleLine = true, enabled = !busy, modifier = Modifier.fillMaxWidth(),
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Next))
         OutlinedTextField(user, { user = it; error = null }, label = { Text("Username") }, singleLine = true, enabled = !busy,

@@ -1,15 +1,16 @@
 name: release
 
+# Pull requests: core tests and a debug build. A v* tag: core tests and the signed release APKs (tools/release.sh) in
+# parallel jobs, then a GitHub release once both pass. Its notes are the tagged commit's message body, followed by
+# the generated changelog.
 on:
   push:
     tags: ["v*"]
   pull_request:
 
 jobs:
-  build:
+  test:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -17,22 +18,59 @@ jobs:
           distribution: temurin
           java-version: 21
       - uses: gradle/actions/setup-gradle@v4
-      - run: ./gradlew :core:test assembleDebug
-      - name: Build signed release
-        if: startsWith(github.ref, 'refs/tags/')
+      - run: ./gradlew :core:test
+
+  debug:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@v4
+      - run: ./gradlew assembleDebug
+
+  app:
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Build and sign
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
-          FINIMAL_KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-          FINIMAL_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-          FINIMAL_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
           echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
-          FINIMAL_KEYSTORE="$RUNNER_TEMP/release.jks" ./gradlew assembleRelease
-          for f in app/build/outputs/apk/release/app-*-release.apk; do
-            abi=${f#*/app-}; cp "$f" "finimal-${GITHUB_REF_NAME}-${abi%-release.apk}.apk"
-          done
+          printf 'storeFile=%s\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n' "$RUNNER_TEMP/release.jks" "$KEYSTORE_PASSWORD" "$KEY_ALIAS" "$KEY_PASSWORD" > "$RUNNER_TEMP/keystore.properties"
+          KEYSTORE_PROPERTIES="$RUNNER_TEMP/keystore.properties" tools/release.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apks
+          path: dist/finimal-*.apk
+
+  publish:
+    needs: [app, test]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: apks
+          path: dist
       - name: Publish release
-        if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" finimal-*.apk --generate-notes
+        run: |
+          git log -1 --format=%b | grep -v '^Co-Authored-By' > "$RUNNER_TEMP/notes.md"
+          gh release create "$GITHUB_REF_NAME" dist/finimal-*.apk --notes-file "$RUNNER_TEMP/notes.md" --generate-notes

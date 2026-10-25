@@ -17,21 +17,10 @@ android {
         versionName = "0.3.0"
     }
 
-    // CI passes the release key through environment variables; local release builds stay unsigned.
-    val keystore = System.getenv("FINIMAL_KEYSTORE")
-    signingConfigs {
-        if (keystore != null) create("release") {
-            storeFile = file(keystore)
-            storePassword = System.getenv("FINIMAL_KEYSTORE_PASSWORD")
-            keyAlias = System.getenv("FINIMAL_KEY_ALIAS")
-            keyPassword = System.getenv("FINIMAL_KEY_PASSWORD")
-        }
-    }
-
     buildTypes {
         debug { applicationIdSuffix = ".debug" }
+        // Unsigned: tools/release.sh embeds the baseline profile, then signs.
         release {
-            if (keystore != null) signingConfig = signingConfigs.getByName("release")
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")

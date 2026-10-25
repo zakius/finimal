@@ -109,14 +109,20 @@ object Media {
         db = StandaloneDatabaseProvider(context)
         storageMissing = App.prefs.storageIndex >= storageRoots().size
         cache = openCache()
+    }
+
+    /** Off the main thread, after the first frame; see [App.afterFirstFrame]. */
+    fun afterFirstFrame(context: Context) {
         val wm = WorkManager.getInstance(context)
-        // The player that wanted them is gone with the old process.
+        // The player that wanted them is gone with the old process (and [FillWorker] ends any that run before this).
         wm.cancelAllWorkByTag(FILL_TAG)
         // Replaced unless running, so a queue left waiting out a retry backoff starts at once.
-        // Off the main thread: the state is a database read, and this runs before the first frame.
-        thread(name = "kick-downloads") { kickDownloads(restart = wm.getWorkInfosForUniqueWork("downloads").get().none { it.state == WorkInfo.State.RUNNING }) }
+        kickDownloads(restart = wm.getWorkInfosForUniqueWork("downloads").get().none { it.state == WorkInfo.State.RUNNING })
         Housekeeping.enqueue(context)
     }
+
+    /** Tells buffer fills of this process from those left by an earlier one. */
+    val processStart = android.os.Process.getStartElapsedRealtime()
 
     /** App-specific storage; index 1+ are removable volumes. Read once per process: a card is checked again at the next start. */
     private val roots by lazy { ctx.getExternalFilesDirs(null).filterNotNull().ifEmpty { listOf(ctx.filesDir) } }
@@ -430,7 +436,7 @@ object Media {
         val request = OneTimeWorkRequestBuilder<FillWorker>()
             .addTag(FILL_TAG)
             // The URL carries the token; it is built when the work runs rather than stored in WorkManager's database.
-            .setInputData(workDataOf("key" to key, "id" to id, "sourceId" to source.id!!, "size" to (source.size ?: 0L), "position" to position))
+            .setInputData(workDataOf("key" to key, "id" to id, "sourceId" to source.id!!, "size" to (source.size ?: 0L), "position" to position, "process" to processStart))
             .setConstraints(Constraints(requiredNetworkType = if (App.prefs.bufferOnMetered) NetworkType.CONNECTED else NetworkType.UNMETERED))
             .build()
         // A seek past the cached part restarts the fill there, as [prioritize] does for a download.
@@ -534,6 +540,8 @@ private suspend fun fillCache(key: String, url: String, position: Long, onProgre
 class FillWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
     override suspend fun doWork(): Result = try {
         if (Media.storageMissing) return Result.success()
+        // Left by an earlier process: its player is gone. Can run before that process's start-up cancels it.
+        if (inputData.getLong("process", 0) != Media.processStart) return Result.success()
         val key = inputData.getString("key")!!
         val url = App.server.streamUrl(inputData.getString("id")!!, inputData.getString("sourceId")!!)
         val done = fillCache(key, url, inputData.getLong("position", 0), null)

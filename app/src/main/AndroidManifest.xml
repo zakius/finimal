@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
@@ -11,7 +12,7 @@
         android:name=".App"
         android:label="finimal"
         android:icon="@mipmap/ic_launcher"
-        android:theme="@android:style/Theme.Material.NoActionBar"
+        android:theme="@style/Finimal"
         android:usesCleartextTraffic="true"
         android:supportsRtl="true"
         android:allowBackup="false"
@@ -30,7 +31,13 @@
         <service
             android:name="androidx.work.impl.foreground.SystemForegroundService"
             android:foregroundServiceType="dataSync"
-            tools:node="merge"
-            xmlns:tools="http://schemas.android.com/tools" />
+            tools:node="merge" />
+        <!-- Start-up steps that would run before App.onCreate. WorkManager starts when first used instead (App is its
+             Configuration.Provider). emoji2 would look up a downloadable emoji font (package manager calls) and lay
+             text out again when it arrives; the system font's emoji are used instead. -->
+        <provider android:name="androidx.startup.InitializationProvider" android:authorities="${applicationId}.androidx-startup" tools:node="merge">
+            <meta-data android:name="androidx.work.WorkManagerInitializer" tools:node="remove" />
+            <meta-data android:name="androidx.emoji2.text.EmojiCompatInitializer" tools:node="remove" />
+        </provider>
     </application>
 </manifest>

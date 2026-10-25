@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The window shown before the first frame, in the system's light or dark mode, so a light UI doesn't open on a dark
+     grey window. -->
+<resources>
+    <style name="Finimal" parent="@android:style/Theme.Material.Light.NoActionBar" />
+</resources>

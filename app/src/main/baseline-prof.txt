@@ -1,0 +1,32 @@
+# Code ART compiles ahead of time: finimal's own and the libraries its launch and first list load run through.
+# Compose, WorkManager and the other androidx libraries bring their own rules. The player's libraries (ExoPlayer,
+# FFmpeg, libass) are left out but for the codec list read after the first frame: they run when something plays.
+# tools/release.sh embeds the merged profile so ART compiles it when the APK is installed (Android 15+).
+HSPLcom/zakius/finimal/**->**(**)**
+Lcom/zakius/finimal/**;
+HSPLfinimal/core/**->**(**)**
+Lfinimal/core/**;
+HSPLorg/jellyfin/sdk/**->**(**)**
+Lorg/jellyfin/sdk/**;
+HSPLio/github/oshai/kotlinlogging/**->**(**)**
+Lio/github/oshai/kotlinlogging/**;
+HSPLkotlinx/serialization/**->**(**)**
+Lkotlinx/serialization/**;
+HSPLkotlinx/coroutines/**->**(**)**
+Lkotlinx/coroutines/**;
+HSPLokhttp3/**->**(**)**
+Lokhttp3/**;
+HSPLokio/**->**(**)**
+Lokio/**;
+HSPLcoil3/**->**(**)**
+Lcoil3/**;
+HSPLandroidx/media3/common/**->**(**)**
+Landroidx/media3/common/**;
+HSPLandroidx/media3/database/**->**(**)**
+Landroidx/media3/database/**;
+HSPLandroidx/media3/datasource/**->**(**)**
+Landroidx/media3/datasource/**;
+HSPLandroidx/media3/exoplayer/mediacodec/**->**(**)**
+Landroidx/media3/exoplayer/mediacodec/**;
+HSPLandroidx/compose/material3/**->**(**)**
+Landroidx/compose/material3/**;

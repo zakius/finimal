@@ -47,7 +47,7 @@ You need JDK 21 and the Android SDK.
 ./gradlew :core:test assembleDebug
 ```
 
-Debug APKs go to `app/build/outputs/apk/debug/`, one per ABI. Local release builds are unsigned. CI signs the release builds when a `v*` tag is pushed.
+Debug APKs go to `app/build/outputs/apk/debug/`, one per ABI. `tools/release.sh` builds the signed release APKs into `dist/`, with the baseline profile embedded so Android 15+ compiles the app at install; it reads the key from `keystore.properties`. CI runs it when a `v*` tag is pushed.
 
 ## License
 

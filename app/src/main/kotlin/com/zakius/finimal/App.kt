@@ -3,10 +3,15 @@ package com.zakius.finimal
 import android.app.Application
 import android.content.Context
 import android.content.SharedPreferences
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.core.content.edit
 import coil3.ImageLoader
 import coil3.PlatformContext
 import coil3.SingletonImageLoader
+import coil3.serviceLoaderEnabled
+import androidx.work.Configuration
 import coil3.network.okhttp.OkHttpNetworkFetcherFactory
 import androidx.media3.common.MimeTypes
 import androidx.media3.exoplayer.mediacodec.MediaCodecUtil
@@ -17,19 +22,35 @@ import kotlinx.coroutines.Dispatchers
 import finimal.core.PendingStore
 
 /** Process-wide singletons. There is one server and one user, so nothing here needs scoping. */
-class App : Application(), SingletonImageLoader.Factory {
+class App : Application(), SingletonImageLoader.Factory, Configuration.Provider {
     override fun onCreate() {
         super.onCreate()
         instance = this
         Media.onAppStart(this)
-        thread(name = "warm-up") {
-            server // builds the API client before the first frame asks for it
+        thread(name = "warm-up") { server } // the first list load needs the API client right after the first frame
+    }
+
+    /**
+     * Start-up work the first frame doesn't need, run once per process after MainActivity's first frame. A process
+     * started without the activity (a download or housekeeping job) skips it: those jobs need none of it.
+     */
+    fun afterFirstFrame() {
+        if (startedUp) return
+        startedUp = true
+        thread(name = "after-first-frame") {
+            Media.afterFirstFrame(this)
             warmDecoders()
         }
     }
+    private var startedUp = false
+
+    // WorkManager starts when first used, not from its start-up provider before onCreate; see AndroidManifest.xml.
+    override val workManagerConfiguration get() = Configuration.Builder().build()
 
     // Shared connections, own dispatcher: a screen of thumbnails must not queue behind or ahead of API calls (5 per host each).
+    // No ServiceLoader scan of the APK on the first image: the one fetcher used is added here.
     override fun newImageLoader(context: PlatformContext) = ImageLoader.Builder(context)
+        .serviceLoaderEnabled(false)
         .components { add(OkHttpNetworkFetcherFactory(callFactory = { Media.http.newBuilder().dispatcher(Dispatcher()).build() })) }
         .build()
 
@@ -44,6 +65,8 @@ class App : Application(), SingletonImageLoader.Factory {
 
         val prefs by lazy { Prefs(instance.getSharedPreferences("finimal", Context.MODE_PRIVATE)) }
         val server by lazy { Server(instance) }
+        /** Set when the server rejects the token; the UI returns to login. Unsynced progress is kept and pushed after. Here, not on [Server], so the first frame doesn't build the API client. */
+        var sessionExpired by mutableStateOf(false)
         /**
          * Unsynced play states of the logged-in account. Each server and user has its own file, so
          * progress kept over a logout waits for that account and never reaches another.
@@ -118,6 +141,8 @@ class Prefs(private val p: SharedPreferences) {
         putString("audio.$seriesId", audio)
         putString("sub.$seriesId", sub)
     }
+
+    val loggedIn get() = token != null
 
     fun logout() = p.edit { remove("token"); remove("userId") }
 

@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
+import android.view.ViewTreeObserver
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
@@ -56,10 +57,21 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // The splash goes the moment the first frame is ready, instead of after Android's fade-out (about 130 ms).
+        if (Build.VERSION.SDK_INT >= 31) splashScreen.setOnExitAnimationListener { it.remove() }
         enableEdgeToEdge()
         // A recreated activity has its stack restored; don't push Downloads again.
         if (savedInstanceState == null) openDownloads = intent.getBooleanExtra(EXTRA_DOWNLOADS, false)
         setContent { Theme { Root(openDownloads) { openDownloads = false } } }
+        val decor = window.decorView
+        decor.viewTreeObserver.addOnDrawListener(object : ViewTreeObserver.OnDrawListener {
+            override fun onDraw() {
+                decor.post { // not from inside onDraw
+                    decor.viewTreeObserver.removeOnDrawListener(this)
+                    App.instance.afterFirstFrame()
+                }
+            }
+        })
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -89,7 +101,7 @@ private fun Root(openDownloads: Boolean, openedDownloads: () -> Unit) {
             save = { list -> list.map { Json.encodeToString(Screen.serializer(), it) } },
             restore = { saved -> saved.map { Json.decodeFromString(Screen.serializer(), it) }.toMutableStateList() },
         )
-    ) { listOf(if (App.server.loggedIn) Screen.Libraries else Screen.Login).toMutableStateList() }
+    ) { listOf(if (App.prefs.loggedIn) Screen.Libraries else Screen.Login).toMutableStateList() }
 
     // Each stack entry keeps its UI state (scroll, sort, search) while covered; leaving the stack drops it.
     val saved = rememberSaveableStateHolder()
@@ -100,10 +112,10 @@ private fun Root(openDownloads: Boolean, openedDownloads: () -> Unit) {
 
     BackHandler(stack.size > 1) { pop() }
     LaunchedEffect(openDownloads) {
-        if (openDownloads && App.server.loggedIn && stack.last() != Screen.Downloads) push(Screen.Downloads)
+        if (openDownloads && App.prefs.loggedIn && stack.last() != Screen.Downloads) push(Screen.Downloads)
         openedDownloads()
     }
-    LaunchedEffect(App.server.sessionExpired) { if (App.server.sessionExpired) reset(Screen.Login) }
+    LaunchedEffect(App.sessionExpired) { if (App.sessionExpired) reset(Screen.Login) }
     val top = stack.last()
     val topKey = keyOf(stack.lastIndex)
     val padded = Modifier.safeDrawingPadding()
