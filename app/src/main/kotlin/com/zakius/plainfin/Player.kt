@@ -154,8 +154,10 @@ private val FullscreenExitIcon = icon("FullscreenExit", "M5,16h3v3h2v-5H5v2zm3,-
 @Composable
 fun PlayerScreen(itemId: String, onBack: () -> Unit, onPlay: (String) -> Unit) {
     val activity = LocalActivity.current!!
-    val carry = remember { carried.also { carried = null } }
+    val carry = remember { carried }
     DisposableEffect(Unit) {
+        // Cleared here, after the previous player's dispose below has seen it.
+        carried = null
         onDispose {
             if (carried == null) {
                 systemBars(activity, hidden = false)
@@ -254,8 +256,6 @@ private fun Playback(
     var attempt by remember { mutableIntStateOf(0) }
     var ended by remember { mutableStateOf(false) }
     var segments by remember { mutableStateOf<List<MediaSegmentDto>>(emptyList()) }
-    // Ties reports to the transcode, so the stop ends the server's job.
-    val playSession = remember { UUID.randomUUID().toString() }
     var startTicks by remember { mutableLongStateOf(0L) }
     var startedAt by remember { mutableLongStateOf(0L) }
     var seeked by remember { mutableStateOf(false) }
@@ -279,6 +279,8 @@ private fun Playback(
         }
     }
     val player = remember(transcoding) { buildPlayer(context, playerView, transcoding) }
+    // Per player: ties reports to the transcode, so a stop ends the server's job, but the direct-play stop never ends the transcode after it.
+    val playSession = remember(player) { UUID.randomUUID().toString() }
 
     // Prepare: external subtitles first (cached on disk), then the media item at the resume point.
     LaunchedEffect(player) {

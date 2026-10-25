@@ -120,6 +120,7 @@ class Server(context: Context) {
     }
 
     fun logout() {
+        recorded.clear()
         ListSnapshots.clear() // another account's lists must not show, even briefly
         prefs.logout()
         api.update(accessToken = null)
@@ -165,7 +166,11 @@ class Server(context: Context) {
             flush()?.takeIf(::unreachable)?.let { dto.cancel(); throw it }
             userData(uuid)
         } else async { userData(uuid) }.await()
-        dto.await().copy(userData = data)
+        dto.await().copy(userData = data).also {
+            // The server has caught up, or changed it since (another device): its state is the one to build on.
+            val server = data.toPlayState()?.lastPlayedMs
+            if (server != null && server >= (recorded[id]?.lastPlayedMs ?: Long.MAX_VALUE)) recorded.remove(id)
+        }
     }
 
     /**
@@ -247,7 +252,7 @@ class Server(context: Context) {
                     repeatMode = RepeatMode.REPEAT_NONE, playbackOrder = PlaybackOrder.DEFAULT, playSessionId = playSession,
                 )
             )
-        }.onSuccess { App.pending.confirm(id, state) } }
+        }.onSuccess { confirm(id, state) } }
     }
 
     /**
@@ -264,7 +269,7 @@ class Server(context: Context) {
                     api.sessionApi.reportPlaybackStopped(
                         PlaybackStopInfo(itemId = UUID.fromString(id), mediaSourceId = mediaSourceId, positionTicks = positionTicks, playSessionId = playSession, failed = false)
                     )
-                }.onSuccess { App.pending.confirm(id, state) } }
+                }.onSuccess { confirm(id, state) } }
                 Housekeeping.enqueue(App.instance)
             }
         }
@@ -294,6 +299,12 @@ class Server(context: Context) {
     suspend fun startOver(item: BaseItemDto) {
         val id = item.id.toString()
         record(id, PlayState(0, knownPlayed(id, item.userData?.played ?: false), now()))
+    }
+
+    /** The server has [state]; rows drop their "not synced" at once rather than at the next local change. */
+    private fun confirm(id: String, state: PlayState) {
+        App.pending.confirm(id, state)
+        localChanges++
     }
 
     /**
@@ -334,9 +345,9 @@ class Server(context: Context) {
                         ),
                     )
                 }
-            }.onSuccess { App.pending.confirm(id, local) }.onFailure { e ->
+            }.onSuccess { confirm(id, local) }.onFailure { e ->
                 when ((e as? InvalidStatusException)?.status) {
-                    404 -> App.pending.confirm(id, local)
+                    404 -> confirm(id, local)
                     401 -> { expire(); return@withLock e }
                     else -> { failure = failure ?: e; if (unreachable(e)) return@withLock e }
                 }

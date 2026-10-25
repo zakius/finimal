@@ -49,6 +49,8 @@ class App : Application(), SingletonImageLoader.Factory {
          * progress kept over a logout waits for that account and never reaches another.
          */
         val pending: PendingStore get() = synchronized(this) {
+            // Logged out (an expired session): stops still recorded belong to the account that just left.
+            if (prefs.userId == null) pendingStore?.let { return it }
             val account = prefs.baseUrl to prefs.userId
             pendingStore?.takeIf { pendingAccount == account } ?: run {
                 val name = java.security.MessageDigest.getInstance("SHA-1").digest("${account.first}\u0000${account.second}".toByteArray())

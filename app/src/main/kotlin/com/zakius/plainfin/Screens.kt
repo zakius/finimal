@@ -259,11 +259,11 @@ private fun markAllAction(onChanged: () -> Unit): (List<BaseItemDto>) -> Unit {
     return { asking = it }
 }
 
-/** Where to pick up a series: the unfinished episode last played, else the one after it, else the first. Null once all is played. */
+/** Where to pick up a series: the unfinished episode last played, else the first unplayed one after it, else the first. Null once all is played. */
 fun upNext(episodes: List<BaseItemDto>): BaseItemDto? {
     val playable = episodes.filter { it.parentIndexNumber != 0 && it.locationType != LocationType.VIRTUAL }
-    val id = keepNextWindow(playable.map { EpisodeRef(it.id.toString(), it.localState().first) }, 1).firstOrNull()
-    return playable.firstOrNull { it.id.toString() == id }?.takeUnless { it.localState().first?.played == true }
+    val window = keepNextWindow(playable.map { EpisodeRef(it.id.toString(), it.localState().first) }, playable.size).toSet()
+    return playable.firstOrNull { it.id.toString() in window && it.localState().first?.played != true }
 }
 
 /** Plays [item] from the start: the position is saved as 0 first, so nothing can resume it later. */

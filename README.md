@@ -9,6 +9,7 @@ Other clients sometimes restart a series from episode 1. The cause is the server
 ## Features
 
 - Libraries → poster grid → series → seasons → episodes, with sort, search and an unplayed-only filter.
+- A Continue button on each series, from this device's play state, never the server's Next Up.
 - Direct play through Media3, with an FFmpeg audio decoder and libass for ASS/SSA subtitles. The app transcodes only when the device can't decode the file.
 - Buffers to the end of the episode on disk, so a weak connection doesn't stall playback.
 - Downloads with a queue, pause and resume, SD card storage, and "keep next N episodes downloaded" per series.
