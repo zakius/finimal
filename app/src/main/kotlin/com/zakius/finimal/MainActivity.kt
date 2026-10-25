@@ -1,4 +1,4 @@
-package com.zakius.plainfin
+package com.zakius.finimal
 
 import android.Manifest
 import android.content.Intent

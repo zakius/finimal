@@ -1,4 +1,4 @@
-package plainfin.core
+package finimal.core
 
 data class EpisodeRef(val id: String, val state: PlayState?)
 

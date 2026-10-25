@@ -22,17 +22,17 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
-          PLAINFIN_KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-          PLAINFIN_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-          PLAINFIN_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          FINIMAL_KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          FINIMAL_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          FINIMAL_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
           echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
-          PLAINFIN_KEYSTORE="$RUNNER_TEMP/release.jks" ./gradlew assembleRelease
+          FINIMAL_KEYSTORE="$RUNNER_TEMP/release.jks" ./gradlew assembleRelease
           for f in app/build/outputs/apk/release/app-*-release.apk; do
-            abi=${f#*/app-}; cp "$f" "plainfin-${GITHUB_REF_NAME}-${abi%-release.apk}.apk"
+            abi=${f#*/app-}; cp "$f" "finimal-${GITHUB_REF_NAME}-${abi%-release.apk}.apk"
           done
       - name: Publish release
         if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" plainfin-*.apk --generate-notes
+        run: gh release create "$GITHUB_REF_NAME" finimal-*.apk --generate-notes

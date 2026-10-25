@@ -1,4 +1,4 @@
-package com.zakius.plainfin
+package com.zakius.finimal
 
 import android.content.Context
 import androidx.compose.runtime.getValue
@@ -53,9 +53,9 @@ import org.jellyfin.sdk.model.api.RepeatMode
 import org.jellyfin.sdk.model.api.SortOrder
 import org.jellyfin.sdk.model.api.UpdateUserItemDataDto
 import org.jellyfin.sdk.model.api.UserItemDataDto
-import plainfin.core.PlayState
-import plainfin.core.ResumeRules
-import plainfin.core.shouldPush
+import finimal.core.PlayState
+import finimal.core.ResumeRules
+import finimal.core.shouldPush
 
 enum class Sort(val label: String, val by: ItemSortBy, val order: SortOrder) {
     NAME("Name", ItemSortBy.SORT_NAME, SortOrder.ASCENDING),
@@ -70,7 +70,7 @@ enum class Sort(val label: String, val by: ItemSortBy, val order: SortOrder) {
 class Server(context: Context) {
     private val prefs = App.prefs
     val api = createJellyfin {
-        clientInfo = ClientInfo("plainfin", BuildConfig.VERSION_NAME)
+        clientInfo = ClientInfo("finimal", BuildConfig.VERSION_NAME)
         this.context = context
         // One connection pool for API, images and streams. API answers also set the server clock.
         apiClientFactory = OkHttpFactory(Media.http.newBuilder().addNetworkInterceptor { chain ->

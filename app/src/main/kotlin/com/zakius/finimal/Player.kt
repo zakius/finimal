@@ -1,8 +1,8 @@
 @file:androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 
-package com.zakius.plainfin
+package com.zakius.finimal
 
-import plainfin.core.reconnectDelayMs
+import finimal.core.reconnectDelayMs
 import android.os.Looper
 import android.os.Handler
 import android.net.Network
@@ -25,7 +25,7 @@ import androidx.media3.common.Tracks
 import androidx.media3.exoplayer.analytics.AnalyticsListener
 import org.jellyfin.sdk.model.api.LocationType
 import org.jellyfin.sdk.model.api.MediaStreamType
-import plainfin.core.ResumeGuard
+import finimal.core.ResumeGuard
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.LocalActivity
 import androidx.compose.foundation.background
@@ -125,7 +125,7 @@ import org.jellyfin.sdk.api.client.exception.InvalidStatusException
 import org.jellyfin.sdk.model.api.BaseItemDto
 import org.jellyfin.sdk.model.api.BaseItemKind
 import org.jellyfin.sdk.model.api.MediaSegmentDto
-import plainfin.core.TICKS_PER_MS
+import finimal.core.TICKS_PER_MS
 
 private const val REPORT_INTERVAL_MS = 10_000L
 private const val RESUME_REWIND_MS = 5_000L

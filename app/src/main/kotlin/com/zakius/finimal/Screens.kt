@@ -1,6 +1,6 @@
-package com.zakius.plainfin
+package com.zakius.finimal
 
-import plainfin.core.writeAtomically
+import finimal.core.writeAtomically
 import kotlinx.serialization.json.Json
 import java.security.MessageDigest
 import java.io.File
@@ -18,8 +18,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.ui.text.input.VisualTransformation
 import org.jellyfin.sdk.model.api.LocationType
-import plainfin.core.EpisodeRef
-import plainfin.core.keepNextWindow
+import finimal.core.EpisodeRef
+import finimal.core.keepNextWindow
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.selection.toggleable
@@ -105,8 +105,8 @@ import org.jellyfin.sdk.api.client.exception.InvalidStatusException
 import org.jellyfin.sdk.model.api.BaseItemDto
 import org.jellyfin.sdk.model.api.BaseItemKind
 import org.jellyfin.sdk.model.api.ImageType
-import plainfin.core.PlayState
-import plainfin.core.TICKS_PER_MS
+import finimal.core.PlayState
+import finimal.core.TICKS_PER_MS
 import kotlin.math.abs
 
 /** Last good list per server, user and list, so a list you come back to shows at once while it reloads. Main thread only. */
@@ -389,7 +389,7 @@ fun LoginScreen(modifier: Modifier, onDone: () -> Unit) {
     }
     // The padded modifier already includes the IME inset; scrolling keeps the button reachable above it.
     Column(modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Text("plainfin", style = MaterialTheme.typography.headlineMedium)
+        Text("finimal", style = MaterialTheme.typography.headlineMedium)
         if (App.server.sessionExpired) Text("The server ended this session. Log in again; unsynced progress is kept.")
         OutlinedTextField(url, { url = it; error = null }, label = { Text("Server URL") }, placeholder = { Text("jellyfin.example.com:8096") }, singleLine = true, enabled = !busy, modifier = Modifier.fillMaxWidth(),
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Next))
@@ -419,7 +419,7 @@ fun LibrariesScreen(modifier: Modifier, push: (Screen) -> Unit) {
     var refresh by remember { mutableIntStateOf(0) }
     val libs = loadFresh(refresh = refresh) { App.server.libraries() }
     Column(modifier.fillMaxSize()) {
-        Bar("plainfin", null) {
+        Bar("finimal", null) {
             TextButton(onClick = { push(Screen.Library(null, "Search")) }) { Text("Search") }
             TextButton(onClick = { push(Screen.Downloads) }) { Text("Downloads") }
             IconButton(onClick = { push(Screen.Settings) }) { Icon(Icons.Default.Settings, "Settings") }
@@ -863,7 +863,7 @@ fun SettingsScreen(modifier: Modifier, pop: () -> Unit, onLoggedOut: () -> Unit)
                 Text("Account", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(16.dp))
                 Text(p.baseUrl.orEmpty(), Modifier.padding(horizontal = 16.dp))
                 TextButton(onClick = { confirmLogout = true }, Modifier.padding(horizontal = 8.dp)) { Text("Log out") }
-                Text("plainfin ${BuildConfig.VERSION_NAME}", Modifier.padding(16.dp), style = MaterialTheme.typography.labelSmall)
+                Text("finimal ${BuildConfig.VERSION_NAME}", Modifier.padding(16.dp), style = MaterialTheme.typography.labelSmall)
                 Spacer(Modifier.padding(24.dp))
             }
         }

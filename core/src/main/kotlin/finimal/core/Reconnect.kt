@@ -1,4 +1,4 @@
-package plainfin.core
+package finimal.core
 
 /** How long playback keeps reconnecting after a network failure before it shows the error. */
 const val RECONNECT_WINDOW_MS = 60_000L

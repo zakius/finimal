@@ -1,10 +1,10 @@
-# plainfin
+# finimal
 
 A Jellyfin client for Android that goes straight to your movie and TV libraries. It prefers a few extra taps over convenience features that break.
 
 ## Why
 
-Other clients sometimes restart a series from episode 1. The cause is the server's Next Up and Resume logic, combined with stop reports that carry no position. plainfin never reads Next Up or Resume. It keeps play state locally, pushes it before every list load, and the newer change wins. [docs/design.md](docs/design.md#sync) has the full rules.
+Other clients sometimes restart a series from episode 1. The cause is the server's Next Up and Resume logic, combined with stop reports that carry no position. finimal never reads Next Up or Resume. It keeps play state locally, pushes it before every list load, and the newer change wins. [docs/design.md](docs/design.md#sync) has the full rules.
 
 ## Features
 
@@ -24,18 +24,18 @@ Not included: Android TV, background audio, picture-in-picture, Quick Connect, a
 
 ## Install
 
-Download the APK for your device from [Releases](https://github.com/zakius/plainfin/releases):
+Download the APK for your device from [Releases](https://github.com/zakius/finimal/releases):
 
 | File | Devices |
 |------|---------|
-| `plainfin-*-arm64-v8a.apk` | Almost every phone and tablet from the last several years |
-| `plainfin-*-armeabi-v7a.apk` | Older or low-end 32-bit ARM devices, many TV boxes |
-| `plainfin-*-x86_64.apk` | Emulators, Chromebooks and x86 tablets |
-| `plainfin-*-x86.apk` | Old 32-bit x86 devices |
+| `finimal-*-arm64-v8a.apk` | Almost every phone and tablet from the last several years |
+| `finimal-*-armeabi-v7a.apk` | Older or low-end 32-bit ARM devices, many TV boxes |
+| `finimal-*-x86_64.apk` | Emulators, Chromebooks and x86 tablets |
+| `finimal-*-x86.apk` | Old 32-bit x86 devices |
 
 If you are not sure, try `arm64-v8a` first. When Android says the app isn't compatible, use `armeabi-v7a`.
 
-For updates, add `https://github.com/zakius/plainfin` to [Obtainium](https://github.com/ImranR98/Obtainium). It picks the APK that matches your device; if it asks, choose with the table above.
+For updates, add `https://github.com/zakius/finimal` to [Obtainium](https://github.com/ImranR98/Obtainium). It picks the APK that matches your device; if it asks, choose with the table above.
 
 Android 8.0 (API 26) or later is required.
 

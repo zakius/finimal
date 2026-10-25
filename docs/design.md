@@ -1,4 +1,4 @@
-# plainfin design
+# finimal design
 
 A Jellyfin client for Android that goes straight to the library. It prefers a few extra taps over convenience features that break.
 

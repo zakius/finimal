@@ -1,4 +1,4 @@
-package plainfin.core
+package finimal.core
 
 data class CacheEntry(val key: String, val bytes: Long, val lastAccessMs: Long, val pinned: Boolean)
 

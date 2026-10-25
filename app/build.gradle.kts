@@ -5,12 +5,12 @@ plugins {
 }
 
 android {
-    namespace = "com.zakius.plainfin"
+    namespace = "com.zakius.finimal"
     compileSdk = 37
     buildToolsVersion = "37.0.0"
 
     defaultConfig {
-        applicationId = "com.zakius.plainfin"
+        applicationId = "com.zakius.finimal"
         minSdk = 26
         targetSdk = 36
         versionCode = 9
@@ -18,13 +18,13 @@ android {
     }
 
     // CI passes the release key through environment variables; local release builds stay unsigned.
-    val keystore = System.getenv("PLAINFIN_KEYSTORE")
+    val keystore = System.getenv("FINIMAL_KEYSTORE")
     signingConfigs {
         if (keystore != null) create("release") {
             storeFile = file(keystore)
-            storePassword = System.getenv("PLAINFIN_KEYSTORE_PASSWORD")
-            keyAlias = System.getenv("PLAINFIN_KEY_ALIAS")
-            keyPassword = System.getenv("PLAINFIN_KEY_PASSWORD")
+            storePassword = System.getenv("FINIMAL_KEYSTORE_PASSWORD")
+            keyAlias = System.getenv("FINIMAL_KEY_ALIAS")
+            keyPassword = System.getenv("FINIMAL_KEY_PASSWORD")
         }
     }
 

@@ -1,6 +1,6 @@
 @file:androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 
-package com.zakius.plainfin
+package com.zakius.finimal
 
 import android.content.Context
 import android.media.AudioDeviceCallback

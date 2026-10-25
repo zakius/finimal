@@ -1,4 +1,4 @@
-package com.zakius.plainfin
+package com.zakius.finimal
 
 import android.app.Application
 import android.content.Context
@@ -14,7 +14,7 @@ import java.io.File
 import okhttp3.Dispatcher
 import kotlin.concurrent.thread
 import kotlinx.coroutines.Dispatchers
-import plainfin.core.PendingStore
+import finimal.core.PendingStore
 
 /** Process-wide singletons. There is one server and one user, so nothing here needs scoping. */
 class App : Application(), SingletonImageLoader.Factory {
@@ -42,7 +42,7 @@ class App : Application(), SingletonImageLoader.Factory {
         lateinit var instance: App
             private set
 
-        val prefs by lazy { Prefs(instance.getSharedPreferences("plainfin", Context.MODE_PRIVATE)) }
+        val prefs by lazy { Prefs(instance.getSharedPreferences("finimal", Context.MODE_PRIVATE)) }
         val server by lazy { Server(instance) }
         /**
          * Unsynced play states of the logged-in account. Each server and user has its own file, so

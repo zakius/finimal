@@ -1,4 +1,4 @@
-package plainfin.core
+package finimal.core
 
 import kotlin.test.Test
 import kotlin.test.assertEquals

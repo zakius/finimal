@@ -1,4 +1,4 @@
-package plainfin.core
+package finimal.core
 
 import java.io.File
 import java.io.FileOutputStream

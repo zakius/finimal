@@ -14,5 +14,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "plainfin"
+rootProject.name = "finimal"
 include(":core", ":app")

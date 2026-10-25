@@ -1,6 +1,6 @@
 @file:androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 
-package com.zakius.plainfin
+package com.zakius.finimal
 
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -59,14 +59,14 @@ import org.jellyfin.sdk.model.api.MediaStreamType
 import java.time.Instant
 import java.time.LocalDateTime
 import java.time.ZoneId
-import plainfin.core.CacheEntry
-import plainfin.core.PlayState
-import plainfin.core.bufferLimit
-import plainfin.core.EpisodeRef
-import plainfin.core.evictionOrder
-import plainfin.core.keepNextDeletions
-import plainfin.core.keepNextWindow
-import plainfin.core.writeAtomically
+import finimal.core.CacheEntry
+import finimal.core.PlayState
+import finimal.core.bufferLimit
+import finimal.core.EpisodeRef
+import finimal.core.evictionOrder
+import finimal.core.keepNextDeletions
+import finimal.core.keepNextWindow
+import finimal.core.writeAtomically
 
 /**
  * One persistent cache, keyed by item ID, serves streaming, buffering and downloads. A download is

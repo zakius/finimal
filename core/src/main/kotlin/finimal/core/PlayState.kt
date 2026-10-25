@@ -1,4 +1,4 @@
-package plainfin.core
+package finimal.core
 
 import kotlinx.serialization.Serializable
 
