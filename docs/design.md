@@ -75,6 +75,11 @@ There is one persistent on-disk cache. The key is the item ID plus the media sou
 - Two toggles, both off by default: "buffer to end on metered" and "download on metered". They follow Android's metered flag, not wifi/cellular. With buffering off on a metered network, the player uses its normal buffer.
 - Downloads are original files in app-specific storage. The SD card can be selected. Switching applies at once and asks first: it deletes every download and the buffer cache instead of moving them (bytes left on the old volume would be orphaned, and the downloads would silently fetch again).
   - A selected SD card missing at start leaves downloads waiting: the queue and buffering stop, the Downloads screen and queued items say "waiting for SD card", and playback streams. The card is checked again at the next start. Switching to internal storage stays possible, as the way out of a lost card.
+- Where data lives:
+  - The media cache (downloads and buffer, one Media3 cache) is in app-specific storage on the selected volume, not the system cache directory: Android may delete cache files at any time, and a download must stay until the user deletes it. The buffer part is held to its own limit instead.
+  - Download records, their subtitles and unsynced play state are app files. Subtitles fetched only to stream are deleted by housekeeping.
+  - Saved lists and thumbnails are in the system cache directory: they can be fetched again, so "Clear cache" and low storage may remove them.
+  - Nothing is backed up or copied to a new phone: downloads are too large, and records without their bytes or login would only mislead.
 - "Keep next N downloaded" is per series and off by default.
   - Anchor: the last played episode in season order, specials excluded. Among equal LastPlayedDates (a season marked played on the server) the later episode wins.
   - Checked when the app opens and whenever playback stops, once a network is up.

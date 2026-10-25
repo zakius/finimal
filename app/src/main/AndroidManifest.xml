@@ -13,7 +13,9 @@
         android:icon="@android:drawable/ic_media_play"
         android:theme="@android:style/Theme.Material.NoActionBar"
         android:usesCleartextTraffic="true"
-        android:supportsRtl="true">
+        android:supportsRtl="true"
+        android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules">
         <activity
             android:name=".MainActivity"
             android:exported="true"
