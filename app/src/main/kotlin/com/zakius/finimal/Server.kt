@@ -210,17 +210,17 @@ class Server(context: Context) {
         }
 
     fun streamUrl(id: String, mediaSourceId: String) =
-        "${prefs.baseUrl}/Videos/$id/stream?static=true&mediaSourceId=$mediaSourceId&api_key=${prefs.token}"
+        "${prefs.baseUrl}/Videos/$id/stream?static=true&mediaSourceId=$mediaSourceId&ApiKey=${prefs.token}"
 
     // ponytail: fixed h264/aac at 8 Mbps; embedded subtitles are lost here, external ones still load.
     // [playSession] goes in the stop report too, so leaving ends the server's ffmpeg job at once.
     fun transcodeUrl(id: String, mediaSourceId: String, audioIndex: Int?, playSession: String) =
         "${prefs.baseUrl}/Videos/$id/master.m3u8?mediaSourceId=$mediaSourceId&videoCodec=h264&audioCodec=aac" +
             "&maxAudioChannels=2&videoBitrate=8000000&audioBitrate=192000&playSessionId=$playSession" +
-            (audioIndex?.let { "&audioStreamIndex=$it" } ?: "") + "&api_key=${prefs.token}"
+            (audioIndex?.let { "&audioStreamIndex=$it" } ?: "") + "&ApiKey=${prefs.token}"
 
     fun subtitleUrl(id: String, mediaSourceId: String, stream: MediaStream) =
-        "${prefs.baseUrl}/Videos/$id/$mediaSourceId/Subtitles/${stream.index}/0/Stream.${subtitleExt(stream)}?api_key=${prefs.token}"
+        "${prefs.baseUrl}/Videos/$id/$mediaSourceId/Subtitles/${stream.index}/0/Stream.${subtitleExt(stream)}?ApiKey=${prefs.token}"
 
     // --- play state ---------------------------------------------------------------------------
 
