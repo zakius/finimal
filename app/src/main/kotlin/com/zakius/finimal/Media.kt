@@ -16,6 +16,7 @@ import androidx.compose.runtime.setValue
 import androidx.core.app.NotificationCompat
 import androidx.media3.common.C
 import androidx.media3.database.StandaloneDatabaseProvider
+import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.HttpDataSource
@@ -40,6 +41,7 @@ import androidx.work.WorkerParameters
 import androidx.work.workDataOf
 import java.io.File
 import java.io.IOException
+import java.util.UUID
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -89,6 +91,9 @@ object Media {
         val source = item.mediaSources?.firstOrNull()
         return "${item.id}-${source?.eTag ?: source?.size ?: 0}"
     }
+
+    /** A transcoded download is other bytes than the file, so it never mixes with what streaming caches. */
+    fun downloadKey(d: Download) = key(d.item) + if (d.transcoded) "-ts" else ""
 
     /** Cache key of what the player has open; eviction never touches it. */
     @Volatile var playing: String? = null
@@ -162,10 +167,10 @@ object Media {
     fun transcodeFactory() = DefaultDataSource.Factory(ctx, OkHttpDataSource.Factory(http.newBuilder().readTimeout(30, TimeUnit.SECONDS).build()))
 
     /** For [FillWorker], the only cache writer. Waits for its own earlier locks instead of skipping ranges. */
-    fun writerFactory(): CacheDataSource.Factory =
+    fun writerFactory(upstream: DataSource.Factory = upstreamFactory()): CacheDataSource.Factory =
         CacheDataSource.Factory()
             .setCache(cache)
-            .setUpstreamDataSourceFactory(upstreamFactory())
+            .setUpstreamDataSourceFactory(upstream)
             // 1 MB writes instead of the default 20 KB: far fewer syscalls on SD cards and FUSE.
             .setCacheWriteDataSinkFactory(CacheDataSink.Factory().setCache(cache).setBufferSize(1 shl 20))
             .setFlags(CacheDataSource.FLAG_BLOCK_ON_CACHE)
@@ -218,6 +223,11 @@ object Media {
         val failed: Boolean = false,
         /** The disk was full even after evicting the buffer; paused with it. Resuming tries again. */
         val storageFull: Boolean = false,
+        /**
+         * The device can't play the file, so the server transcodes it into one MPEG-TS file. It has no
+         * length until done and can't resume: an interrupted one starts over.
+         */
+        val transcoded: Boolean = false,
     )
 
     private val downloadsDir get() = File(ctx.filesDir, "downloads").apply { mkdirs() }
@@ -268,7 +278,7 @@ object Media {
 
     /** Next unfinished, unpaused download in queue order. */
     fun nextDownload(): Download? =
-        downloads().filter { !it.paused && !isComplete(key(it.item)) }.minWithOrNull(queueOrder)
+        downloads().filter { !it.paused && !isComplete(downloadKey(it)) }.minWithOrNull(queueOrder)
 
     /** Why the queue can't run on the current network, or null when it can. Mirrors [kickDownloads]' constraint. */
     fun downloadsWaitingFor(): String? {
@@ -298,11 +308,13 @@ object Media {
     fun startDownload(item: BaseItemDto, auto: Boolean) {
         val id = item.id.toString()
         val existing = download(id)
-        if (existing != null && isComplete(key(existing.item))) return
+        if (existing != null && isComplete(downloadKey(existing))) return
         // An unfinished download takes the fresh item, so a file changed on the server restarts cleanly.
-        existing?.let { if (key(it.item) != key(item)) cache.removeResource(key(it.item)) }
+        val same = existing != null && key(existing.item) == key(item)
+        if (existing != null && !same) cache.removeResource(downloadKey(existing))
         WorkManager.getInstance(ctx).cancelUniqueWork("fill-$id") // the queue takes over from a buffer fill
-        write(Download(item, existing?.auto ?: auto, existing?.queuedAt ?: System.currentTimeMillis(), paused = false))
+        write(Download(item, existing?.auto ?: auto, existing?.queuedAt ?: System.currentTimeMillis(), paused = false,
+            transcoded = if (same) existing!!.transcoded else !playsDirectly(item)))
         kickDownloads(restart = false)
     }
 
@@ -327,8 +339,9 @@ object Media {
     @Synchronized
     fun prioritize(id: String, fromByte: Long) {
         val d = download(id) ?: return
-        val key = key(d.item)
-        if (d.paused || isComplete(key)) return
+        val key = downloadKey(d)
+        // A transcode is written start to end only.
+        if (d.paused || d.transcoded || isComplete(key)) return
         if (downloading == id && cache.getCachedLength(key, fromByte, Long.MAX_VALUE) > 0) return
         write(d.copy(queuedAt = Long.MIN_VALUE, startAt = fromByte))
         kickDownloads(restart = true)
@@ -342,7 +355,7 @@ object Media {
     /** The bytes go outside the lock: a whole episode is hundreds of fragments, and the player waits on these locks. */
     fun deleteDownload(id: String) {
         val key = synchronized(this) {
-            val key = download(id)?.let { key(it.item) }
+            val key = download(id)?.let(::downloadKey)
             metaFile(id).delete()
             memo = memo?.filterNot { it.item.id.toString() == id }
             changes++
@@ -363,7 +376,7 @@ object Media {
     @Synchronized
     fun releaseKeepNext(seriesId: String) {
         for (d in downloads().filter { it.auto && it.item.seriesId?.toString() == seriesId }) {
-            if (d.item.userData?.played != true && isComplete(key(d.item))) write(d.copy(auto = false))
+            if (d.item.userData?.played != true && isComplete(downloadKey(d))) write(d.copy(auto = false))
             else deleteDownload(d.item.id.toString())
         }
     }
@@ -384,13 +397,15 @@ object Media {
     }
 
     enum class Fill { DONE, RUNNING, QUEUED, PAUSED }
-    /** [position] is 1 for the next queued item; [waitingFor] is [downloadsWaitingFor]. */
+    /** [position] is 1 for the next queued item; [waitingFor] is [downloadsWaitingFor]. [percent] is -1 for a transcode under way. */
     data class DownloadStatus(val download: Download, val percent: Int, val fill: Fill, val bytes: Long, val position: Int, val waitingFor: String?) {
+        val shortProgress get() = if (percent < 0) "…" else "$percent%"
+        private val progress get() = if (percent < 0) "transcoding" else "$percent%"
         val label get() = when (fill) {
-            Fill.DONE -> "downloaded"
-            Fill.RUNNING -> "${waitingFor ?: "downloading"} · $percent%"
-            Fill.QUEUED -> "${waitingFor ?: "queued #$position"} · $percent%"
-            Fill.PAUSED -> "${if (download.failed) "failed" else if (download.storageFull) "storage full" else "paused"} · $percent%"
+            Fill.DONE -> if (download.transcoded) "downloaded, transcoded" else "downloaded"
+            Fill.RUNNING -> "${waitingFor ?: "downloading"} · $progress"
+            Fill.QUEUED -> "${waitingFor ?: "queued #$position"} · $progress"
+            Fill.PAUSED -> "${if (download.failed) "failed" else if (download.storageFull) "storage full" else "paused"} · $progress"
         }
     }
 
@@ -400,11 +415,11 @@ object Media {
         val all = downloads()
         if (all.isEmpty()) return emptyMap()
         val waitingFor = downloadsWaitingFor()
-        val queue = all.filter { !it.paused && it.item.id.toString() != current && !isComplete(key(it.item)) }
+        val queue = all.filter { !it.paused && it.item.id.toString() != current && !isComplete(downloadKey(it)) }
             .sortedWith(queueOrder).map { it.item.id.toString() }
         return all.associate { d ->
             val id = d.item.id.toString()
-            val key = key(d.item)
+            val key = downloadKey(d)
             val len = contentLength(key)
             val bytes = cachedBytes(key)
             val fill = when {
@@ -413,7 +428,7 @@ object Media {
                 current == id -> Fill.RUNNING
                 else -> Fill.QUEUED
             }
-            id to DownloadStatus(d, if (len > 0) (bytes * 100 / len).toInt() else 0, fill, bytes, queue.indexOf(id) + 1, waitingFor)
+            id to DownloadStatus(d, if (len > 0) (bytes * 100 / len).toInt() else if (d.transcoded) -1 else 0, fill, bytes, queue.indexOf(id) + 1, waitingFor)
         }
     }
 
@@ -520,10 +535,11 @@ fun externalSubs(item: BaseItemDto): List<MediaStream> =
  * can come back uncached (another writer held it), so it loops until the cache holds everything.
  * An interrupted run keeps every committed 5 MB fragment, and the next run skips them.
  */
-private suspend fun fillCache(key: String, url: String, position: Long, onProgress: CacheWriter.ProgressListener?): Boolean {
-    repeat(5) {
+private suspend fun fillCache(key: String, url: String, position: Long, onProgress: CacheWriter.ProgressListener?,
+                              factory: CacheDataSource.Factory = Media.writerFactory(), attempts: Int = 5): Boolean {
+    repeat(attempts) {
         val writer = CacheWriter(
-            Media.writerFactory().createDataSource(),
+            factory.createDataSource(),
             DataSpec.Builder().setUri(url).setPosition(position).setKey(key)
                 .setFlags(DataSpec.FLAG_ALLOW_CACHE_FRAGMENTATION).build(),
             null,
@@ -592,9 +608,20 @@ class DownloadWorker(context: Context, params: WorkerParameters) : CoroutineWork
                         setForegroundAsync(foregroundInfo(d, percent))
                     }
                 }
-                val key = Media.key(d.item)
-                val url = App.server.streamUrl(id, source.id!!)
+                val key = Media.downloadKey(d)
                 try {
+                    if (d.transcoded) {
+                        // The server can't resume a transcode at a byte, and a new run's bytes differ: start over.
+                        if (!Media.isComplete(key)) Media.cache.removeResource(key)
+                        val url = App.server.transcodeUrl(id, source.id!!, App.prefs.audioLang(d.item.seriesId?.toString() ?: id)?.let { audioIndex(source, it) },
+                            UUID.randomUUID().toString(), file = "stream.ts")
+                        if (!fillCache(key, url, 0, progress, Media.writerFactory(Media.transcodeFactory()), attempts = 1)) {
+                            Media.cache.removeResource(key)
+                            return Result.retry()
+                        }
+                        continue
+                    }
+                    val url = App.server.streamUrl(id, source.id!!)
                     // From the playhead first while the episode plays, then the rest (cached parts are skipped).
                     if (d.startAt > 0) {
                         if (!fillCache(key, url, d.startAt, progress)) return Result.retry()

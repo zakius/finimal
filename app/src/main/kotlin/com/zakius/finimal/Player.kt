@@ -24,6 +24,7 @@ import androidx.media3.common.Format
 import androidx.media3.common.Tracks
 import androidx.media3.exoplayer.analytics.AnalyticsListener
 import org.jellyfin.sdk.model.api.LocationType
+import org.jellyfin.sdk.model.api.MediaSourceInfo
 import org.jellyfin.sdk.model.api.MediaStreamType
 import finimal.core.ResumeGuard
 import androidx.activity.compose.BackHandler
@@ -185,8 +186,9 @@ fun PlayerScreen(itemId: String, onBack: () -> Unit, onPlay: (String) -> Unit) {
     LaunchedEffect(itemId, retry) {
         error = null
         val server = App.server
-        val downloaded = withContext(Dispatchers.IO) { Media.download(itemId)?.item }
-        val complete = downloaded != null && withContext(Dispatchers.IO) { Media.isComplete(Media.key(downloaded)) }
+        val download = withContext(Dispatchers.IO) { Media.download(itemId) }
+        val downloaded = download?.item
+        val complete = download != null && withContext(Dispatchers.IO) { Media.isComplete(Media.downloadKey(download)) }
         // Outside this screen's scope, so giving up on a slow server below doesn't cut a flush short.
         val process = ProcessLifecycleOwner.get().lifecycleScope
         val fetch = process.async { runCatching {
@@ -258,7 +260,13 @@ private fun Playback(
     val next = playable.getOrNull(playable.indexOfFirst { it.id == item.id } + 1)
         ?.takeIf { playable.any { p -> p.id == item.id } }
 
-    var transcoding by remember { mutableStateOf(false) }
+    val videoStream = remember(source) { videoInfo(source) }
+    val download = remember(id) { Media.download(id) }
+    // A finished transcoded download plays from disk; one still under way is no use yet.
+    val localTranscode = remember(download) { download?.takeIf { it.transcoded && Media.isComplete(Media.downloadKey(it)) } }
+    val cacheKey = localTranscode?.let(Media::downloadKey) ?: Media.key(item)
+    // A file the device can't decode starts as a transcode. Downloads play as they are; a failure still switches.
+    var transcoding by remember { mutableStateOf(online && localTranscode == null && download?.transcoded != false && !playsDirectly(item)) }
     var transcodeFromMs by remember { mutableLongStateOf(0L) }
     var playerError by remember { mutableStateOf<PlaybackException?>(null) }
     // Set while a network failure is being retried; see reconnectDelayMs.
@@ -295,16 +303,16 @@ private fun Playback(
     // Prepare: external subtitles first (cached on disk), then the media item at the resume point.
     LaunchedEffect(player) {
         // Set first: eviction and subtitle cleanup leave the playing item alone.
-        Media.playing = Media.key(item)
+        Media.playing = cacheKey
         // A slow server doesn't hold up the start; the fetch finishes on its own and the files are there next time.
         val fetch = ProcessLifecycleOwner.get().lifecycleScope.async { Media.fetchSubtitles(item) }
         val subs = withTimeoutOrNull(3_000) { fetch.await() } ?: emptyMap()
         val streams = externalSubs(item).associateBy { it.index }
-        val audioIndex = prefs.audioLang(seriesKey)?.let { lang -> source.mediaStreams?.firstOrNull { it.type == MediaStreamType.AUDIO && sameLanguage(it.language, lang) }?.index }
+        val audioIndex = prefs.audioLang(seriesKey)?.let { audioIndex(source, it) }
         val url = if (transcoding) App.server.transcodeUrl(id, sourceId, audioIndex, playSession) else App.server.streamUrl(id, sourceId)
         val mediaItem = MediaItem.Builder()
             .setUri(url)
-            .setCustomCacheKey(Media.key(item))
+            .setCustomCacheKey(cacheKey)
             .setSubtitleConfigurations(subs.mapNotNull { (index, file) ->
                 val stream = streams[index] ?: return@mapNotNull null
                 val mime = when (file.extension) {
@@ -377,7 +385,7 @@ private fun Playback(
                     // On App.buffers, so a start never lands after the stop on leaving.
                     scope.launch(App.buffers) {
                         // The player only reads the cache, so the length may not be recorded yet; the server knows it.
-                        val len = Media.contentLength(Media.key(item)).takeIf { it > 0 } ?: source.size ?: 0
+                        val len = Media.contentLength(cacheKey).takeIf { it > 0 } ?: source.size ?: 0
                         // A fixed margin behind the playhead: a share of the file would be a gigabyte behind on a big remux.
                         Media.startBuffer(item, if (len > 0) ((len * fraction).toLong() - 32_000_000).coerceAtLeast(0) else 0)
                     }
@@ -493,11 +501,15 @@ private fun Playback(
 
     val video = @Composable { mod: Modifier ->
         VideoSurface(
-            mod, player, playerView, fullscreen, transcoding, Media.key(item).takeUnless { transcoding }, segments, ended, next, playerError, failedSince != null,
+            mod, player, playerView, fullscreen, transcoding, cacheKey.takeUnless { transcoding }, segments, ended, next, playerError, failedSince != null,
             title = if (item.type == BaseItemKind.EPISODE) "${item.seriesName.orEmpty()} · ${episodeLabel(item)}" else item.name.orEmpty(),
             resumedAt = resumedAt,
             onResumeNoteGone = { resumedAt = null },
-            onTranscode = if (choppy && !transcoding) ({ choppy = false; switchToTranscode() }) else null,
+            onTranscode = if (choppy && !transcoding) ({
+                choppy = false
+                videoStream?.let { prefs.learnChoppy(it.codec, it.pixelRate) }
+                switchToTranscode()
+            }) else null,
             onToggleFullscreen = { setFullscreen(!fullscreen) },
             onBack = onBack,
             onPlay = ::playNext,
@@ -1035,6 +1047,10 @@ private fun trackLabel(f: Format): String {
 }
 
 /** Media3 shortens codes ("ja"), the server keeps three letters ("jpn"). */
+/** The audio stream of [source] in language [lang], for a transcode, which carries one audio track. */
+fun audioIndex(source: MediaSourceInfo, lang: String) =
+    source.mediaStreams?.firstOrNull { it.type == MediaStreamType.AUDIO && sameLanguage(it.language, lang) }?.index
+
 private fun sameLanguage(a: String?, b: String?) = a != null && b != null &&
     runCatching { Locale.forLanguageTag(a).isO3Language == Locale.forLanguageTag(b).isO3Language }.getOrDefault(a == b)
 
