@@ -100,12 +100,32 @@ class CoreTest {
 
     @Test fun evictsOldestUnpinnedUntilUnderLimit() {
         val entries = listOf(
-            CacheEntry("pinned", 50, 0, true),
+            CacheEntry("pinned", 500, 0, true),
             CacheEntry("old", 30, 1, false),
             CacheEntry("playing", 30, 2, false),
             CacheEntry("new", 30, 3, false),
         )
-        assertEquals(listOf("old", "new"), evictionOrder(entries, 60, protectedKey = "playing"))
-        assertEquals(emptyList(), evictionOrder(entries, 1000))
+        // Pinned bytes don't count: 90 buffered against 60 drops only the oldest.
+        assertEquals(listOf("old"), evictionOrder(entries, 60, protectedKey = "playing"))
+        assertEquals(listOf("old", "new"), evictionOrder(entries, 10, protectedKey = "playing"))
+        assertEquals(emptyList(), evictionOrder(entries, 90))
+    }
+
+    @Test fun bufferLimitKeepsReserveFree() {
+        val gb = 1_000_000_000L
+        assertEquals(5 * gb, bufferLimit(5 * gb, 1 * gb, 50 * gb, 64 * gb))
+        // 3 GB buffered, 1 GB free on 64 GB: keep 3.2 GB free, so the buffer may hold 0.8 GB.
+        assertEquals(800_000_000L, bufferLimit(5 * gb, 3 * gb, 1 * gb, 64 * gb))
+        assertEquals(0, bufferLimit(5 * gb, 0, 1 * gb, 16 * gb))
+    }
+
+    @Test fun pendingStoreKeepsStateWhenDiskWriteFails() {
+        val dir = File.createTempFile("pending", "").apply { delete(); mkdirs(); deleteOnExit() }
+        val store = PendingStore(File(dir, "p.json"))
+        dir.setWritable(false)
+        try {
+            store.put("x", PlayState(1, false, 1))
+            assertEquals(PlayState(1, false, 1), store.get("x"))
+        } finally { dir.setWritable(true) }
     }
 }

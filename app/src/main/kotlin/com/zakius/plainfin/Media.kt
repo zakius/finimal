@@ -26,12 +26,14 @@ import androidx.media3.datasource.cache.ContentMetadata
 import androidx.media3.datasource.cache.NoOpCacheEvictor
 import androidx.media3.datasource.cache.SimpleCache
 import androidx.media3.datasource.okhttp.OkHttpDataSource
+import androidx.work.BackoffPolicy
 import androidx.work.Constraints
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingWorkPolicy
 import androidx.work.ForegroundInfo
 import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
@@ -58,6 +60,7 @@ import java.time.LocalDateTime
 import java.time.ZoneId
 import plainfin.core.CacheEntry
 import plainfin.core.PlayState
+import plainfin.core.bufferLimit
 import plainfin.core.EpisodeRef
 import plainfin.core.evictionOrder
 import plainfin.core.keepNextDeletions
@@ -105,7 +108,11 @@ object Media {
         db = StandaloneDatabaseProvider(context)
         storageMissing = App.prefs.storageIndex >= storageRoots().size
         cache = openCache()
-        kickDownloads(restart = false)
+        val wm = WorkManager.getInstance(context)
+        // The player that wanted them is gone with the old process.
+        wm.cancelAllWorkByTag(FILL_TAG)
+        // Replaced unless running, so a queue left waiting out a retry backoff starts at once.
+        kickDownloads(restart = wm.getWorkInfosForUniqueWork("downloads").get().none { it.state == WorkInfo.State.RUNNING })
         Housekeeping.enqueue(context)
     }
 
@@ -201,6 +208,8 @@ object Media {
         val startAt: Long = 0,
         /** The server refused the file (HTTP 4xx, e.g. deleted there); paused with it. Resuming tries again. */
         val failed: Boolean = false,
+        /** The disk was full even after evicting the buffer; paused with it. Resuming tries again. */
+        val storageFull: Boolean = false,
     )
 
     private val downloadsDir get() = File(ctx.filesDir, "downloads").apply { mkdirs() }
@@ -223,8 +232,20 @@ object Media {
     /** All writes go through [write], [deleteDownload] and [switchStorage], which clear [memo]. */
     @Synchronized
     fun downloads(): List<Download> = memo ?: downloadsDir.listFiles { f -> f.extension == "json" }.orEmpty()
-        .mapNotNull { runCatching { json.decodeFromString<Download>(it.readText()) }.getOrNull() }
+        .mapNotNull { f ->
+            runCatching { json.decodeFromString<Download>(f.readText()) }
+                // Undecodable (e.g. SDK schema drift): kept aside, still pinning its bytes through [pinnedIds].
+                .onFailure { if (it is IllegalArgumentException) f.renameTo(File(f.path + ".corrupt")) }
+                .getOrNull()
+        }
         .also { memo = it }
+
+    /**
+     * IDs with a meta file, decodable or not, so an unreadable record never turns a download into
+     * evictable buffer. A cache key starts with its item ID.
+     */
+    private fun pinnedIds() = downloadsDir.list().orEmpty().map { it.substringBefore('.') }.toSet()
+    private fun isPinned(key: String, ids: Set<String>) = ids.any { key.startsWith("$it-") }
 
     fun download(id: String): Download? = downloads().firstOrNull { it.item.id.toString() == id }
 
@@ -258,6 +279,7 @@ object Media {
      */
     fun kickDownloads(restart: Boolean) {
         val request = OneTimeWorkRequestBuilder<DownloadWorker>()
+            .setBackoffCriteria(BackoffPolicy.LINEAR, 30, TimeUnit.SECONDS)
             .setConstraints(Constraints(requiredNetworkType = if (App.prefs.downloadOnMetered) NetworkType.CONNECTED else NetworkType.UNMETERED))
             .build()
         WorkManager.getInstance(ctx).enqueueUniqueWork("downloads", if (restart) ExistingWorkPolicy.REPLACE else ExistingWorkPolicy.KEEP, request)
@@ -290,8 +312,8 @@ object Media {
      */
     /** Takes [id] out of the queue without restarting the worker that calls this. */
     @Synchronized
-    fun failDownload(id: String) {
-        download(id)?.let { write(it.copy(paused = true, failed = true)) }
+    fun failDownload(id: String, storageFull: Boolean = false) {
+        download(id)?.let { write(it.copy(paused = true, failed = !storageFull, storageFull = storageFull)) }
     }
 
     @Synchronized
@@ -349,7 +371,8 @@ object Media {
             lastPlayedDate = state.lastPlayedMs?.let { LocalDateTime.ofInstant(Instant.ofEpochMilli(it), ZoneId.systemDefault()) },
         ) ?: return
         if (data == d.item.userData) return
-        write(d.copy(item = d.item.copy(userData = data)))
+        // A convenience copy; the pending store holds the state that syncs. A full disk mustn't crash playback.
+        try { write(d.copy(item = d.item.copy(userData = data))) } catch (e: IOException) {}
     }
 
     enum class Fill { DONE, RUNNING, QUEUED, PAUSED }
@@ -359,7 +382,7 @@ object Media {
             Fill.DONE -> "downloaded"
             Fill.RUNNING -> "${waitingFor ?: "downloading"} · $percent%"
             Fill.QUEUED -> "${waitingFor ?: "queued #$position"} · $percent%"
-            Fill.PAUSED -> "${if (download.failed) "failed" else "paused"} · $percent%"
+            Fill.PAUSED -> "${if (download.failed) "failed" else if (download.storageFull) "storage full" else "paused"} · $percent%"
         }
     }
 
@@ -401,30 +424,52 @@ object Media {
     private fun enqueueFill(item: BaseItemDto, position: Long) {
         val source = item.mediaSources?.firstOrNull() ?: return
         val id = item.id.toString()
+        val key = key(item)
         val request = OneTimeWorkRequestBuilder<FillWorker>()
             .addTag(FILL_TAG)
-            .setInputData(workDataOf("key" to key(item), "url" to App.server.streamUrl(id, source.id!!), "position" to position))
+            // The URL carries the token; it is built when the work runs rather than stored in WorkManager's database.
+            .setInputData(workDataOf("key" to key, "id" to id, "sourceId" to source.id!!, "size" to (source.size ?: 0L), "position" to position))
             .setConstraints(Constraints(requiredNetworkType = if (App.prefs.bufferOnMetered) NetworkType.CONNECTED else NetworkType.UNMETERED))
             .build()
-        WorkManager.getInstance(ctx).enqueueUniqueWork("fill-$id", ExistingWorkPolicy.KEEP, request)
+        // A seek past the cached part restarts the fill there, as [prioritize] does for a download.
+        val policy = if (cache.getCachedLength(key, position, Long.MAX_VALUE) > 0) ExistingWorkPolicy.KEEP else ExistingWorkPolicy.REPLACE
+        WorkManager.getInstance(ctx).enqueueUniqueWork("fill-$id", policy, request)
     }
 
     /** Bytes of unpinned (buffered) cache entries, the part [evict] limits. */
     fun bufferedBytes(): Long {
-        val pinned = downloads().map { key(it.item) }.toSet()
-        return cache.keys.filter { it !in pinned }.sumOf(::cachedBytes)
+        val ids = pinnedIds()
+        return cache.keys.filter { !isPinned(it, ids) }.sumOf(::cachedBytes)
     }
 
     fun freeBytes() = storageRoot().usableSpace
 
     fun evict() {
-        val limit = App.prefs.cacheLimitGb * 1_000_000_000L
-        val pinned = downloads().map { key(it.item) }.toSet()
+        val ids = pinnedIds()
         val entries = cache.keys.map { key ->
             val spans = cache.getCachedSpans(key)
-            CacheEntry(key, spans.sumOf { it.length }, spans.maxOfOrNull { it.lastTouchTimestamp } ?: 0, key in pinned)
+            CacheEntry(key, spans.sumOf { it.length }, spans.maxOfOrNull { it.lastTouchTimestamp } ?: 0, isPinned(key, ids))
         }
+        val limit = bufferLimit(App.prefs.cacheLimitGb * 1_000_000_000L, entries.filter { !it.pinned }.sumOf { it.bytes },
+            freeBytes(), storageRoot().totalSpace)
         evictionOrder(entries, limit, playing).forEach(::removeBytes)
+    }
+
+    /** After a failed write: true when the disk is still nearly full once the buffer is evicted. */
+    fun storageFull(): Boolean {
+        if (freeBytes() >= 100_000_000) return false
+        evict()
+        return freeBytes() < 100_000_000
+    }
+
+    /**
+     * A captive portal or auth proxy answers 200 with its own page, which would be cached and count
+     * as complete. When the server lists the file's [size], a cached length that differs removes the
+     * bytes and returns true.
+     */
+    fun wrongFile(key: String, size: Long?): Boolean {
+        val len = contentLength(key)
+        return (size != null && size > 0 && len > 0 && len != size).also { if (it) cache.removeResource(key) }
     }
 
     /** Subtitles fetched for items that were only streamed; downloads and the playing item keep theirs. */
@@ -446,9 +491,12 @@ object Media {
             if (!file.exists()) runCatching {
                 http.newCall(Request.Builder().url(App.server.subtitleUrl(id, source.id!!, stream)).build()).execute().use { r ->
                     if (!r.isSuccessful) throw IOException("HTTP ${r.code}")
-                    val tmp = File(dir, "${file.name}.tmp")
-                    tmp.outputStream().use { (r.body ?: throw IOException("empty body")).byteStream().copyTo(it) }
-                    tmp.renameTo(file)
+                    // Unique, so two fetchers of the same item never write one temp file.
+                    val tmp = File.createTempFile(file.name, ".tmp", dir)
+                    try {
+                        tmp.outputStream().use { (r.body ?: throw IOException("empty body")).byteStream().copyTo(it) }
+                        tmp.renameTo(file)
+                    } finally { tmp.delete() }
                 }
             }
             file.takeIf { it.exists() }?.let { stream.index to it }
@@ -484,11 +532,20 @@ private suspend fun fillCache(key: String, url: String, position: Long, onProgre
 class FillWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
     override suspend fun doWork(): Result = try {
         if (Media.storageMissing) return Result.success()
-        val done = fillCache(inputData.getString("key")!!, inputData.getString("url")!!, inputData.getLong("position", 0), null)
+        val key = inputData.getString("key")!!
+        val url = App.server.streamUrl(inputData.getString("id")!!, inputData.getString("sourceId")!!)
+        val done = fillCache(key, url, inputData.getLong("position", 0), null)
         Media.evict()
-        if (done) Result.success() else Result.retry()
+        when {
+            !done -> Result.retry()
+            Media.wrongFile(key, inputData.getLong("size", 0)) -> Result.failure()
+            else -> Result.success()
+        }
+    } catch (e: HttpDataSource.InvalidResponseCodeException) {
+        // A refused file stays refused; the player shows its own error.
+        if (e.responseCode < 500) Result.failure() else Result.retry()
     } catch (e: IOException) {
-        Result.retry()
+        if (Media.storageFull()) Result.failure() else Result.retry()
     }
 }
 
@@ -534,6 +591,7 @@ class DownloadWorker(context: Context, params: WorkerParameters) : CoroutineWork
                         Media.clearStartAt(id)
                     }
                     if (!fillCache(key, url, 0, progress)) return Result.retry()
+                    if (Media.wrongFile(key, source.size)) Media.failDownload(id)
                 } catch (e: HttpDataSource.InvalidResponseCodeException) {
                     // Refused for this item only; retrying would pick it again forever. A 401 is the token: retry.
                     if (e.responseCode !in 400..499 || e.responseCode == 401) throw e
@@ -541,7 +599,10 @@ class DownloadWorker(context: Context, params: WorkerParameters) : CoroutineWork
                 }
             }
         } catch (e: IOException) {
-            return Result.retry()
+            if (current == null || !Media.storageFull()) return Result.retry()
+            // The rest of the queue would fail the same way; the next app start or Resume tries again.
+            Media.failDownload(current, storageFull = true)
+            return Result.success()
         } finally {
             // A replaced worker can finish after its successor started; don't clear the successor's ID.
             if (Media.downloading == current) Media.downloading = null
@@ -610,7 +671,7 @@ class Housekeeping(context: Context, params: WorkerParameters) : CoroutineWorker
         fun enqueue(context: Context) = WorkManager.getInstance(context).enqueueUniqueWork(
             "housekeeping",
             ExistingWorkPolicy.REPLACE,
-            OneTimeWorkRequestBuilder<Housekeeping>().setConstraints(Constraints(requiredNetworkType = NetworkType.CONNECTED)).build(),
+            OneTimeWorkRequestBuilder<Housekeeping>().setBackoffCriteria(BackoffPolicy.LINEAR, 30, TimeUnit.SECONDS).setConstraints(Constraints(requiredNetworkType = NetworkType.CONNECTED)).build(),
         )
     }
 }

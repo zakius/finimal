@@ -2,6 +2,7 @@ package plainfin.core
 
 import java.io.File
 import java.io.FileOutputStream
+import java.io.IOException
 import kotlinx.serialization.json.Json
 
 /**
@@ -35,7 +36,8 @@ class PendingStore(private val file: File) {
         if (states[itemId] == state && states.remove(itemId) != null) save()
     }
 
-    private fun save() = file.writeAtomically(json.encodeToString(states.toMap()))
+    // A full disk keeps the states in memory; the next put writes them all.
+    private fun save() = try { file.writeAtomically(json.encodeToString(states.toMap())) } catch (e: IOException) {}
 }
 
 /** Through a synced temp file and a rename, so a crash or power loss leaves the old or the new file, never half of one. */
