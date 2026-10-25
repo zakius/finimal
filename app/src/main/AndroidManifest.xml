@@ -10,7 +10,7 @@
     <application
         android:name=".App"
         android:label="plainfin"
-        android:icon="@android:drawable/ic_media_play"
+        android:icon="@mipmap/ic_launcher"
         android:theme="@android:style/Theme.Material.NoActionBar"
         android:usesCleartextTraffic="true"
         android:supportsRtl="true"

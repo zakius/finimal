@@ -27,6 +27,7 @@ import androidx.media3.datasource.cache.NoOpCacheEvictor
 import androidx.media3.datasource.cache.SimpleCache
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.work.BackoffPolicy
+import kotlin.concurrent.thread
 import androidx.work.Constraints
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingWorkPolicy
@@ -112,7 +113,8 @@ object Media {
         // The player that wanted them is gone with the old process.
         wm.cancelAllWorkByTag(FILL_TAG)
         // Replaced unless running, so a queue left waiting out a retry backoff starts at once.
-        kickDownloads(restart = wm.getWorkInfosForUniqueWork("downloads").get().none { it.state == WorkInfo.State.RUNNING })
+        // Off the main thread: the state is a database read, and this runs before the first frame.
+        thread(name = "kick-downloads") { kickDownloads(restart = wm.getWorkInfosForUniqueWork("downloads").get().none { it.state == WorkInfo.State.RUNNING }) }
         Housekeeping.enqueue(context)
     }
 
