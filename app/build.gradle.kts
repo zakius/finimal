@@ -13,8 +13,8 @@ android {
         applicationId = "com.zakius.plainfin"
         minSdk = 26
         targetSdk = 36
-        versionCode = 8
-        versionName = "0.2.1"
+        versionCode = 9
+        versionName = "0.3.0"
     }
 
     // CI passes the release key through environment variables; local release builds stay unsigned.
