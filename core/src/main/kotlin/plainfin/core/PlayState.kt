@@ -54,3 +54,18 @@ fun shouldPush(local: PlayState, server: PlayState?): Boolean {
     val localMs = local.lastPlayedMs ?: return false
     return localMs >= serverMs
 }
+
+/**
+ * The position to report: [positionTicks], unless it would move a resume point back under the
+ * resume minimum within [GUARD_MS] of starting, with no seek. No viewer does that; a player that
+ * reports before it has loaded, or a restored "start over", does, and the series restarts.
+ */
+object ResumeGuard {
+    const val GUARD_MS = 30_000L
+
+    fun position(startTicks: Long, positionTicks: Long, runtimeTicks: Long?, sinceStartMs: Long, seeked: Boolean): Long {
+        if (seeked || runtimeTicks == null || runtimeTicks <= 0 || sinceStartMs > GUARD_MS) return positionTicks
+        val min = runtimeTicks * ResumeRules.MIN_RESUME_PCT / 100
+        return if (startTicks > min && positionTicks < min) startTicks else positionTicks
+    }
+}

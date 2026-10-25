@@ -15,6 +15,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.io.IOException
+import kotlin.math.abs
 import java.time.Instant
 import java.time.LocalDateTime
 import java.time.ZoneId
@@ -71,8 +72,25 @@ class Server(context: Context) {
     val api = createJellyfin {
         clientInfo = ClientInfo("plainfin", BuildConfig.VERSION_NAME)
         this.context = context
-        apiClientFactory = OkHttpFactory(Media.http) // one connection pool for API, images and streams
+        // One connection pool for API, images and streams. API answers also set the server clock.
+        apiClientFactory = OkHttpFactory(Media.http.newBuilder().addNetworkInterceptor { chain ->
+            chain.proceed(chain.request()).also { r -> r.headers.getDate("Date")?.let { setClock(it.time) } }
+        }.build())
     }.createApi(prefs.baseUrl, prefs.token)
+
+    @Volatile private var clockOffsetMs = prefs.clockOffsetMs
+
+    // The header has whole seconds and the answer took time to arrive; smaller moves are noise.
+    private fun setClock(serverMs: Long) {
+        val offset = serverMs - System.currentTimeMillis()
+        if (abs(offset - clockOffsetMs) > 2_000) { clockOffsetMs = offset; prefs.clockOffsetMs = offset }
+    }
+
+    /**
+     * Now on the server's clock, kept across restarts for offline plays. Play dates are compared with
+     * dates other devices sent; a phone clock an hour fast would otherwise beat a later play elsewhere.
+     */
+    fun now() = System.currentTimeMillis() + clockOffsetMs
 
     /** Keeps reports in order, so a slow progress report can't land after the stop. */
     private val reports = Mutex()
@@ -89,15 +107,14 @@ class Server(context: Context) {
         val credentials = AuthenticateUserByName(username, password)
         if ("://" in base) return login(base, credentials)
         try { login("https://$base", credentials) }
-        catch (e: Exception) { if (unreachable(e)) login("http://$base", credentials) else throw e }
+        // A certificate problem is not a server without https: falling back would send the password in clear text.
+        catch (e: Exception) { if (unreachable(e) && !untrustedCertificate(e)) login("http://$base", credentials) else throw e }
     }
 
     private suspend fun login(base: String, credentials: AuthenticateUserByName) {
         api.update(baseUrl = base, accessToken = null)
         val auth = io { api.authenticationApi.authenticateUserByName(credentials).content }
-        prefs.baseUrl = base
-        prefs.token = auth.accessToken
-        prefs.userId = auth.user!!.id.toString()
+        prefs.login(base, auth.accessToken, auth.user!!.id.toString())
         api.update(baseUrl = base, accessToken = auth.accessToken)
         sessionExpired = false
     }
@@ -194,9 +211,10 @@ class Server(context: Context) {
         "${prefs.baseUrl}/Videos/$id/stream?static=true&mediaSourceId=$mediaSourceId&api_key=${prefs.token}"
 
     // ponytail: fixed h264/aac at 8 Mbps; embedded subtitles are lost here, external ones still load.
-    fun transcodeUrl(id: String, mediaSourceId: String, audioIndex: Int?) =
+    // [playSession] goes in the stop report too, so leaving ends the server's ffmpeg job at once.
+    fun transcodeUrl(id: String, mediaSourceId: String, audioIndex: Int?, playSession: String) =
         "${prefs.baseUrl}/Videos/$id/master.m3u8?mediaSourceId=$mediaSourceId&videoCodec=h264&audioCodec=aac" +
-            "&maxAudioChannels=2&videoBitrate=8000000&audioBitrate=192000&playSessionId=${UUID.randomUUID()}" +
+            "&maxAudioChannels=2&videoBitrate=8000000&audioBitrate=192000&playSessionId=$playSession" +
             (audioIndex?.let { "&audioStreamIndex=$it" } ?: "") + "&api_key=${prefs.token}"
 
     fun subtitleUrl(id: String, mediaSourceId: String, stream: MediaStream) =
@@ -204,21 +222,21 @@ class Server(context: Context) {
 
     // --- play state ---------------------------------------------------------------------------
 
-    suspend fun reportStart(id: String, mediaSourceId: String, positionTicks: Long, transcoding: Boolean) = io { runCatching {
+    suspend fun reportStart(id: String, mediaSourceId: String, positionTicks: Long, transcoding: Boolean, playSession: String) = io { reports.withLock { runCatching {
         api.sessionApi.reportPlaybackStart(
             PlaybackStartInfo(
                 itemId = UUID.fromString(id), mediaSourceId = mediaSourceId, positionTicks = positionTicks,
                 canSeek = true, isPaused = false, isMuted = false,
                 playMethod = if (transcoding) PlayMethod.TRANSCODE else PlayMethod.DIRECT_PLAY,
-                repeatMode = RepeatMode.REPEAT_NONE, playbackOrder = PlaybackOrder.DEFAULT,
+                repeatMode = RepeatMode.REPEAT_NONE, playbackOrder = PlaybackOrder.DEFAULT, playSessionId = playSession,
             )
         )
-    } }
+    } } }
 
     /** Saves locally first, then tells the server. A failed report leaves the local entry for [flush]. */
-    suspend fun reportProgress(id: String, mediaSourceId: String, positionTicks: Long, paused: Boolean, transcoding: Boolean, serverPlayed: Boolean) = io {
-        val played = App.pending.get(id)?.played ?: serverPlayed
-        val state = PlayState(positionTicks, played, System.currentTimeMillis())
+    suspend fun reportProgress(id: String, mediaSourceId: String, positionTicks: Long, paused: Boolean, transcoding: Boolean, serverPlayed: Boolean, playSession: String) = io {
+        val played = knownPlayed(id, serverPlayed)
+        val state = PlayState(positionTicks, played, now())
         record(id, state)
         reports.withLock { runCatching {
             api.sessionApi.reportPlaybackProgress(
@@ -226,7 +244,7 @@ class Server(context: Context) {
                     itemId = UUID.fromString(id), mediaSourceId = mediaSourceId, positionTicks = positionTicks,
                     canSeek = true, isPaused = paused, isMuted = false,
                     playMethod = if (transcoding) PlayMethod.TRANSCODE else PlayMethod.DIRECT_PLAY,
-                    repeatMode = RepeatMode.REPEAT_NONE, playbackOrder = PlaybackOrder.DEFAULT,
+                    repeatMode = RepeatMode.REPEAT_NONE, playbackOrder = PlaybackOrder.DEFAULT, playSessionId = playSession,
                 )
             )
         }.onSuccess { App.pending.confirm(id, state) } }
@@ -236,15 +254,15 @@ class Server(context: Context) {
      * Queues the local save on [App.disk] before returning, so a list opened right after flushes it,
      * then reports the stop. Always sends a position: without one the server marks the item played at 0.
      */
-    fun reportStop(id: String, mediaSourceId: String, positionTicks: Long, runtimeTicks: Long?, serverPlayed: Boolean) {
+    fun reportStop(id: String, mediaSourceId: String, positionTicks: Long, runtimeTicks: Long?, serverPlayed: Boolean, playSession: String) {
         ProcessLifecycleOwner.get().lifecycleScope.launch(App.disk) {
-            val previous = App.pending.get(id)?.played ?: serverPlayed
-            val state = ResumeRules.onStop(PlayState(0, previous, null), positionTicks, runtimeTicks, System.currentTimeMillis())
+            val previous = knownPlayed(id, serverPlayed)
+            val state = ResumeRules.onStop(PlayState(0, previous, null), positionTicks, runtimeTicks, now())
             record(id, state)
             io {
                 reports.withLock { runCatching {
                     api.sessionApi.reportPlaybackStopped(
-                        PlaybackStopInfo(itemId = UUID.fromString(id), mediaSourceId = mediaSourceId, positionTicks = positionTicks, failed = false)
+                        PlaybackStopInfo(itemId = UUID.fromString(id), mediaSourceId = mediaSourceId, positionTicks = positionTicks, playSessionId = playSession, failed = false)
                     )
                 }.onSuccess { App.pending.confirm(id, state) } }
                 Housekeeping.enqueue(App.instance)
@@ -256,15 +274,30 @@ class Server(context: Context) {
     var localChanges by mutableIntStateOf(0)
         private set
 
+    /**
+     * Last state recorded this session, kept after the server confirms it: a player loaded before
+     * "Mark played" would otherwise report its stale load-time flag and un-mark the item.
+     */
+    private val recorded = java.util.concurrent.ConcurrentHashMap<String, PlayState>()
+
+    private fun knownPlayed(id: String, serverPlayed: Boolean) = (App.pending.get(id) ?: recorded[id])?.played ?: serverPlayed
+
     /** Every local play-state change: queued for the server and kept with the download for offline resume. */
     private suspend fun record(id: String, state: PlayState): Unit = withContext(App.disk) {
+        recorded[id] = state
         App.pending.put(id, state)
         Media.rememberState(id, state)
         localChanges++
     }
 
-    suspend fun setPlayed(id: String, played: Boolean) {
-        record(id, PlayState(0, played, System.currentTimeMillis()))
+    /** "Start over" as a saved position of 0, so a restored back stack never restarts the item a second time. */
+    suspend fun startOver(item: BaseItemDto) {
+        val id = item.id.toString()
+        record(id, PlayState(0, knownPlayed(id, item.userData?.played ?: false), now()))
+    }
+
+    suspend fun setPlayed(ids: List<String>, played: Boolean) {
+        ids.forEach { record(it, PlayState(0, played, now())) }
         flush()
     }
 
@@ -274,13 +307,13 @@ class Server(context: Context) {
      * dropped, and a rejected token ends the session. An unreachable server stops the whole flush
      * rather than timing out once per item. Returns the first failure, null when all went through.
      */
-    suspend fun flush(): Throwable? = io {
+    suspend fun flush(): Throwable? = io { flushing.withLock {
         val pending = withContext(App.disk) { App.pending.all() }
-        if (pending.isEmpty()) return@io null
+        if (pending.isEmpty()) return@withLock null
         // One request for every item's server state; an item the server lacks is absent and its push 404s.
         val serverStates = try { userData(pending.keys.map(UUID::fromString)) } catch (e: Exception) {
             if ((e as? InvalidStatusException)?.status == 401) expire()
-            return@io e
+            return@withLock e
         }
         var failure: Throwable? = null
         for ((id, local) in pending) {
@@ -299,13 +332,16 @@ class Server(context: Context) {
             }.onSuccess { App.pending.confirm(id, local) }.onFailure { e ->
                 when ((e as? InvalidStatusException)?.status) {
                     404 -> App.pending.confirm(id, local)
-                    401 -> { expire(); return@io e }
-                    else -> { failure = failure ?: e; if (unreachable(e)) return@io e }
+                    401 -> { expire(); return@withLock e }
+                    else -> { failure = failure ?: e; if (unreachable(e)) return@withLock e }
                 }
             }
         }
         failure
-    }
+    } }
+
+    /** One flush at a time: two overlapping ones could push an older state after a newer one. */
+    private val flushing = Mutex()
 }
 
 // The SDK's LocalDateTime is in the device's zone, not UTC; reading it as UTC shifts every date
@@ -328,6 +364,10 @@ fun subtitleExt(stream: MediaStream) = when (val c = stream.codec?.lowercase()) 
 }
 
 /** No HTTP answer: timeout, unknown host, refused connection or failed TLS. */
+/** An https server whose certificate isn't trusted, expired, or for another name. */
+fun untrustedCertificate(e: Throwable) = generateSequence(e) { it.cause }
+    .any { it is java.security.cert.CertificateException || it is java.security.cert.CertPathValidatorException || it is javax.net.ssl.SSLPeerUnverifiedException }
+
 fun unreachable(e: Throwable) = e is TimeoutException || generateSequence(e) { it.cause }.any { it is IOException }
 
 /** Worth retrying later: no answer, or a server-side error. */

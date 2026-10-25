@@ -42,7 +42,7 @@ sealed interface Screen {
     @Serializable data class Library(val id: String?, val name: String) : Screen
     @Serializable data class Series(val id: String, val name: String) : Screen
     @Serializable data class Season(val seriesId: String, val seasonId: String, val name: String) : Screen
-    @Serializable data class Play(val itemId: String, val fromStart: Boolean = false) : Screen
+    @Serializable data class Play(val itemId: String) : Screen
 }
 
 class MainActivity : ComponentActivity() {
@@ -117,6 +117,6 @@ private fun Root(openDownloads: Boolean, openedDownloads: () -> Unit) {
         is Screen.Series -> SeriesScreen(padded, top, ::push, ::pop)
         is Screen.Season -> SeasonScreen(padded, top, ::push, ::pop)
         // "Play next" replaces the player instead of stacking players.
-        is Screen.Play -> PlayerScreen(top.itemId, top.fromStart, ::pop) { next -> pop(); push(Screen.Play(next)) }
+        is Screen.Play -> PlayerScreen(top.itemId, ::pop) { next -> pop(); push(Screen.Play(next)) }
     } } }
 }

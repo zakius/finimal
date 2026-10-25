@@ -13,7 +13,19 @@ import android.content.pm.ActivityInfo
 import android.content.res.Configuration
 import android.media.AudioManager
 import android.net.Uri
-import android.view.WindowManager
+import android.os.SystemClock
+import java.util.Locale
+import java.util.UUID
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.media3.common.AudioAttributes
+import androidx.media3.common.Format
+import androidx.media3.common.Tracks
+import androidx.media3.exoplayer.analytics.AnalyticsListener
+import org.jellyfin.sdk.model.api.LocationType
+import org.jellyfin.sdk.model.api.MediaStreamType
+import plainfin.core.ResumeGuard
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.LocalActivity
 import androidx.compose.foundation.background
@@ -122,6 +134,9 @@ private const val SEEK_MS_PER_WIDTH = 100_000f
 /** Chosen speed, kept for the rest of the session so "Play next" does not reset it. */
 private var sessionSpeed = 1f
 
+/** Forced fullscreen and rotation lock, handed from a player to the "Play next" one so the screen doesn't flip in between. */
+private var carried: Pair<Boolean, Boolean>? = null
+
 /** Choices for [AudioDelay]; negative values are for audio that arrives early. */
 val AUDIO_DELAYS_MS = (-200..500 step 50).toList()
 
@@ -137,7 +152,18 @@ private val FullscreenExitIcon = icon("FullscreenExit", "M5,16h3v3h2v-5H5v2zm3,-
 
 /** Loads the item (server first, download metadata when offline) and the episodes that can follow it. */
 @Composable
-fun PlayerScreen(itemId: String, fromStart: Boolean, onBack: () -> Unit, onPlay: (String) -> Unit) {
+fun PlayerScreen(itemId: String, onBack: () -> Unit, onPlay: (String) -> Unit) {
+    val activity = LocalActivity.current!!
+    val carry = remember { carried.also { carried = null } }
+    DisposableEffect(Unit) {
+        onDispose {
+            if (carried == null) {
+                systemBars(activity, hidden = false)
+                activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+                activity.window.attributes = activity.window.attributes.apply { screenBrightness = -1f }
+            }
+        }
+    }
     var item by remember { mutableStateOf<BaseItemDto?>(null) }
     var siblings by remember { mutableStateOf<List<BaseItemDto>>(emptyList()) }
     var online by remember { mutableStateOf(true) }
@@ -165,8 +191,10 @@ fun PlayerScreen(itemId: String, fromStart: Boolean, onBack: () -> Unit, onPlay:
         val loaded = result.getOrNull()
         online = loaded != null
         // A finished download plays as downloaded, even if the server's file changed since.
-        item = if (complete) downloaded!!.copy(userData = loaded?.userData ?: downloaded.userData) else loaded ?: downloaded
-        if (item == null) error = result.exceptionOrNull()
+        val shown = if (complete) downloaded!!.copy(userData = loaded?.userData ?: downloaded.userData) else loaded ?: downloaded
+        // A missing episode the server lists (no file behind it) has no source to play.
+        if (shown != null && shown.mediaSources.isNullOrEmpty()) error = java.io.FileNotFoundException("This item has no file on the server")
+        else { item = shown; if (shown == null) error = result.exceptionOrNull() }
     }
     // Re-fetched after "Mark played" in the episode list.
     LaunchedEffect(item, refresh) {
@@ -192,7 +220,7 @@ fun PlayerScreen(itemId: String, fromStart: Boolean, onBack: () -> Unit, onPlay:
         current == null -> Box(Modifier.fillMaxSize().background(Color.Black), contentAlignment = Alignment.Center) {
             CircularProgressIndicator(color = Color.White)
         }
-        else -> Playback(current, siblings, fromStart, online, onBack, onPlay, onChanged = { refresh++ })
+        else -> Playback(current, siblings, carry, online, onBack, onPlay, onChanged = { refresh++ })
     }
 }
 
@@ -200,7 +228,7 @@ fun PlayerScreen(itemId: String, fromStart: Boolean, onBack: () -> Unit, onPlay:
 private fun Playback(
     item: BaseItemDto,
     siblings: List<BaseItemDto>,
-    fromStart: Boolean,
+    carry: Pair<Boolean, Boolean>?,
     online: Boolean,
     onBack: () -> Unit,
     onPlay: (String) -> Unit,
@@ -213,9 +241,8 @@ private fun Playback(
     val source = item.mediaSources!!.first()
     val sourceId = source.id!!
     val seriesKey = item.seriesId?.toString() ?: id
-    val runtimeTicks = item.runTimeTicks ?: source.runTimeTicks
     val serverPlayed = item.userData?.played ?: false
-    val playable = siblings.filter { it.parentIndexNumber != 0 }
+    val playable = siblings.filter { it.parentIndexNumber != 0 && it.locationType != LocationType.VIRTUAL }
     val next = playable.getOrNull(playable.indexOfFirst { it.id == item.id } + 1)
         ?.takeIf { playable.any { p -> p.id == item.id } }
 
@@ -227,6 +254,15 @@ private fun Playback(
     var attempt by remember { mutableIntStateOf(0) }
     var ended by remember { mutableStateOf(false) }
     var segments by remember { mutableStateOf<List<MediaSegmentDto>>(emptyList()) }
+    // Ties reports to the transcode, so the stop ends the server's job.
+    val playSession = remember { UUID.randomUUID().toString() }
+    var startTicks by remember { mutableLongStateOf(0L) }
+    var startedAt by remember { mutableLongStateOf(0L) }
+    var seeked by remember { mutableStateOf(false) }
+    var resumedAt by remember { mutableStateOf<Long?>(null) }
+    // Leaving through "Play next" in the credits counts as watched to the end.
+    var creditsDone by remember { mutableStateOf(false) }
+    var choppy by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
     val playerView = remember {
@@ -248,9 +284,12 @@ private fun Playback(
     LaunchedEffect(player) {
         // Set first: eviction and subtitle cleanup leave the playing item alone.
         Media.playing = Media.key(item)
-        val subs = Media.fetchSubtitles(item)
+        // A slow server doesn't hold up the start; the fetch finishes on its own and the files are there next time.
+        val fetch = ProcessLifecycleOwner.get().lifecycleScope.async { Media.fetchSubtitles(item) }
+        val subs = withTimeoutOrNull(3_000) { fetch.await() } ?: emptyMap()
         val streams = externalSubs(item).associateBy { it.index }
-        val url = if (transcoding) App.server.transcodeUrl(id, sourceId, null) else App.server.streamUrl(id, sourceId)
+        val audioIndex = prefs.audioLang(seriesKey)?.let { lang -> source.mediaStreams?.firstOrNull { it.type == MediaStreamType.AUDIO && sameLanguage(it.language, lang) }?.index }
+        val url = if (transcoding) App.server.transcodeUrl(id, sourceId, audioIndex, playSession) else App.server.streamUrl(id, sourceId)
         val mediaItem = MediaItem.Builder()
             .setUri(url)
             .setCustomCacheKey(Media.key(item))
@@ -270,8 +309,11 @@ private fun Playback(
                     .build()
             })
             .build()
-        val resumeMs = if (fromStart) 0 else (item.localState().first?.positionTicks ?: 0) / TICKS_PER_MS
+        val resumeMs = (item.localState().first?.positionTicks ?: 0) / TICKS_PER_MS
         val startMs = if (transcoding) transcodeFromMs else (resumeMs - RESUME_REWIND_MS).coerceAtLeast(0)
+        startTicks = startMs * TICKS_PER_MS
+        startedAt = SystemClock.elapsedRealtime()
+        if (!transcoding && startMs > 0) resumedAt = startMs
         player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().apply {
             prefs.audioLang(seriesKey)?.let { setPreferredAudioLanguage(it) }
             when (val sub = prefs.subLang(seriesKey)) {
@@ -284,12 +326,18 @@ private fun Playback(
         player.setMediaItem(mediaItem, startMs)
         player.prepare()
         player.play()
-        launch { App.server.reportStart(id, sourceId, startMs * TICKS_PER_MS, transcoding) }
+        launch { App.server.reportStart(id, sourceId, startMs * TICKS_PER_MS, transcoding, playSession) }
         if (online) segments = runCatching { App.server.segments(id) }.getOrDefault(emptyList())
     }
 
-    fun positionTicks() = player.currentPosition * TICKS_PER_MS
-    fun report() = scope.launch { App.server.reportProgress(id, sourceId, positionTicks(), !player.isPlaying, transcoding, serverPlayed) }
+    fun runtimeTicks() = item.runTimeTicks ?: source.runTimeTicks ?: player.duration.takeIf { it > 0 }?.times(TICKS_PER_MS)
+    fun positionTicks() = ResumeGuard.position(startTicks, player.currentPosition * TICKS_PER_MS, runtimeTicks(),
+        SystemClock.elapsedRealtime() - startedAt, seeked)
+    fun report() = scope.launch { App.server.reportProgress(id, sourceId, positionTicks(), !player.isPlaying, transcoding, serverPlayed, playSession) }
+    fun switchToTranscode() { transcodeFromMs = player.currentPosition; transcoding = true }
+    // Paused, ended or failed for good: let the screen time out.
+    fun keepScreenOn() { playerView.keepScreenOn = player.playWhenReady && player.playbackState != Player.STATE_ENDED &&
+        (player.playerError == null || failedSince != null) }
 
     DisposableEffect(player) {
         val listener = object : Player.Listener {
@@ -297,12 +345,21 @@ private fun Playback(
                 if (!isPlaying && player.playbackState == Player.STATE_READY) report()
             }
 
+            override fun onEvents(player: Player, events: Player.Events) = keepScreenOn()
+
             override fun onPositionDiscontinuity(old: Player.PositionInfo, new: Player.PositionInfo, reason: Int) {
-                if (reason == Player.DISCONTINUITY_REASON_SEEK) report()
+                if (reason == Player.DISCONTINUITY_REASON_SEEK) { seeked = true; report() }
+            }
+
+            // No decoder at all for the video means no error: Media3 plays the audio over black.
+            override fun onTracksChanged(tracks: Tracks) {
+                if (!transcoding && online && tracks.containsType(C.TRACK_TYPE_VIDEO) && !tracks.isTypeSupported(C.TRACK_TYPE_VIDEO, true)) switchToTranscode()
             }
 
             override fun onPlaybackStateChanged(state: Int) {
                 if (state == Player.STATE_READY) { failedSince = null; attempt = 0 }
+                // Seeking back from the end screen plays on.
+                if (state == Player.STATE_READY || state == Player.STATE_BUFFERING) ended = false
                 if (state == Player.STATE_READY && !transcoding) {
                     val fraction = player.currentPosition.toDouble() / player.duration.coerceAtLeast(1)
                     // On App.buffers, so a start never lands after the stop on leaving.
@@ -315,8 +372,8 @@ private fun Playback(
                 }
                 if (state == Player.STATE_ENDED && !ended) {
                     ended = true
-                    val end = runtimeTicks ?: positionTicks()
-                    App.server.reportStop(id, sourceId, end, runtimeTicks, serverPlayed)
+                    val runtime = runtimeTicks()
+                    App.server.reportStop(id, sourceId, runtime ?: positionTicks(), runtime, serverPlayed, playSession)
                 }
             }
 
@@ -339,20 +396,34 @@ private fun Playback(
                     PlaybackException.ERROR_CODE_DECODING_FORMAT_EXCEEDS_CAPABILITIES,
                     PlaybackException.ERROR_CODE_DECODER_INIT_FAILED,
                     PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED,
+                    PlaybackException.ERROR_CODE_DECODING_FAILED,
                 )
-                if (decodeProblem && !transcoding && online) {
-                    transcodeFromMs = player.currentPosition
-                    transcoding = true
-                }
+                if (decodeProblem && !transcoding && online) switchToTranscode()
                 else playerError = error
             }
         }
+        // A weak decoder drops frames without failing. Two batches of 50 within 30 s at normal speed offer a transcode.
+        var lastDrop = 0L
+        val drops = object : AnalyticsListener {
+            override fun onDroppedVideoFrames(eventTime: AnalyticsListener.EventTime, droppedFrames: Int, elapsedMs: Long) {
+                if (transcoding || !online || player.playbackParameters.speed != 1f || droppedFrames < 50) return
+                val now = SystemClock.elapsedRealtime()
+                if (now - lastDrop < 30_000) choppy = true
+                lastDrop = now
+            }
+        }
         player.addListener(listener)
+        player.addAnalyticsListener(drops)
         playerView.player = player
+        // Late audio from headphones connected mid-play needs a seek to take effect, as in the menu.
+        AudioDelay.onWirelessChanged = { if (prefs.audioDelayMs != 0) player.seekTo(player.currentPosition) }
         onDispose {
+            AudioDelay.onWirelessChanged = null
             player.removeListener(listener)
-            if (!ended) {
-                App.server.reportStop(id, sourceId, positionTicks(), runtimeTicks, serverPlayed)
+            // Left before loading: there is no position, and reporting 0 would wipe the resume point.
+            if (!ended && player.currentMediaItem != null) {
+                val runtime = runtimeTicks()
+                App.server.reportStop(id, sourceId, if (creditsDone && runtime != null) runtime else positionTicks(), runtime, serverPlayed, playSession)
             }
             ProcessLifecycleOwner.get().lifecycleScope.launch(App.buffers) { Media.stopBuffer(id) }
             Media.playing = null
@@ -365,8 +436,10 @@ private fun Playback(
         if (failedSince == null) return@DisposableEffect onDispose {}
         val cm = context.getSystemService(ConnectivityManager::class.java)
         val main = Handler(Looper.getMainLooper())
+        // The network already up is reported at once; the backoff covers it.
+        val initial = cm.activeNetwork
         val callback = object : ConnectivityManager.NetworkCallback() {
-            override fun onAvailable(network: Network) { main.post { if (player.playbackState == Player.STATE_IDLE) player.reload() } }
+            override fun onAvailable(network: Network) { if (network != initial) main.post { if (player.playbackState == Player.STATE_IDLE) player.reload() } }
         }
         cm.registerDefaultNetworkCallback(callback)
         onDispose { cm.unregisterNetworkCallback(callback) }
@@ -379,41 +452,44 @@ private fun Playback(
         }
     }
 
-    // Leaving the app pauses and saves; there is no background playback.
+    val landscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
+    var forcedFullscreen by remember { mutableStateOf(carry?.first ?: false) }
+    var rotationLocked by remember { mutableStateOf(carry?.second ?: false) }
+    val fullscreen = landscape || forcedFullscreen
+    val hideBars by rememberUpdatedState(fullscreen)
+
+    // Leaving the app pauses and saves; there is no background playback. Some ROMs bring the bars back on return.
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     DisposableEffect(lifecycle, player) {
-        val observer = LifecycleEventObserver { _, event -> if (event == Lifecycle.Event.ON_STOP) player.pause() }
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP) player.pause()
+            if (event == Lifecycle.Event.ON_RESUME) systemBars(activity, hideBars)
+        }
         lifecycle.addObserver(observer)
         onDispose { lifecycle.removeObserver(observer) }
     }
-
-    val landscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
-    var forcedFullscreen by remember { mutableStateOf(false) }
-    var rotationLocked by remember { mutableStateOf(false) }
-    val fullscreen = landscape || forcedFullscreen
     fun setFullscreen(on: Boolean) {
         forcedFullscreen = on
         if (!rotationLocked) activity.requestedOrientation =
             if (on) ActivityInfo.SCREEN_ORIENTATION_USER_LANDSCAPE else ActivityInfo.SCREEN_ORIENTATION_USER_PORTRAIT
     }
     LaunchedEffect(fullscreen) { systemBars(activity, hidden = fullscreen) }
-    DisposableEffect(Unit) {
-        activity.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        onDispose {
-            systemBars(activity, hidden = false)
-            activity.window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-            activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
-            activity.window.attributes = activity.window.attributes.apply { screenBrightness = -1f }
-        }
-    }
+    LaunchedEffect(Unit) { if (forcedFullscreen && !rotationLocked) setFullscreen(true) }
+    LaunchedEffect(choppy) { if (choppy) { delay(15_000); choppy = false } }
+    fun playNext(nextId: String) { carried = forcedFullscreen to rotationLocked; onPlay(nextId) }
     BackHandler { if (fullscreen && !landscape) setFullscreen(false) else onBack() }
 
     val video = @Composable { mod: Modifier ->
         VideoSurface(
             mod, player, playerView, fullscreen, transcoding, Media.key(item).takeUnless { transcoding }, segments, ended, next, playerError, failedSince != null,
+            title = if (item.type == BaseItemKind.EPISODE) "${item.seriesName.orEmpty()} · ${episodeLabel(item)}" else item.name.orEmpty(),
+            resumedAt = resumedAt,
+            onResumeNoteGone = { resumedAt = null },
+            onTranscode = if (choppy && !transcoding) ({ choppy = false; switchToTranscode() }) else null,
             onToggleFullscreen = { setFullscreen(!fullscreen) },
             onBack = onBack,
-            onPlay = onPlay,
+            onPlay = ::playNext,
+            onCreditsNext = { creditsDone = true; playNext(it) },
             onRetry = { playerError = null; player.reload() },
             rotationLocked = rotationLocked,
             onRotationLock = {
@@ -429,14 +505,26 @@ private fun Playback(
         video(if (fullscreen) Modifier.fillMaxSize() else Modifier.fillMaxWidth().aspectRatio(16f / 9))
         if (!fullscreen) {
             val downloads = rememberDownloadStatuses()
-            LazyColumn(Modifier.fillMaxSize().padding(horizontal = 12.dp)) {
+            val season = siblings.filter { it.seasonId == item.seasonId }
+            val listState = rememberLazyListState()
+            // The playing episode in view once the list arrives; item 0 is the title.
+            LaunchedEffect(season.isNotEmpty()) {
+                val i = season.indexOfFirst { it.id == item.id }
+                if (i >= 0 && i + 1 > (listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0)) listState.scrollToItem(i)
+            }
+            LazyColumn(Modifier.fillMaxSize().padding(horizontal = 12.dp), listState) {
                 item {
                     Text(item.seriesName ?: item.name.orEmpty(), style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(top = 12.dp))
                     if (item.type == BaseItemKind.EPISODE) Text(episodeLabel(item), style = MaterialTheme.typography.titleMedium)
                     item.overview?.let { Text(it, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(vertical = 8.dp)) }
                 }
-                items(siblings.filter { it.seasonId == item.seasonId }, key = { it.id }) { ep ->
-                    EpisodeRow(ep, downloads?.get(ep.id.toString()), highlighted = ep.id == item.id, onPlay = { onPlay(ep.id.toString()) }, onChanged = onChanged)
+                items(season, key = { it.id }) { ep ->
+                    EpisodeRow(ep, downloads?.get(ep.id.toString()), highlighted = ep.id == item.id, onPlay = { onPlay(ep.id.toString()) },
+                        onStartOver = {
+                            if (ep.id == item.id) player.seekTo(0)
+                            else scope.launch { App.server.startOver(ep); onPlay(ep.id.toString()) }
+                        },
+                        onChanged = onChanged)
                 }
             }
         }
@@ -453,6 +541,8 @@ private fun buildPlayer(context: Context, view: PlayerView, transcoding: Boolean
         .setBackBuffer(15_000, true).build()
     return ExoPlayer.Builder(context)
         .setLoadControl(load)
+        // Pauses for calls and other players, ducks under navigation prompts.
+        .setAudioAttributes(AudioAttributes.Builder().setUsage(C.USAGE_MEDIA).setContentType(C.AUDIO_CONTENT_TYPE_MOVIE).build(), true)
         .setHandleAudioBecomingNoisy(true)
         .buildWithAssSupport(
             context,
@@ -493,9 +583,14 @@ private fun VideoSurface(
     next: BaseItemDto?,
     playerError: PlaybackException?,
     reconnecting: Boolean,
+    title: String,
+    resumedAt: Long?,
+    onResumeNoteGone: () -> Unit,
+    onTranscode: (() -> Unit)?,
     onToggleFullscreen: () -> Unit,
     onBack: () -> Unit,
     onPlay: (String) -> Unit,
+    onCreditsNext: (String) -> Unit,
     onRetry: () -> Unit,
     rotationLocked: Boolean,
     onRotationLock: () -> Unit,
@@ -535,12 +630,15 @@ private fun VideoSurface(
         }
     }
     LaunchedEffect(overlay) { if (overlay != null) { delay(800); overlay = null } }
+    LaunchedEffect(resumedAt) { if (resumedAt != null) { delay(5_000); onResumeNoteGone() } }
+    // Before the duration is known (loading, reconnecting) it reads 0; clamping to it would seek to the start.
+    fun clamp(ms: Long) = if (duration > 0) ms.coerceIn(0, duration) else ms.coerceAtLeast(0)
     LaunchedEffect(crop) {
         playerView.resizeMode = if (crop) AspectRatioFrameLayout.RESIZE_MODE_ZOOM else AspectRatioFrameLayout.RESIZE_MODE_FIT
     }
 
     fun seekBy(ms: Long) {
-        player.seekTo((player.currentPosition + ms).coerceIn(0, duration))
+        player.seekTo(clamp(player.currentPosition + ms))
         overlay = (if (ms > 0) "+" else "−") + "${abs(ms) / 1000}s"
     }
 
@@ -558,12 +656,13 @@ private fun VideoSurface(
                         }
                     },
                     onPress = {
-                        tryAwaitRelease()
-                        if (fastHold) { fastHold = false; player.setPlaybackSpeed(sessionSpeed) }
+                        // finally: a rotation restarts this block mid-hold, and 2x must not stick.
+                        try { tryAwaitRelease() } finally { if (fastHold) { fastHold = false; player.setPlaybackSpeed(sessionSpeed) } }
                     },
                     onTap = { controls = !controls; lastInteraction = System.currentTimeMillis() },
-                    onDoubleTap = { offset ->
-                        if (prefs.gestureDoubleTap) seekBy((if (offset.x < size.width / 2) -1 else 1) * prefs.doubleTapSeconds * 1000L)
+                    // Null when off, so a single tap doesn't wait out the double-tap window.
+                    onDoubleTap = if (!prefs.gestureDoubleTap) null else { offset ->
+                        seekBy((if (offset.x < size.width / 2) -1 else 1) * prefs.doubleTapSeconds * 1000L)
                     },
                 )
             }
@@ -606,7 +705,7 @@ private fun VideoSurface(
                         if (axis == 0 && total.getDistance() > viewConfiguration.touchSlop) axis = if (abs(total.x) > abs(total.y)) 1 else 2
                         when {
                             axis == 1 && fullscreen && prefs.gestureSeek -> {
-                                val target = (startPos + (total.x / w * SEEK_MS_PER_WIDTH).toLong()).coerceIn(0, duration)
+                                val target = clamp(startPos + (total.x / w * SEEK_MS_PER_WIDTH).toLong())
                                 scrubTarget = target
                                 overlay = "${formatMs(target)} / ${formatMs(duration)}"
                                 change.consume()
@@ -660,7 +759,7 @@ private fun VideoSurface(
             when (type) {
                 MediaSegmentType.INTRO -> Skip("Skip intro") { player.seekTo(range.last + 1_000) }
                 MediaSegmentType.RECAP -> Skip("Skip recap") { player.seekTo(range.last + 1_000) }
-                MediaSegmentType.OUTRO -> next?.let { n -> Skip("Play next: ${episodeLabel(n)}") { onPlay(n.id.toString()) } }
+                MediaSegmentType.OUTRO -> next?.let { n -> Skip("Play next: ${episodeLabel(n)}") { onCreditsNext(n.id.toString()) } }
                 else -> null
             }
         }
@@ -668,15 +767,26 @@ private fun VideoSurface(
         if (skip != null && !controls) SkipButton(skip,
             Modifier.align(Alignment.BottomEnd).then(if (fullscreen) Modifier.safeDrawingPadding() else Modifier).padding(24.dp))
 
+        // Below the top bar, so it shows with the controls up at the start too.
+        val note = Modifier.align(Alignment.TopCenter).then(if (fullscreen) Modifier.safeDrawingPadding() else Modifier).padding(top = 56.dp)
+        if (resumedAt != null && playerError == null && !ended) Row(note.background(Color(0x99000000), MaterialTheme.shapes.small).padding(start = 12.dp),
+            verticalAlignment = Alignment.CenterVertically) {
+            Text("Resumed at ${formatMs(resumedAt)}", color = Color.White, style = MaterialTheme.typography.labelLarge)
+            TextButton(onClick = { player.seekTo(0); onResumeNoteGone() }) { Text("Start over") }
+        }
+        else if (onTranscode != null && playerError == null && !ended) FilledTonalButton(onTranscode, note) { Text("Choppy? Transcode") }
+
         if (playerError != null) {
-            Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
+            // Over the controls' scrim, without their buttons under it.
+            Column(Modifier.align(Alignment.Center).padding(16.dp), Arrangement.spacedBy(8.dp), Alignment.CenterHorizontally) {
                 val known = playbackError(playerError)
                 ErrorText(known ?: "Playback failed.", playerError.errorCodeName.takeIf { known == null }, Color.White)
-                Button(onClick = onRetry) { Text("Retry") }
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Button(onClick = onRetry) { Text("Retry") }
+                    FilledTonalButton(onClick = onBack) { Text("Back") }
+                }
             }
-        }
-
-        if (ended) {
+        } else if (ended) {
             Column(Modifier.align(Alignment.Center).padding(horizontal = 16.dp), Arrangement.spacedBy(8.dp), Alignment.CenterHorizontally) {
                 if (next != null) Button(onClick = { onPlay(next.id.toString()) }) {
                     Text("Play next: ${episodeLabel(next)}", maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -685,7 +795,7 @@ private fun VideoSurface(
             }
         } else if (controls) {
             Controls(
-                player, position, duration, buffered, playing, fullscreen, transcoding, rotationLocked,
+                player, position, duration, buffered, playing, fullscreen, transcoding, rotationLocked, title,
                 onBack, onToggleFullscreen, onRotationLock, onTracksChosen, ::seekBy, next?.let { { onPlay(it.id.toString()) } }, skip,
                 onInteraction = { lastInteraction = System.currentTimeMillis() },
                 subtitleView = playerView.subtitleView,
@@ -704,6 +814,7 @@ private fun Controls(
     fullscreen: Boolean,
     transcoding: Boolean,
     rotationLocked: Boolean,
+    title: String,
     onBack: () -> Unit,
     onToggleFullscreen: () -> Unit,
     onRotationLock: () -> Unit,
@@ -723,14 +834,17 @@ private fun Controls(
     Box(Modifier.fillMaxSize().background(Color(0x55000000)).then(if (fullscreen) Modifier.safeDrawingPadding() else Modifier)) {
         Row(Modifier.align(Alignment.TopStart).fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = Color.White) }
-            if (transcoding) Text("Transcoding: buffering to the end is best-effort", color = Color.White, style = MaterialTheme.typography.labelSmall)
-            Box(Modifier.weight(1f))
+            // Portrait has the title under the video.
+            Column(Modifier.weight(1f)) {
+                if (fullscreen) Text(title, color = Color.White, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (transcoding) Text("Transcoding: buffering to the end is best-effort", color = Color.White, style = MaterialTheme.typography.labelSmall)
+            }
             Box {
                 IconButton(onClick = { menu = true; onInteraction() }) { Icon(Icons.Default.MoreVert, "Menu", tint = Color.White) }
                 DropdownMenu(expanded = menu, onDismissRequest = { menu = false; sub = null }) {
                     when (sub) {
                         null -> {
-                            DropdownMenuItem({ Text("Speed: ${player.playbackParameters.speed}x") }, { sub = "speed" })
+                            DropdownMenuItem({ Text("Speed: ${speedLabel(player.playbackParameters.speed)}") }, { sub = "speed" })
                             DropdownMenuItem({ Text("Audio") }, { sub = "audio" })
                             DropdownMenuItem({ Text("Subtitles") }, { sub = "text" })
                             DropdownMenuItem({ Text("Subtitle size: ${App.prefs.subtitleScale}%") }, { sub = "size" })
@@ -738,7 +852,7 @@ private fun Controls(
                             DropdownMenuItem({ Text(if (rotationLocked) "Unlock rotation" else "Lock rotation") }, { onRotationLock(); menu = false })
                         }
                         "speed" -> listOf(0.5f, 0.75f, 1f, 1.25f, 1.5f, 2f).forEach { s ->
-                            Choice("${s}x", player.playbackParameters.speed == s) { sessionSpeed = s; player.setPlaybackSpeed(s); menu = false; sub = null }
+                            Choice(speedLabel(s), player.playbackParameters.speed == s) { sessionSpeed = s; player.setPlaybackSpeed(s); menu = false; sub = null }
                         }
                         "size" -> listOf(50, 75, 100, 125, 150, 200).forEach { s ->
                             Choice("$s%", App.prefs.subtitleScale == s) {
@@ -767,7 +881,7 @@ private fun Controls(
                             player.currentTracks.groups.filter { it.type == type }.forEach { group ->
                                 for (i in 0 until group.length) {
                                     val f = group.getTrackFormat(i)
-                                    val label = listOfNotNull(f.label, f.language, f.codecs).joinToString(" · ").ifEmpty { "Track ${i + 1}" }
+                                    val label = trackLabel(f).ifEmpty { "Track ${i + 1}" }
                                     Choice(label, group.isTrackSelected(i)) {
                                         player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
                                             .setTrackTypeDisabled(type, false)
@@ -794,8 +908,8 @@ private fun Controls(
         Row(Modifier.align(Alignment.Center), verticalAlignment = Alignment.CenterVertically) {
             val step = App.prefs.doubleTapSeconds
             IconButton(onClick = { onSeek(-step * 1000L); onInteraction() }) { Icon(RewindIcon, "Back $step seconds", tint = Color.White) }
-            IconButton(onClick = { if (playing) player.pause() else player.play(); onInteraction() }) {
-                Icon(if (playing) PauseIcon else Icons.Default.PlayArrow, if (playing) "Pause" else "Play", tint = Color.White)
+            IconButton(onClick = { if (playing) player.pause() else player.play(); onInteraction() }, Modifier.padding(horizontal = 16.dp).size(64.dp)) {
+                Icon(if (playing) PauseIcon else Icons.Default.PlayArrow, if (playing) "Pause" else "Play", Modifier.size(40.dp), tint = Color.White)
             }
             IconButton(onClick = { onSeek(step * 1000L); onInteraction() }) { Icon(ForwardIcon, "Forward $step seconds", tint = Color.White) }
             if (onNext != null) IconButton(onClick = onNext) { Icon(NextIcon, "Next episode", tint = Color.White) }
@@ -846,6 +960,19 @@ private fun ExoPlayer.seekToNearestKeyframe(ms: Long) {
     setSeekParameters(SeekParameters.DEFAULT)
 }
 
+private fun speedLabel(s: Float) = "${s.toString().removeSuffix(".0")}×"
+
+/** "English · 5.1" rather than "eng · mp4a.40.2"; the track's own title first when it has one. */
+private fun trackLabel(f: Format): String {
+    val language = f.language?.takeUnless { it == "und" }?.let { Locale.forLanguageTag(it).displayLanguage.ifBlank { it } }
+    val channels = when (f.channelCount) { Format.NO_VALUE -> null; 1 -> "mono"; 2 -> "stereo"; 6 -> "5.1"; 8 -> "7.1"; else -> "${f.channelCount} ch" }
+    return listOfNotNull(f.label, language?.takeUnless { f.label?.contains(it, ignoreCase = true) == true }, channels).joinToString(" · ")
+}
+
+/** Media3 shortens codes ("ja"), the server keeps three letters ("jpn"). */
+private fun sameLanguage(a: String?, b: String?) = a != null && b != null &&
+    runCatching { Locale.forLanguageTag(a).isO3Language == Locale.forLanguageTag(b).isO3Language }.getOrDefault(a == b)
+
 /** Language of the selected track, "" when that type is off, null when unknown. */
 private fun selectedLanguage(player: ExoPlayer, type: Int): String? {
     if (player.trackSelectionParameters.disabledTrackTypes.contains(type)) return ""
@@ -874,7 +1001,7 @@ private fun playbackError(e: PlaybackException) = when (e.errorCode) {
         "The server returned an error" + ((e.cause as? HttpDataSource.InvalidResponseCodeException)?.let { " (${it.responseCode})." } ?: ".")
     PlaybackException.ERROR_CODE_IO_FILE_NOT_FOUND -> "The file is missing."
     PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED, PlaybackException.ERROR_CODE_DECODING_FORMAT_EXCEEDS_CAPABILITIES,
-    PlaybackException.ERROR_CODE_DECODER_INIT_FAILED, PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED ->
-        "This device can't play this file."
+    PlaybackException.ERROR_CODE_DECODER_INIT_FAILED, PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED,
+    PlaybackException.ERROR_CODE_DECODING_FAILED -> "This device can't play this file."
     else -> null
 }

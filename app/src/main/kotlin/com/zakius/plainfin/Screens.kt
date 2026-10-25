@@ -15,6 +15,11 @@ import android.net.ConnectivityManager
 import android.content.Context
 import android.widget.Toast
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.ui.text.input.VisualTransformation
+import org.jellyfin.sdk.model.api.LocationType
+import plainfin.core.EpisodeRef
+import plainfin.core.keepNextWindow
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.selection.toggleable
@@ -42,6 +47,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -198,16 +204,24 @@ private suspend fun downloadAll(context: Context, episodes: List<BaseItemDto>) {
 }
 
 /**
- * Fetches episodes on tap and asks before queuing the ones not downloaded or queued yet, with
- * their total size when every file's size is known.
+ * An action that fetches episodes and asks before queuing the ones not downloaded or queued yet,
+ * with their total size when every file's size is known.
  */
 @Composable
-private fun DownloadAllButton(label: String, fetch: suspend () -> List<BaseItemDto>) {
+private fun downloadAllAction(fetch: suspend () -> List<BaseItemDto>): () -> Unit {
     var busy by remember { mutableStateOf(false) }
     var pending by remember { mutableStateOf<List<BaseItemDto>?>(null) }
     val scope = rememberCoroutineScope()
     val ctx = LocalContext.current
-    TextButton(enabled = !busy, onClick = {
+    pending?.let { eps ->
+        val total = eps.mapNotNull { it.mediaSources?.firstOrNull()?.size }.takeIf { it.size == eps.size }?.sum()
+        Confirm("Download ${eps.size} episode${if (eps.size == 1) "" else "s"}" + (total?.let { ", about ${formatBytes(it)}" } ?: "") + "?", "Download", {
+            busy = true
+            scope.launch { downloadAll(ctx, eps); busy = false }
+        }, { pending = null })
+    }
+    return action@{
+        if (busy) return@action
         busy = true
         scope.launch {
             runCatching { fetch() }
@@ -218,14 +232,44 @@ private fun DownloadAllButton(label: String, fetch: suspend () -> List<BaseItemD
                 .onFailure { if (it is CancellationException) throw it; Toast.makeText(ctx, loadError(it), Toast.LENGTH_SHORT).show() }
             busy = false
         }
-    }) { Text(if (busy) "Queuing…" else label) }
-    pending?.let { eps ->
-        val total = eps.mapNotNull { it.mediaSources?.firstOrNull()?.size }.takeIf { it.size == eps.size }?.sum()
-        Confirm("Download ${eps.size} episode${if (eps.size == 1) "" else "s"}" + (total?.let { ", about ${formatBytes(it)}" } ?: "") + "?", "Download", {
-            busy = true
-            scope.launch { downloadAll(ctx, eps); busy = false }
-        }, { pending = null })
     }
+}
+
+/** A ⋮ button in the top bar, so actions don't push a long title off it. */
+@Composable
+private fun BarMenu(content: @Composable (close: () -> Unit) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    Box {
+        IconButton(onClick = { open = true }) { Icon(Icons.Default.MoreVert, "More options") }
+        DropdownMenu(open, { open = false }) { content { open = false } }
+    }
+}
+
+/** "Mark played" for many episodes at once; asks first, as it drops their resume points. */
+@Composable
+private fun markAllAction(onChanged: () -> Unit): (List<BaseItemDto>) -> Unit {
+    var asking by remember { mutableStateOf<List<BaseItemDto>?>(null) }
+    val scope = rememberCoroutineScope()
+    asking?.let { eps ->
+        val played = !eps.all { it.localState().first?.played == true }
+        Confirm("Mark ${eps.size} episode${if (eps.size == 1) "" else "s"} ${if (played) "played" else "unplayed"}?", "Mark", {
+            scope.launch { App.server.setPlayed(eps.map { it.id.toString() }, played); onChanged() }
+        }, { asking = null })
+    }
+    return { asking = it }
+}
+
+/** Where to pick up a series: the unfinished episode last played, else the one after it, else the first. Null once all is played. */
+fun upNext(episodes: List<BaseItemDto>): BaseItemDto? {
+    val playable = episodes.filter { it.parentIndexNumber != 0 && it.locationType != LocationType.VIRTUAL }
+    val id = keepNextWindow(playable.map { EpisodeRef(it.id.toString(), it.localState().first) }, 1).firstOrNull()
+    return playable.firstOrNull { it.id.toString() == id }?.takeUnless { it.localState().first?.played == true }
+}
+
+/** Plays [item] from the start: the position is saved as 0 first, so nothing can resume it later. */
+private suspend fun startOver(item: BaseItemDto, push: (Screen) -> Unit) {
+    App.server.startOver(item)
+    push(Screen.Play(item.id.toString()))
 }
 
 @Composable
@@ -258,6 +302,7 @@ private fun Bar(title: String, onBack: (() -> Unit)?, actions: @Composable () ->
 
 fun loadError(e: Throwable) = when {
     e is InvalidStatusException -> "The server returned an error (${e.status})"
+    untrustedCertificate(e) -> "The server's certificate isn't trusted"
     unreachable(e) -> "Can't reach the server"
     else -> "Something went wrong"
 }
@@ -293,7 +338,7 @@ private fun RetryOnNewNetwork(onRetry: () -> Unit) {
 private fun Loaded(load: Load, onRetry: () -> Unit, onDownloads: () -> Unit, content: @Composable (List<BaseItemDto>) -> Unit) {
     val result = load.result
     when {
-        result == null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("Loading…") }
+        result == null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
         result.isFailure -> Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
             val e = result.exceptionOrNull()!!
             if (unreachable(e)) RetryOnNewNetwork(onRetry)
@@ -330,6 +375,7 @@ fun LoginScreen(modifier: Modifier, onDone: () -> Unit) {
     var pass by remember { mutableStateOf("") }
     var error by remember { mutableStateOf<Throwable?>(null) }
     var busy by remember { mutableStateOf(false) }
+    var showPass by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     fun submit() {
         if (busy) return
@@ -345,14 +391,15 @@ fun LoginScreen(modifier: Modifier, onDone: () -> Unit) {
     Column(modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("plainfin", style = MaterialTheme.typography.headlineMedium)
         if (App.server.sessionExpired) Text("The server ended this session. Log in again; unsynced progress is kept.")
-        OutlinedTextField(url, { url = it }, label = { Text("Server URL") }, placeholder = { Text("jellyfin.example.com:8096") }, singleLine = true, enabled = !busy, modifier = Modifier.fillMaxWidth(),
+        OutlinedTextField(url, { url = it; error = null }, label = { Text("Server URL") }, placeholder = { Text("jellyfin.example.com:8096") }, singleLine = true, enabled = !busy, modifier = Modifier.fillMaxWidth(),
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Next))
-        OutlinedTextField(user, { user = it }, label = { Text("Username") }, singleLine = true, enabled = !busy,
+        OutlinedTextField(user, { user = it; error = null }, label = { Text("Username") }, singleLine = true, enabled = !busy,
             modifier = Modifier.fillMaxWidth().semantics { contentType = ContentType.Username },
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next))
-        OutlinedTextField(pass, { pass = it }, label = { Text("Password") }, singleLine = true, enabled = !busy,
+        OutlinedTextField(pass, { pass = it; error = null }, label = { Text("Password") }, singleLine = true, enabled = !busy,
             modifier = Modifier.fillMaxWidth().semantics { contentType = ContentType.Password },
-            visualTransformation = PasswordVisualTransformation(),
+            visualTransformation = if (showPass) VisualTransformation.None else PasswordVisualTransformation(),
+            trailingIcon = { TextButton(onClick = { showPass = !showPass }) { Text(if (showPass) "Hide" else "Show") } },
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = ImeAction.Done),
             keyboardActions = KeyboardActions(onDone = { submit() }))
         error?.let { e ->
@@ -417,6 +464,7 @@ fun LibraryScreen(modifier: Modifier, screen: Screen.Library, push: (Screen) -> 
             FilterChip(unplayed, { unplayed = !unplayed }, { Text("Unplayed") })
         }
         val statuses = rememberDownloadStatuses()
+        val scope = rememberCoroutineScope()
         // Outside Loaded, so the scroll survives its "Loading…" pass; a new sort, filter or query starts at the top.
         val gridState = rememberSaveable(sort, unplayed, query, saver = LazyGridState.Saver) { LazyGridState() }
         Loaded(items, { refresh++ }, { push(Screen.Downloads) }) { list ->
@@ -432,7 +480,7 @@ fun LibraryScreen(modifier: Modifier, screen: Screen.Library, push: (Screen) -> 
                     if (item.type == BaseItemKind.SERIES) Poster(item, null, onClick = { push(Screen.Series(item.id.toString(), item.name.orEmpty())) })
                     else Poster(item, statuses?.get(item.id.toString()),
                         onClick = { push(Screen.Play(item.id.toString())) },
-                        onStartOver = { push(Screen.Play(item.id.toString(), fromStart = true)) },
+                        onStartOver = { scope.launch { startOver(item, push) } },
                         onChanged = { refresh++ })
                 }
             }
@@ -484,13 +532,28 @@ private fun Poster(
 fun SeriesScreen(modifier: Modifier, screen: Screen.Series, push: (Screen) -> Unit, pop: () -> Unit) {
     var refresh by remember { mutableIntStateOf(0) }
     val seasons = loadFresh(screen.id, refresh = refresh) { App.server.seasons(screen.id) }
+    // Every episode, for Continue; a show with one season lists them here instead of a one-row season list.
+    val episodes = loadFresh(screen.id, "episodes", refresh = refresh) { App.server.episodes(screen.id) }
+    val statuses = rememberDownloadStatuses()
     var keepNext by remember { mutableIntStateOf(App.prefs.keepNext(screen.id)) }
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
+    val downloadAll = downloadAllAction { App.server.episodes(screen.id, sources = true).filter { it.parentIndexNumber != 0 } }
+    val markAll = markAllAction { refresh++ }
+    val all = episodes.result?.getOrNull()
+    val onlySeason = seasons.result?.getOrNull()?.singleOrNull()
+    val shownEpisodes = onlySeason?.let { s -> all?.filter { it.seasonId == s.id } }
     Column(modifier.fillMaxSize()) {
         Bar(screen.name, pop) {
-            DownloadAllButton("Download all") { App.server.episodes(screen.id, sources = true).filter { it.parentIndexNumber != 0 } }
+            BarMenu { close ->
+                DropdownMenuItem({ Text("Download all") }, { close(); downloadAll() })
+                shownEpisodes?.let { eps ->
+                    val played = eps.all { it.localState().first?.played == true }
+                    DropdownMenuItem({ Text(if (played) "Mark all unplayed" else "Mark all played") }, { close(); markAll(eps) })
+                }
+            }
         }
+        all?.let(::upNext)?.let { ep -> ContinueButton(ep) { push(Screen.Play(ep.id.toString())) } }
         Stepper("Keep next episodes downloaded:", keepNext, (0..20).toList(), { if (it == 0) "off" else "$it" }) { n ->
             if (keepNext == 0) (ctx as? MainActivity)?.askNotifications()
             keepNext = n
@@ -503,6 +566,14 @@ fun SeriesScreen(modifier: Modifier, screen: Screen.Series, push: (Screen) -> Un
         val listState = rememberLazyListState() // outside Loaded, so the scroll survives its "Loading…" pass
         Loaded(seasons, { refresh++ }, { push(Screen.Downloads) }) { list ->
             if (list.isEmpty()) Empty("This series has no seasons")
+            else if (shownEpisodes != null) LazyColumn(state = listState) {
+                items(shownEpisodes, key = { it.id }) { ep ->
+                    EpisodeRow(ep, statuses?.get(ep.id.toString()),
+                        onPlay = { push(Screen.Play(ep.id.toString())) },
+                        onStartOver = { scope.launch { startOver(ep, push) } },
+                        onChanged = { refresh++ })
+                }
+            }
             else LazyColumn(state = listState) {
                 items(list, key = { it.id }) { season ->
                     Row(Modifier.fillMaxWidth().combinedClickable(onClick = {
@@ -510,6 +581,7 @@ fun SeriesScreen(modifier: Modifier, screen: Screen.Series, push: (Screen) -> Un
                     }).padding(16.dp)) {
                         Text(season.name.orEmpty(), Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
                         val left = season.userData?.unplayedItemCount ?: 0
+                        // From the server, so it lags local plays until the next sync; episode rows show local state.
                         Text(if (left == 0) "✓" else "$left unplayed", Modifier.semantics { if (left == 0) contentDescription = "Played" })
                     }
                     HorizontalDivider()
@@ -525,9 +597,26 @@ fun SeasonScreen(modifier: Modifier, screen: Screen.Season, push: (Screen) -> Un
     val episodes = loadFresh(screen.seasonId, refresh = refresh) { App.server.episodes(screen.seriesId, screen.seasonId) }
     val statuses = rememberDownloadStatuses()
     val listState = rememberLazyListState() // outside Loaded, so the scroll survives its "Loading…" pass when coming back
+    val scope = rememberCoroutineScope()
+    val downloadAll = downloadAllAction { App.server.episodes(screen.seriesId, screen.seasonId, sources = true) }
+    val markAll = markAllAction { refresh++ }
+    val list = episodes.result?.getOrNull()
+    // Within this season only: a season nobody started has no up-next to point at.
+    val next = list?.takeIf { l -> l.any { it.localState().first?.lastPlayedMs != null } }?.let(::upNext)
+    var scrolled by rememberSaveable { mutableStateOf(false) } // once; coming back keeps the scroll
+    LaunchedEffect(next != null) {
+        val i = list.orEmpty().indexOf(next)
+        if (!scrolled && i > 0) { scrolled = true; listState.scrollToItem(i - 1) }
+    }
     Column(modifier.fillMaxSize()) {
         Bar(screen.name, pop) {
-            DownloadAllButton("Download season") { App.server.episodes(screen.seriesId, screen.seasonId, sources = true) }
+            BarMenu { close ->
+                DropdownMenuItem({ Text("Download season") }, { close(); downloadAll() })
+                list?.takeIf { it.isNotEmpty() }?.let { eps ->
+                    val played = eps.all { it.localState().first?.played == true }
+                    DropdownMenuItem({ Text(if (played) "Mark season unplayed" else "Mark season played") }, { close(); markAll(eps) })
+                }
+            }
         }
         Loaded(episodes, { refresh++ }, { push(Screen.Downloads) }) { list ->
             if (list.isEmpty()) Empty("This season has no episodes")
@@ -536,13 +625,26 @@ fun SeasonScreen(modifier: Modifier, screen: Screen.Season, push: (Screen) -> Un
                     EpisodeRow(
                         ep,
                         statuses?.get(ep.id.toString()),
+                        highlighted = ep.id == next?.id,
                         onPlay = { push(Screen.Play(ep.id.toString())) },
-                        onStartOver = { push(Screen.Play(ep.id.toString(), fromStart = true)) },
+                        onStartOver = { scope.launch { startOver(ep, push) } },
                         onChanged = { refresh++ },
                     )
                 }
             }
         }
+    }
+}
+
+/** "Continue S2E5 · Title" with the time left, or "Play" for an episode not started. */
+@Composable
+private fun ContinueButton(ep: BaseItemDto, onClick: () -> Unit) {
+    val position = ep.localState().first?.positionTicks ?: 0
+    val left = ep.runTimeTicks?.takeIf { position > 0 }?.let { (it - position) / TICKS_PER_MS / 60_000 }
+    Button(onClick, Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
+        Icon(Icons.Default.PlayArrow, null)
+        Text((if (position > 0) "Continue " else "Play ") + episodeLabel(ep) + (left?.let { " · ${it.coerceAtLeast(1)} min left" } ?: ""),
+            Modifier.padding(start = 8.dp), maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 
@@ -573,7 +675,7 @@ fun EpisodeRow(
             ProgressBar(ep, state)
         }
         Column(Modifier.weight(1f)) {
-            Text("${ep.indexNumber ?: ""}. ${ep.name.orEmpty()}", style = MaterialTheme.typography.titleSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            Text(listOfNotNull(ep.indexNumber?.let { "$it." }, ep.name).joinToString(" "), style = MaterialTheme.typography.titleSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
             val bits = listOfNotNull(
                 ep.runTimeTicks?.let { formatMs(it / TICKS_PER_MS) },
                 "✓ played".takeIf { state?.played == true },
@@ -609,7 +711,7 @@ private fun ItemMenu(item: BaseItemDto, played: Boolean, unsynced: Boolean, expa
         onStartOver?.let { DropdownMenuItem({ Text("Start over") }, { onDismiss(); it() }) }
         DropdownMenuItem({ Text(if (played) "Mark unplayed" else "Mark played") }, {
             onDismiss()
-            scope.launch { App.server.setPlayed(id, !played); onChanged() }
+            scope.launch { App.server.setPlayed(listOf(id), !played); onChanged() }
         })
         if (downloaded) DropdownMenuItem({ Text("Delete download") }, { onDismiss(); confirm = true })
         else DropdownMenuItem({ Text("Download") }, {
@@ -655,30 +757,38 @@ fun DownloadsScreen(modifier: Modifier, push: (Screen) -> Unit, pop: () -> Unit)
         Text(storage, Modifier.padding(horizontal = 16.dp))
         if (Media.storageMissing) Text("SD card not available. Downloads wait for it; restart the app after inserting it.",
             Modifier.padding(horizontal = 16.dp), color = MaterialTheme.colorScheme.error)
-        if (statuses != null && downloads.isEmpty()) Empty("Nothing downloaded. Use ⋮ on an episode, long-press a movie, or Download all on a series.")
+        if (statuses != null && downloads.isEmpty()) Empty("Nothing downloaded. Use ⋮ on an episode or a series, or long-press a movie.")
         else LazyColumn {
             var lastGroup: String? = null
             for ((group, title, status) in downloads) {
                 if (group != lastGroup) {
                     lastGroup = group
-                    item(key = group) { Text(title, style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(16.dp, 12.dp, 16.dp, 4.dp)) }
+                    val seriesId = status.download.item.seriesId?.takeIf { status.fill == Media.Fill.DONE }
+                    item(key = group) {
+                        Text(title, style = MaterialTheme.typography.titleMedium, modifier = Modifier.fillMaxWidth()
+                            .then(if (seriesId != null) Modifier.clickable { push(Screen.Series(seriesId.toString(), title)) } else Modifier)
+                            .padding(16.dp, 12.dp, 16.dp, 4.dp))
+                    }
                 }
                 val d = status.download
                 item(key = d.item.id) {
                     val id = d.item.id.toString()
+                    val (state, unsynced) = d.item.localState()
                     Row(Modifier.fillMaxWidth().combinedClickable(onClick = { push(Screen.Play(id)) }).padding(horizontal = 16.dp, vertical = 8.dp),
                         verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
                             Text(itemLabel(d.item))
                             val size = status.bytes.takeIf { it > 0 }?.let { " · ${formatBytes(it)}" } ?: ""
-                            Text(status.label + size + if (d.auto) " · kept by keep-next" else "", style = MaterialTheme.typography.labelSmall)
+                            Text(listOfNotNull(status.label + size, "kept by keep-next".takeIf { d.auto }, "✓ played".takeIf { state?.played == true },
+                                "not synced".takeIf { unsynced }).joinToString(" · "), style = MaterialTheme.typography.labelSmall)
                             if (status.fill != Media.Fill.DONE) LinearProgressIndicator({ status.percent / 100f }, Modifier.fillMaxWidth().padding(top = 4.dp))
+                            else ProgressBar(d.item, state)
                         }
                         when (status.fill) {
                             Media.Fill.RUNNING, Media.Fill.QUEUED -> TextButton(onClick = { scope.launch(Dispatchers.IO) { Media.pauseDownload(id) } }) { Text("Pause") }
                             Media.Fill.PAUSED -> TextButton(onClick = {
                                 scope.launch(Dispatchers.IO) { Media.startDownload(runCatching { App.server.item(id) }.getOrDefault(d.item), d.auto) }
-                            }) { Text("Resume") }
+                            }) { Text(if (d.failed) "Retry" else "Resume") }
                             Media.Fill.DONE -> {}
                         }
                         TextButton(onClick = { deleting = d.item }) { Text("Delete") }
@@ -766,7 +876,7 @@ private fun Stepper(label: String, value: Int, options: List<Int>, show: (Int) -
     Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
         val i = options.indices.minBy { abs(options[it] - value) }
         Text(label, Modifier.weight(1f))
-        TextButton(onClick = { set(options[i - 1]) }, enabled = i > 0) { Text("−", Modifier.semantics { contentDescription = "Decrease" }) }
+        TextButton(onClick = { set(options[i - 1]) }, enabled = i > 0) { Text("−", Modifier.semantics { contentDescription = "Decrease $label, now ${show(options[i])}" }) }
         Text(show(options[i]))
-        TextButton(onClick = { set(options[i + 1]) }, enabled = i < options.lastIndex) { Text("+", Modifier.semantics { contentDescription = "Increase" }) }
+        TextButton(onClick = { set(options[i + 1]) }, enabled = i < options.lastIndex) { Text("+", Modifier.semantics { contentDescription = "Increase $label, now ${show(options[i])}" }) }
     }

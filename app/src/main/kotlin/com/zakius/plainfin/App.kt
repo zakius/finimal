@@ -44,7 +44,24 @@ class App : Application(), SingletonImageLoader.Factory {
 
         val prefs by lazy { Prefs(instance.getSharedPreferences("plainfin", Context.MODE_PRIVATE)) }
         val server by lazy { Server(instance) }
-        val pending by lazy { PendingStore(File(instance.filesDir, "pending.json")) }
+        /**
+         * Unsynced play states of the logged-in account. Each server and user has its own file, so
+         * progress kept over a logout waits for that account and never reaches another.
+         */
+        val pending: PendingStore get() = synchronized(this) {
+            val account = prefs.baseUrl to prefs.userId
+            pendingStore?.takeIf { pendingAccount == account } ?: run {
+                val name = java.security.MessageDigest.getInstance("SHA-1").digest("${account.first}\u0000${account.second}".toByteArray())
+                    .take(8).joinToString("") { "%02x".format(it) }
+                val file = File(instance.filesDir, "pending-$name.json")
+                // From before per-account files: it belongs to whoever logs in next, as it always did.
+                val legacy = File(instance.filesDir, "pending.json")
+                if (account.second != null && legacy.exists() && !file.exists()) legacy.renameTo(file)
+                PendingStore(file).also { pendingStore = it; pendingAccount = account }
+            }
+        }
+        private var pendingStore: PendingStore? = null
+        private var pendingAccount: Pair<String?, String?>? = null
 
         /**
          * IO one task at a time, in the order submitted. Play-state records and [Server.flush]'s read
@@ -61,6 +78,11 @@ class Prefs(private val p: SharedPreferences) {
     var baseUrl by string("baseUrl")
     var token by string("token")
     var userId by string("userId")
+    /** Server clock minus device clock, from the last response; see [Server.now]. */
+    var clockOffsetMs by long("clockOffsetMs")
+
+    /** In one write, so a kill in between can't leave a token without its user. */
+    fun login(url: String, token: String?, user: String) = p.edit { putString("baseUrl", url); putString("token", token); putString("userId", user) }
 
     var bufferOnMetered by bool("bufferOnMetered", false)
     var downloadOnMetered by bool("downloadOnMetered", false)
@@ -107,6 +129,12 @@ class Prefs(private val p: SharedPreferences) {
         override fun getValue(thisRef: Any, property: kotlin.reflect.KProperty<*>) = p.getBoolean(key, default)
         override fun setValue(thisRef: Any, property: kotlin.reflect.KProperty<*>, value: Boolean) =
             p.edit { putBoolean(key, value) }
+    }
+
+    private fun long(key: String) = object : kotlin.properties.ReadWriteProperty<Any, Long> {
+        override fun getValue(thisRef: Any, property: kotlin.reflect.KProperty<*>) = p.getLong(key, 0)
+        override fun setValue(thisRef: Any, property: kotlin.reflect.KProperty<*>, value: Long) =
+            p.edit { putLong(key, value) }
     }
 
     private fun int(key: String, default: Int) = object : kotlin.properties.ReadWriteProperty<Any, Int> {
