@@ -92,6 +92,12 @@ class CoreTest {
         assertEquals(listOf("2"), keepNextDeletions(setOf("2", "3", "4"), eps, window))
     }
 
+    @Test fun reconnectBacksOffThenGivesUp() {
+        assertEquals(listOf(1_000L, 2_000L, 4_000L, 8_000L, 10_000L, 10_000L), (0..5).map { reconnectDelayMs(it, 0, 1_000) })
+        assertEquals(10_000L, reconnectDelayMs(40, 0, 59_999))
+        assertNull(reconnectDelayMs(3, 0, RECONNECT_WINDOW_MS))
+    }
+
     @Test fun evictsOldestUnpinnedUntilUnderLimit() {
         val entries = listOf(
             CacheEntry("pinned", 50, 0, true),

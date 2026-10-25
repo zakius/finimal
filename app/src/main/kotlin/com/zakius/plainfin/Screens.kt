@@ -1,5 +1,9 @@
 package com.zakius.plainfin
 
+import plainfin.core.writeAtomically
+import kotlinx.serialization.json.Json
+import java.security.MessageDigest
+import java.io.File
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.runtime.rememberUpdatedState
@@ -99,33 +103,63 @@ import plainfin.core.PlayState
 import plainfin.core.TICKS_PER_MS
 import kotlin.math.abs
 
-/** Last good result per list and user, so a list you come back to shows at once while it reloads. Main thread only. */
-private val lastGood = object : LinkedHashMap<List<Any?>, Result<*>>(16, 0.75f, true) {
+/** Last good list per server, user and list, so a list you come back to shows at once while it reloads. Main thread only. */
+private val lastGood = object : LinkedHashMap<List<Any?>, List<BaseItemDto>>(16, 0.75f, true) {
     // Every search query and sort is its own entry; keep the recent ones.
-    override fun removeEldestEntry(eldest: MutableMap.MutableEntry<List<Any?>, Result<*>>) = size > 20
+    override fun removeEldestEntry(eldest: MutableMap.MutableEntry<List<Any?>, List<BaseItemDto>>) = size > 20
 }
 
 /**
+ * The same lists on disk, so a cold start shows the last list at once instead of "Loading…".
+ * Display only: play state is drawn from pending local state over it, and a fresh fetch replaces it.
+ */
+object ListSnapshots {
+    private val json = Json { ignoreUnknownKeys = true }
+    private val dir get() = File(App.instance.cacheDir, "lists")
+    private fun file(key: List<Any?>) = File(dir, MessageDigest.getInstance("SHA-1").digest(key.joinToString("\u0000").toByteArray())
+        .joinToString("") { "%02x".format(it) } + ".json")
+
+    fun read(key: List<Any?>): List<BaseItemDto>? = runCatching { json.decodeFromString<List<BaseItemDto>>(file(key).readText()) }.getOrNull()
+    fun write(key: List<Any?>, list: List<BaseItemDto>) { runCatching { dir.mkdirs(); file(key).writeAtomically(json.encodeToString(list)) } }
+    fun clear() { dir.deleteRecursively() }
+}
+
+/** A list, and why the refresh behind it failed when it is an older copy. */
+class Load(val result: Result<List<BaseItemDto>>?, val refreshError: Throwable?)
+
+/**
  * Loads [block] after pushing unsynced progress, so the list never shows state older than this device's.
- * A failed [refresh] of the same [keys] keeps the list it had, with local changes marked "not synced".
- * Until the load ends, the list from the last visit shows; unsynced local state is drawn over it.
+ * Until the load ends, the list from the last visit shows (from memory, else from disk when [persist]);
+ * unsynced local state is drawn over it. A failed load keeps that list and says why above it.
  */
 @Composable
-private fun <T> loadFresh(vararg keys: Any?, refresh: Int, block: suspend () -> T): Result<T>? {
+private fun loadFresh(vararg keys: Any?, refresh: Int, persist: Boolean = true, block: suspend () -> List<BaseItemDto>): Load {
     val k = keys.toList()
-    val cacheKey = listOf(App.prefs.userId) + k
-    @Suppress("UNCHECKED_CAST")
-    var last by remember { mutableStateOf(lastGood[cacheKey]?.let { k to (it as Result<T>) }) }
+    val cacheKey = listOf(App.prefs.baseUrl, App.prefs.userId) + k
+    var last by remember { mutableStateOf(lastGood[cacheKey]?.let { k to Result.success(it) }) }
+    var refreshError by remember { mutableStateOf<Throwable?>(null) }
     LaunchedEffect(k, refresh) {
+        refreshError = null
         if (last?.second?.isFailure == true) last = null // a retry shows "Loading…" again
+        if (last?.first != k) (lastGood[cacheKey] ?: if (persist) withContext(Dispatchers.IO) { ListSnapshots.read(cacheKey) } else null)
+            ?.let { last = k to Result.success(it) }
         val pushed = App.server.flush()
         // An unreachable server would only time out a second time on the fetch.
         val result = if (pushed != null && unreachable(pushed)) Result.failure(pushed) else runCatching { block() }
             .onFailure { if (it is InvalidStatusException && it.status == 401) App.server.expire() }
-        if (result.isSuccess) lastGood[cacheKey] = result
-        if (result.isSuccess || last?.first != k) last = k to result
+        val shown = last
+        when {
+            result.isSuccess -> {
+                val list = result.getOrThrow()
+                lastGood[cacheKey] = list
+                if (persist) launch(Dispatchers.IO) { ListSnapshots.write(cacheKey, list) }
+                last = k to result
+            }
+            shown != null && shown.first == k && shown.second.isSuccess -> refreshError = result.exceptionOrNull()
+            else -> last = k to result
+        }
     }
-    return last?.second
+    return Load(last?.second, refreshError)
 }
 
 /**
@@ -256,7 +290,8 @@ private fun RetryOnNewNetwork(onRetry: () -> Unit) {
 }
 
 @Composable
-private fun <T> Loaded(result: Result<T>?, onRetry: () -> Unit, onDownloads: () -> Unit, content: @Composable (T) -> Unit) {
+private fun Loaded(load: Load, onRetry: () -> Unit, onDownloads: () -> Unit, content: @Composable (List<BaseItemDto>) -> Unit) {
+    val result = load.result
     when {
         result == null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("Loading…") }
         result.isFailure -> Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
@@ -268,7 +303,17 @@ private fun <T> Loaded(result: Result<T>?, onRetry: () -> Unit, onDownloads: () 
                 TextButton(onClick = onDownloads) { Text("Downloads") }
             }
         }
-        else -> content(result.getOrThrow())
+        else -> Column(Modifier.fillMaxSize()) {
+            load.refreshError?.let { e ->
+                if (unreachable(e)) RetryOnNewNetwork(onRetry)
+                Row(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceVariant).padding(start = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    Text("${loadError(e)}. Showing the last list.", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+                    TextButton(onClick = onRetry) { Text("Retry") }
+                }
+            }
+            content(result.getOrThrow())
+        }
     }
 }
 
@@ -359,8 +404,8 @@ fun LibraryScreen(modifier: Modifier, screen: Screen.Library, push: (Screen) -> 
     val keyboard = LocalSoftwareKeyboardController.current
     var focusedOnce by rememberSaveable { mutableStateOf(false) } // not again when coming back
     LaunchedEffect(Unit) { if (searchOnly && !focusedOnce) { focusedOnce = true; focus.requestFocus(); keyboard?.show() } }
-    val items = if (searchOnly && query.isBlank()) Result.success(emptyList())
-        else loadFresh(screen.id, sort, unplayed, query, refresh = refresh) { App.server.items(screen.id, sort, unplayed, query) }
+    val items = if (searchOnly && query.isBlank()) Load(Result.success(emptyList()), null)
+        else loadFresh(screen.id, sort, unplayed, query, refresh = refresh, persist = query.isBlank()) { App.server.items(screen.id, sort, unplayed, query) }
     Column(modifier.fillMaxSize()) {
         Bar(screen.name, pop)
         OutlinedTextField(search, { search = it }, label = { Text("Search") }, singleLine = true,

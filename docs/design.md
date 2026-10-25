@@ -51,6 +51,7 @@ Libraries → poster grid → series → seasons → episodes.
 - A white spinner shows while the item loads and while the player buffers. It does not block taps or gestures.
 - An item that fails to load and is not downloaded says why like a list does, with Retry and Back.
 - A finished download waits at most 2 s for the server before it plays offline.
+- A lost connection doesn't stop playback at once: it plays out the buffer, then shows "Reconnecting…" over the last frame and reloads the item at the same position, on a backoff (1, 2, 4, 8, then every 10 s) and at once when a network comes up. Server errors (5xx) count; 4xx do not. After 60 s it gives up and shows the error.
 - A playback error shows a short sentence for common causes (network, timeout, HTTP status, missing file, unsupported format) and a Retry button. Other errors show a generic sentence with the Media3 error code in small text.
 - Wireless audio delay (−200 to 500 ms, also in Settings) holds video back to match Bluetooth headphones and speakers. It applies only while a wireless output is connected, so the speaker and wired outputs stay in sync. It works by reporting the audio clock that much behind, which the video follows.
 - Theme follows the system and uses Material You colors.
@@ -81,7 +82,7 @@ There is one persistent on-disk cache. The key is the item ID plus the media sou
   - Changing N runs the check at once. Turning it off deletes its played and unfinished downloads; its finished, unplayed ones stay as regular downloads.
 - Deleting a download asks first, naming the item. A dialog, not undo: the bytes go at once.
 - "Download all" (series) and "Download season" say how many episodes are new, and their total size when the server lists every file's size, before queuing. With nothing new, a toast says so; when the items can't be fetched, it says why instead.
-- One Downloads screen shows the queue, pause/resume, delete and storage use. It is also the offline screen: when the server cannot be reached, only downloads are browsable.
+- One Downloads screen shows the queue, pause/resume, delete and storage use. It is also the offline screen: when the server cannot be reached, downloads play and every other list shows its last saved copy, if any; a non-downloaded item then fails to open with the usual error.
   - Unfinished downloads come first, in the order they will download; finished ones follow, grouped by series.
   - A queued item shows its place in the queue ("queued #2"). When the current network blocks the queue (none, or metered with "download on metered" off), it says so instead. The toast after queuing does the same.
   - Storage use: total downloads, buffer cache against its limit, and free space on the download volume.
@@ -102,7 +103,7 @@ Rules:
 3. With no connection, append events to a local queue. Replay them through `POST /UserItems/{id}/UserData` with PlaybackPositionTicks, Played and LastPlayedDate. Server state for every pending item comes from one list request. One failing item does not hold up the rest; an item the server no longer has (HTTP 404) is dropped from the queue. An unreachable server stops the replay at once instead of timing out once per item.
 4. Conflicts: the newer LastPlayedDate wins.
 5. Offline plays use the server's default limits: under 5 % stores position 0, over 90 % marks played and stores 0.
-6. Opening a list first pushes pending events, then fetches. If the push or fetch fails, show local state marked "not synced". A list visited before in this process shows its last result while this runs.
+6. Opening a list first pushes pending events, then fetches. If the push or fetch fails, show local state marked "not synced". A list visited before shows its last result while this runs: from memory, or after a restart from a copy on disk (search results excepted; logging out deletes them). If the fetch fails, that copy stays up under a line saying why, with Retry. The copy is display only: it never feeds sync or keep-next.
 7. Read play state only from list endpoints (`/Items?ids=`). On server 12.3.0, `/Items/{id}` and `/UserItems/{id}/UserData` kept returning a state from before a media file was replaced and rescanned, while list endpoints and the database were correct. A restart cleared it.
 8. The SDK's `LocalDateTime` is in the device's zone, not UTC.
 9. Every local play-state change is also written into the download's stored item, and housekeeping refreshes downloaded items from the server, so offline playback resumes from the latest position.

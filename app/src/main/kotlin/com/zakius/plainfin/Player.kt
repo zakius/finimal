@@ -2,6 +2,11 @@
 
 package com.zakius.plainfin
 
+import plainfin.core.reconnectDelayMs
+import android.os.Looper
+import android.os.Handler
+import android.net.Network
+import android.net.ConnectivityManager
 import android.app.Activity
 import android.content.Context
 import android.content.pm.ActivityInfo
@@ -217,6 +222,9 @@ private fun Playback(
     var transcoding by remember { mutableStateOf(false) }
     var transcodeFromMs by remember { mutableLongStateOf(0L) }
     var playerError by remember { mutableStateOf<PlaybackException?>(null) }
+    // Set while a network failure is being retried; see reconnectDelayMs.
+    var failedSince by remember { mutableStateOf<Long?>(null) }
+    var attempt by remember { mutableIntStateOf(0) }
     var ended by remember { mutableStateOf(false) }
     var segments by remember { mutableStateOf<List<MediaSegmentDto>>(emptyList()) }
     val scope = rememberCoroutineScope()
@@ -225,6 +233,7 @@ private fun Playback(
         PlayerView(context).apply {
             useController = false
             setShutterBackgroundColor(android.graphics.Color.BLACK)
+            setKeepContentOnPlayerReset(true) // a reconnect reloads the item; the last frame stays up meanwhile
             subtitleView?.setFractionalTextSize(SubtitleView.DEFAULT_TEXT_SIZE_FRACTION * prefs.subtitleScale / 100f)
             // Text subtitles: white with a black outline, no box. Embedded styles (italics, cue colours) stay on.
             subtitleView?.setStyle(CaptionStyleCompat(
@@ -293,6 +302,7 @@ private fun Playback(
             }
 
             override fun onPlaybackStateChanged(state: Int) {
+                if (state == Player.STATE_READY) { failedSince = null; attempt = 0 }
                 if (state == Player.STATE_READY && !transcoding) {
                     val fraction = player.currentPosition.toDouble() / player.duration.coerceAtLeast(1)
                     // On App.buffers, so a start never lands after the stop on leaving.
@@ -311,6 +321,19 @@ private fun Playback(
             }
 
             override fun onPlayerError(error: PlaybackException) {
+                // Media3 reports a network failure only once the buffer is spent. Keep trying, from the same position, for a while.
+                if (isNetworkFailure(error)) {
+                    val now = System.currentTimeMillis()
+                    val since = failedSince ?: now
+                    val wait = reconnectDelayMs(attempt, since, now)
+                    if (wait != null) {
+                        failedSince = since
+                        scope.launch { delay(wait); attempt++; if (player.playbackState == Player.STATE_IDLE) player.reload() }
+                        return
+                    }
+                }
+                failedSince = null
+                attempt = 0
                 val decodeProblem = error.errorCode in listOf(
                     PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED,
                     PlaybackException.ERROR_CODE_DECODING_FORMAT_EXCEEDS_CAPABILITIES,
@@ -335,6 +358,18 @@ private fun Playback(
             Media.playing = null
             player.release()
         }
+    }
+
+    // A network coming back retries at once rather than at the next backoff step.
+    DisposableEffect(player, failedSince != null) {
+        if (failedSince == null) return@DisposableEffect onDispose {}
+        val cm = context.getSystemService(ConnectivityManager::class.java)
+        val main = Handler(Looper.getMainLooper())
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) { main.post { if (player.playbackState == Player.STATE_IDLE) player.reload() } }
+        }
+        cm.registerDefaultNetworkCallback(callback)
+        onDispose { cm.unregisterNetworkCallback(callback) }
     }
 
     LaunchedEffect(player) {
@@ -375,11 +410,11 @@ private fun Playback(
 
     val video = @Composable { mod: Modifier ->
         VideoSurface(
-            mod, player, playerView, fullscreen, transcoding, Media.key(item).takeUnless { transcoding }, segments, ended, next, playerError,
+            mod, player, playerView, fullscreen, transcoding, Media.key(item).takeUnless { transcoding }, segments, ended, next, playerError, failedSince != null,
             onToggleFullscreen = { setFullscreen(!fullscreen) },
             onBack = onBack,
             onPlay = onPlay,
-            onRetry = { playerError = null; player.prepare() },
+            onRetry = { playerError = null; player.reload() },
             rotationLocked = rotationLocked,
             onRotationLock = {
                 rotationLocked = !rotationLocked
@@ -457,6 +492,7 @@ private fun VideoSurface(
     ended: Boolean,
     next: BaseItemDto?,
     playerError: PlaybackException?,
+    reconnecting: Boolean,
     onToggleFullscreen: () -> Unit,
     onBack: () -> Unit,
     onPlay: (String) -> Unit,
@@ -616,6 +652,8 @@ private fun VideoSurface(
             modifier = Modifier.align(Alignment.TopCenter).padding(top = 24.dp).background(Color(0x99000000), MaterialTheme.shapes.small).padding(horizontal = 12.dp, vertical = 6.dp))
 
         if (waiting && playerError == null && !ended) CircularProgressIndicator(Modifier.align(Alignment.Center), color = Color.White)
+        if (reconnecting && playerError == null) Text("Reconnecting…", color = Color.White, style = MaterialTheme.typography.labelLarge,
+            modifier = Modifier.align(Alignment.Center).padding(top = 72.dp).background(Color(0x99000000), MaterialTheme.shapes.small).padding(horizontal = 8.dp, vertical = 4.dp))
 
         // Offered, never done on its own. Credits offer the next episode in season order when there is one.
         val skip: Skip? = segment?.takeIf { !ended }?.let { (type, range) ->
@@ -791,6 +829,16 @@ private class Skip(val label: String, val onClick: () -> Unit)
 private fun Choice(label: String, selected: Boolean, onClick: () -> Unit) =
     DropdownMenuItem({ Text(label) }, onClick, trailingIcon = { if (selected) Icon(Icons.Default.Check, null) })
 
+/**
+ * Starts the current item again from where it stopped. A bare prepare() after a failed load resumes
+ * the old extractor mid-file, and the Matroska one then fails on a sample with no format.
+ */
+private fun ExoPlayer.reload() {
+    val item = currentMediaItem ?: return prepare()
+    setMediaItem(item, currentPosition)
+    prepare()
+}
+
 /** For coarse seeks (slider, swipe): exact seeks decode from the keyframe before, seconds on long-GOP files. Skips stay exact. */
 private fun ExoPlayer.seekToNearestKeyframe(ms: Long) {
     setSeekParameters(SeekParameters.CLOSEST_SYNC)
@@ -806,8 +854,21 @@ private fun selectedLanguage(player: ExoPlayer, type: Int): String? {
 }
 
 /** A plain sentence for common playback failures; null for the rest. */
+/** No answer, or a server-side error: worth retrying. A 4xx would fail the same way every time. */
+private fun isNetworkFailure(e: PlaybackException): Boolean {
+    val http = generateSequence(e.cause) { it.cause }.filterIsInstance<HttpDataSource.HttpDataSourceException>().firstOrNull()
+    return when {
+        http is HttpDataSource.InvalidResponseCodeException -> http.responseCode >= 500
+        // OkHttp's connect failures arrive wrapped, which Media3 files as IO_UNSPECIFIED: the transport error is the signal.
+        http != null -> true
+        else -> e.errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED ||
+            e.errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT || e.errorCode == PlaybackException.ERROR_CODE_TIMEOUT
+    }
+}
+
 private fun playbackError(e: PlaybackException) = when (e.errorCode) {
     PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED -> "Can't reach the server."
+    PlaybackException.ERROR_CODE_IO_UNSPECIFIED -> "Can't reach the server.".takeIf { isNetworkFailure(e) }
     PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT, PlaybackException.ERROR_CODE_TIMEOUT -> "The server took too long to respond."
     PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS ->
         "The server returned an error" + ((e.cause as? HttpDataSource.InvalidResponseCodeException)?.let { " (${it.responseCode})." } ?: ".")

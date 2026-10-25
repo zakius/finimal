@@ -103,6 +103,7 @@ class Server(context: Context) {
     }
 
     fun logout() {
+        ListSnapshots.clear() // another account's lists must not show, even briefly
         prefs.logout()
         api.update(accessToken = null)
     }
