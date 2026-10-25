@@ -540,9 +540,9 @@ private fun Poster(
             AsyncImage(App.server.imageUrl(item), null, contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxWidth().aspectRatio(2f / 3).background(Color.DarkGray))
             download?.let {
-                Text(if (it.fill == Media.Fill.DONE) "↓" else it.shortProgress, color = Color.White,
+                Text(if (it.fill == Media.Fill.DONE) "↓" else "${it.percent}%", color = Color.White,
                     modifier = Modifier.align(Alignment.TopStart).background(Color(0xAA000000)).padding(horizontal = 6.dp)
-                        .semantics { contentDescription = if (it.fill == Media.Fill.DONE) "Downloaded" else "Downloaded ${it.shortProgress}" })
+                        .semantics { contentDescription = if (it.fill == Media.Fill.DONE) "Downloaded" else "Downloaded ${it.percent}%" })
             }
             val badge = when {
                 state?.played == true -> "✓"
@@ -816,8 +816,7 @@ fun DownloadsScreen(modifier: Modifier, push: (Screen) -> Unit, pop: () -> Unit)
                             val size = status.bytes.takeIf { it > 0 }?.let { " · ${formatBytes(it)}" } ?: ""
                             Text(listOfNotNull(status.label + size, "kept by keep-next".takeIf { d.auto }, "✓ played".takeIf { state?.played == true },
                                 "not synced".takeIf { unsynced }).joinToString(" · "), style = MaterialTheme.typography.labelSmall)
-                            if (status.percent < 0) LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 4.dp))
-                            else if (status.fill != Media.Fill.DONE) LinearProgressIndicator({ status.percent / 100f }, Modifier.fillMaxWidth().padding(top = 4.dp))
+                            if (status.fill != Media.Fill.DONE) LinearProgressIndicator({ status.percent / 100f }, Modifier.fillMaxWidth().padding(top = 4.dp))
                             else ProgressBar(d.item, state)
                         }
                         when (status.fill) {

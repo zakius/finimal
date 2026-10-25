@@ -188,7 +188,7 @@ fun PlayerScreen(itemId: String, onBack: () -> Unit, onPlay: (String) -> Unit) {
         val server = App.server
         val download = withContext(Dispatchers.IO) { Media.download(itemId) }
         val downloaded = download?.item
-        val complete = download != null && withContext(Dispatchers.IO) { Media.isComplete(Media.downloadKey(download)) }
+        val complete = download != null && withContext(Dispatchers.IO) { Media.isDone(download) }
         // Outside this screen's scope, so giving up on a slow server below doesn't cut a flush short.
         val process = ProcessLifecycleOwner.get().lifecycleScope
         val fetch = process.async { runCatching {
@@ -262,11 +262,11 @@ private fun Playback(
 
     val videoStream = remember(source) { videoInfo(source) }
     val download = remember(id) { Media.download(id) }
-    // A finished transcoded download plays from disk; one still under way is no use yet.
-    val localTranscode = remember(download) { download?.takeIf { it.transcoded && Media.isComplete(Media.downloadKey(it)) } }
-    val cacheKey = localTranscode?.let(Media::downloadKey) ?: Media.key(item)
+    // A finished transcoded download plays from its local playlist; one still under way is no use yet.
+    val localPlaylist = remember(download) { download?.let(Media::playlist) }
+    val cacheKey = Media.key(item)
     // A file the device can't decode starts as a transcode. Downloads play as they are; a failure still switches.
-    var transcoding by remember { mutableStateOf(online && localTranscode == null && download?.transcoded != false && !playsDirectly(item)) }
+    var transcoding by remember { mutableStateOf(online && localPlaylist == null && download?.transcoded != false && !playsDirectly(item)) }
     var transcodeFromMs by remember { mutableLongStateOf(0L) }
     var playerError by remember { mutableStateOf<PlaybackException?>(null) }
     // Set while a network failure is being retried; see reconnectDelayMs.
@@ -309,10 +309,11 @@ private fun Playback(
         val subs = withTimeoutOrNull(3_000) { fetch.await() } ?: emptyMap()
         val streams = externalSubs(item).associateBy { it.index }
         val audioIndex = prefs.audioLang(seriesKey)?.let { audioIndex(source, it) }
-        val url = if (transcoding) App.server.transcodeUrl(id, sourceId, audioIndex, playSession) else App.server.streamUrl(id, sourceId)
+        val url = if (transcoding) App.server.transcodeUrl(id, sourceId, audioIndex, playSession)
+            else localPlaylist?.let { Uri.fromFile(it).toString() } ?: App.server.streamUrl(id, sourceId)
         val mediaItem = MediaItem.Builder()
             .setUri(url)
-            .setCustomCacheKey(cacheKey)
+            .setCustomCacheKey(cacheKey.takeIf { localPlaylist == null })
             .setSubtitleConfigurations(subs.mapNotNull { (index, file) ->
                 val stream = streams[index] ?: return@mapNotNull null
                 val mime = when (file.extension) {
@@ -501,7 +502,7 @@ private fun Playback(
 
     val video = @Composable { mod: Modifier ->
         VideoSurface(
-            mod, player, playerView, fullscreen, transcoding, cacheKey.takeUnless { transcoding }, segments, ended, next, playerError, failedSince != null,
+            mod, player, playerView, fullscreen, transcoding, cacheKey.takeUnless { transcoding || localPlaylist != null }, segments, ended, next, playerError, failedSince != null,
             title = if (item.type == BaseItemKind.EPISODE) "${item.seriesName.orEmpty()} · ${episodeLabel(item)}" else item.name.orEmpty(),
             resumedAt = resumedAt,
             onResumeNoteGone = { resumedAt = null },
