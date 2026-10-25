@@ -139,6 +139,19 @@ class Prefs(private val p: SharedPreferences) {
     /** 0 picks by device ([App.autoTv]), 1 touch, 2 TV. */
     var interfaceMode by int("interfaceMode", 0)
 
+    /** Direct play limits; see [finimal.core.playsDirectly]. 0 is Auto. */
+    var maxHeight by int("maxHeight", 0)
+    /** Index into [finimal.core.DirectPlayLimits.Codecs]. */
+    var codecs by int("codecs", 0)
+
+    /** Lowest decoder load, in pixels a second, at which the user chose a transcode for choppy [codec] playback. */
+    fun learnedPixelRate(codec: String): Long? = p.getLong("learnedRate.$codec", 0).takeIf { it > 0 }
+    fun learnChoppy(codec: String, pixelRate: Long) {
+        if (pixelRate < (learnedPixelRate(codec) ?: Long.MAX_VALUE)) p.edit { putLong("learnedRate.$codec", pixelRate) }
+    }
+    fun learnedCodecs() = p.all.keys.filter { it.startsWith("learnedRate.") }.map { it.removePrefix("learnedRate.") }
+    fun forgetLearned() = p.edit { learnedCodecs().forEach { remove("learnedRate.$it") } }
+
     /** 0 means "keep next N" is off for the series. */
     fun keepNext(seriesId: String) = p.getInt("keepNext.$seriesId", 0)
     fun setKeepNext(seriesId: String, n: Int) = p.edit { putInt("keepNext.$seriesId", n) }

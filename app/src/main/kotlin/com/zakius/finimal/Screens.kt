@@ -540,9 +540,9 @@ private fun Poster(
             AsyncImage(App.server.imageUrl(item), null, contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxWidth().aspectRatio(2f / 3).background(Color.DarkGray))
             download?.let {
-                Text(if (it.fill == Media.Fill.DONE) "↓" else "${it.percent}%", color = Color.White,
+                Text(if (it.fill == Media.Fill.DONE) "↓" else it.shortProgress, color = Color.White,
                     modifier = Modifier.align(Alignment.TopStart).background(Color(0xAA000000)).padding(horizontal = 6.dp)
-                        .semantics { contentDescription = if (it.fill == Media.Fill.DONE) "Downloaded" else "Downloaded ${it.percent}%" })
+                        .semantics { contentDescription = if (it.fill == Media.Fill.DONE) "Downloaded" else "Downloaded ${it.shortProgress}" })
             }
             val badge = when {
                 state?.played == true -> "✓"
@@ -816,7 +816,8 @@ fun DownloadsScreen(modifier: Modifier, push: (Screen) -> Unit, pop: () -> Unit)
                             val size = status.bytes.takeIf { it > 0 }?.let { " · ${formatBytes(it)}" } ?: ""
                             Text(listOfNotNull(status.label + size, "kept by keep-next".takeIf { d.auto }, "✓ played".takeIf { state?.played == true },
                                 "not synced".takeIf { unsynced }).joinToString(" · "), style = MaterialTheme.typography.labelSmall)
-                            if (status.fill != Media.Fill.DONE) LinearProgressIndicator({ status.percent / 100f }, Modifier.fillMaxWidth().padding(top = 4.dp))
+                            if (status.percent < 0) LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 4.dp))
+                            else if (status.fill != Media.Fill.DONE) LinearProgressIndicator({ status.percent / 100f }, Modifier.fillMaxWidth().padding(top = 4.dp))
                             else ProgressBar(d.item, state)
                         }
                         when (status.fill) {
@@ -885,6 +886,25 @@ fun SettingsScreen(modifier: Modifier, pop: () -> Unit, onLoggedOut: () -> Unit)
                 Text("Playback", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(16.dp))
                 Stepper("Wireless audio delay (ms), for Bluetooth headphones and speakers", p.audioDelayMs, AUDIO_DELAYS_MS) { AudioDelay.set(it); refresh++ }
                 Stepper("Skip step (s)", p.doubleTapSeconds, (5..60 step 5).toList()) { p.doubleTapSeconds = it; refresh++ }
+                // Files past these limits start as a transcode. Auto asks the hardware decoders per file.
+                Text("Hardware decoders: ${remember { HardwareDecoders.summary() }}", Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.labelSmall)
+                Text("Direct play up to", Modifier.padding(16.dp, 8.dp, 16.dp, 0.dp))
+                Row(Modifier.padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf(0 to "Auto", 2160 to "4K", 1080 to "1080p", 720 to "720p").forEach { (h, label) ->
+                        FilterChip(p.maxHeight == h, { p.maxHeight = h; refresh++ }, { Text(label) })
+                    }
+                }
+                Text("Direct play codecs", Modifier.padding(16.dp, 8.dp, 16.dp, 0.dp))
+                Row(Modifier.padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf("Auto", "H.264 only", "All").forEachIndexed { i, label ->
+                        FilterChip(p.codecs == i, { p.codecs = i; refresh++ }, { Text(label) })
+                    }
+                }
+                if (p.learnedCodecs().isNotEmpty()) {
+                    Text("Transcoding sooner for ${p.learnedCodecs().joinToString { it.uppercase() }} after choppy playback",
+                        Modifier.padding(16.dp, 8.dp, 16.dp, 0.dp), style = MaterialTheme.typography.labelSmall)
+                    TextButton(onClick = { p.forgetLearned(); refresh++ }, Modifier.padding(horizontal = 8.dp)) { Text("Forget") }
+                }
 
                 Text("Interface", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(16.dp))
                 Row(Modifier.padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
