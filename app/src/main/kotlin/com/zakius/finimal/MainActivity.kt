@@ -23,6 +23,12 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.material.ripple.RippleAlpha
+import androidx.compose.material3.LocalRippleConfiguration
+import androidx.compose.material3.RippleConfiguration
+import androidx.compose.foundation.layout.padding
+import androidx.compose.ui.unit.dp
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.saveable.listSaver
@@ -91,7 +97,11 @@ private fun Theme(content: @Composable () -> Unit) {
         dark -> darkColorScheme()
         else -> lightColorScheme()
     }
-    MaterialTheme(colorScheme = colors) { Surface(Modifier.fillMaxSize(), content = content) }
+    // Material's focus highlight (10%) can't be seen from a sofa; this is what shows where the D-pad is.
+    val ripple = RippleConfiguration(rippleAlpha = RippleAlpha(draggedAlpha = 0.16f, focusedAlpha = 0.35f, hoveredAlpha = 0.08f, pressedAlpha = 0.1f))
+    MaterialTheme(colorScheme = colors) {
+        CompositionLocalProvider(LocalRippleConfiguration provides ripple) { Surface(Modifier.fillMaxSize(), content = content) }
+    }
 }
 
 @Composable
@@ -118,9 +128,10 @@ private fun Root(openDownloads: Boolean, openedDownloads: () -> Unit) {
     LaunchedEffect(App.sessionExpired) { if (App.sessionExpired) reset(Screen.Login) }
     val top = stack.last()
     val topKey = keyOf(stack.lastIndex)
-    val padded = Modifier.safeDrawingPadding()
+    // TVs may crop the picture's edges (overscan); Android TV's guideline margin keeps the UI inside.
+    val padded = Modifier.safeDrawingPadding().then(if (App.tv) Modifier.padding(horizontal = 48.dp, vertical = 27.dp) else Modifier)
     // key() gives each screen its own state, so the next episode never inherits the previous player.
-    key(topKey) { saved.SaveableStateProvider(topKey) { when (top) {
+    key(topKey) { saved.SaveableStateProvider(topKey) { FocusMemory { when (top) {
         Screen.Login -> LoginScreen(padded) { reset(Screen.Libraries) }
         Screen.Libraries -> LibrariesScreen(padded, ::push)
         Screen.Downloads -> DownloadsScreen(padded, ::push, ::pop)
@@ -130,5 +141,5 @@ private fun Root(openDownloads: Boolean, openedDownloads: () -> Unit) {
         is Screen.Season -> SeasonScreen(padded, top, ::push, ::pop)
         // "Play next" replaces the player instead of stacking players.
         is Screen.Play -> PlayerScreen(top.itemId, ::pop) { next -> pop(); push(Screen.Play(next)) }
-    } } }
+    } } } }
 }

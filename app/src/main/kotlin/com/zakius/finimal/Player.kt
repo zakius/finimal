@@ -83,6 +83,16 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.addPathNodes
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.focusable
+import androidx.compose.ui.composed
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
@@ -643,10 +653,63 @@ private fun VideoSurface(
         player.seekTo(clamp(player.currentPosition + ms))
         overlay = (if (ms > 0) "+" else "−") + "${abs(ms) / 1000}s"
     }
+    fun togglePlay() = if (player.isPlaying) player.pause() else player.play()
+
+    // Offered, never done on its own. Credits offer the next episode in season order when there is one.
+    val skip: Skip? = segment?.takeIf { !ended }?.let { (type, range) ->
+        when (type) {
+            MediaSegmentType.INTRO -> Skip("Skip intro") { player.seekTo(range.last + 1_000) }
+            MediaSegmentType.RECAP -> Skip("Skip recap") { player.seekTo(range.last + 1_000) }
+            MediaSegmentType.OUTRO -> next?.let { n -> Skip("Play next: ${episodeLabel(n)}") { onCreditsNext(n.id.toString()) } }
+            else -> null
+        }
+    }
+
+    // Remote and keyboard. The surface holds focus while no button is shown; buttons that show take it (Modifier.takeFocus).
+    val surfaceFocus = remember { FocusRequester() }
+    val skipShown = skip != null && !controls
+    LaunchedEffect(controls, skipShown, ended, playerError) {
+        if (!controls && !skipShown && !ended && playerError == null) surfaceFocus.requestFocus()
+    }
 
     Box(
         modifier
             .background(Color.Black)
+            .onPreviewKeyEvent { e ->
+                lastInteraction = System.currentTimeMillis() // keys keep the controls up, like taps
+                // On TV, Back hides the controls first. Here, not a BackHandler: the player screen's own one ran first.
+                if (e.key == Key.Back && App.tv && controls) { if (e.type == KeyEventType.KeyUp) controls = false; return@onPreviewKeyEvent true }
+                if (e.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                val step = prefs.doubleTapSeconds * 1000L
+                when (e.key) {
+                    Key.MediaPlayPause -> togglePlay()
+                    Key.MediaPlay -> player.play()
+                    Key.MediaPause -> player.pause()
+                    Key.MediaFastForward -> seekBy(step)
+                    Key.MediaRewind -> seekBy(-step)
+                    Key.MediaNext -> next?.let { onPlay(it.id.toString()) }
+                    else -> return@onPreviewKeyEvent false
+                }
+                true
+            }
+            // Reached only by keys no button took: with the controls up, the arrows move between their buttons instead.
+            .onKeyEvent { e ->
+                if (controls) return@onKeyEvent false
+                val step = prefs.doubleTapSeconds * 1000L
+                when {
+                    e.type == KeyEventType.KeyDown && e.key == Key.DirectionLeft -> seekBy(-step)
+                    e.type == KeyEventType.KeyDown && e.key == Key.DirectionRight -> seekBy(step)
+                    e.type == KeyEventType.KeyDown && (e.key == Key.DirectionUp || e.key == Key.DirectionDown) -> controls = true
+                    // On release: the press that brings the controls up must not also click the button they focus.
+                    e.type == KeyEventType.KeyUp && (e.key == Key.DirectionCenter || e.key == Key.Enter || e.key == Key.NumPadEnter) -> {
+                        togglePlay(); controls = true
+                    }
+                    else -> return@onKeyEvent false
+                }
+                true
+            }
+            .focusRequester(surfaceFocus)
+            .focusable()
             .pointerInput(fullscreen) {
                 detectTapGestures(
                     // Hold for 2x until release; the speed the user chose comes back after.
@@ -756,18 +819,9 @@ private fun VideoSurface(
         if (reconnecting && playerError == null) Text("Reconnecting…", color = Color.White, style = MaterialTheme.typography.labelLarge,
             modifier = Modifier.align(Alignment.Center).padding(top = 72.dp).background(Color(0x99000000), MaterialTheme.shapes.small).padding(horizontal = 8.dp, vertical = 4.dp))
 
-        // Offered, never done on its own. Credits offer the next episode in season order when there is one.
-        val skip: Skip? = segment?.takeIf { !ended }?.let { (type, range) ->
-            when (type) {
-                MediaSegmentType.INTRO -> Skip("Skip intro") { player.seekTo(range.last + 1_000) }
-                MediaSegmentType.RECAP -> Skip("Skip recap") { player.seekTo(range.last + 1_000) }
-                MediaSegmentType.OUTRO -> next?.let { n -> Skip("Play next: ${episodeLabel(n)}") { onCreditsNext(n.id.toString()) } }
-                else -> null
-            }
-        }
         // With controls shown it sits beside the seek bar instead, so the bar and scrim never cover it.
         if (skip != null && !controls) SkipButton(skip,
-            Modifier.align(Alignment.BottomEnd).then(if (fullscreen) Modifier.safeDrawingPadding() else Modifier).padding(24.dp))
+            Modifier.align(Alignment.BottomEnd).then(if (fullscreen) Modifier.safeDrawingPadding() else Modifier).padding(if (App.tv) 48.dp else 24.dp).takeFocus())
 
         // Below the top bar, so it shows with the controls up at the start too.
         val note = Modifier.align(Alignment.TopCenter).then(if (fullscreen) Modifier.safeDrawingPadding() else Modifier).padding(top = 56.dp)
@@ -784,16 +838,16 @@ private fun VideoSurface(
                 val known = playbackError(playerError)
                 ErrorText(known ?: "Playback failed.", playerError.errorCodeName.takeIf { known == null }, Color.White)
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Button(onClick = onRetry) { Text("Retry") }
+                    Button(onClick = onRetry, Modifier.takeFocus()) { Text("Retry") }
                     FilledTonalButton(onClick = onBack) { Text("Back") }
                 }
             }
         } else if (ended) {
             Column(Modifier.align(Alignment.Center).padding(horizontal = 16.dp), Arrangement.spacedBy(8.dp), Alignment.CenterHorizontally) {
-                if (next != null) Button(onClick = { onPlay(next.id.toString()) }) {
+                if (next != null) Button(onClick = { onPlay(next.id.toString()) }, Modifier.takeFocus()) {
                     Text("Play next: ${episodeLabel(next)}", maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
-                FilledTonalButton(onClick = onBack) { Text("Back") }
+                FilledTonalButton(onClick = onBack, if (next == null) Modifier.takeFocus() else Modifier) { Text("Back") }
             }
         } else if (controls) {
             Controls(
@@ -833,7 +887,8 @@ private fun Controls(
     // Auto-hide would close an open menu.
     LaunchedEffect(menu) { while (menu) { onInteraction(); delay(1_000) } }
     // Portrait already sits below the status bar; the rest of the safe area is below the video.
-    Box(Modifier.fillMaxSize().background(Color(0x55000000)).then(if (fullscreen) Modifier.safeDrawingPadding() else Modifier)) {
+    Box(Modifier.fillMaxSize().background(Color(0x55000000)).then(if (fullscreen) Modifier.safeDrawingPadding() else Modifier)
+        .then(if (App.tv) Modifier.padding(horizontal = 48.dp, vertical = 27.dp) else Modifier)) {
         Row(Modifier.align(Alignment.TopStart).fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = Color.White) }
             // Portrait has the title under the video.
@@ -851,7 +906,7 @@ private fun Controls(
                             DropdownMenuItem({ Text("Subtitles") }, { sub = "text" })
                             DropdownMenuItem({ Text("Subtitle size: ${App.prefs.subtitleScale}%") }, { sub = "size" })
                             DropdownMenuItem({ Text("Wireless audio delay: ${App.prefs.audioDelayMs} ms") }, { sub = "delay" })
-                            DropdownMenuItem({ Text(if (rotationLocked) "Unlock rotation" else "Lock rotation") }, { onRotationLock(); menu = false })
+                            if (!App.tv) DropdownMenuItem({ Text(if (rotationLocked) "Unlock rotation" else "Lock rotation") }, { onRotationLock(); menu = false })
                         }
                         "speed" -> listOf(0.5f, 0.75f, 1f, 1.25f, 1.5f, 2f).forEach { s ->
                             Choice(speedLabel(s), player.playbackParameters.speed == s) { sessionSpeed = s; player.setPlaybackSpeed(s); menu = false; sub = null }
@@ -902,7 +957,7 @@ private fun Controls(
                     }
                 }
             }
-            IconButton(onClick = onToggleFullscreen) {
+            if (!App.tv) IconButton(onClick = onToggleFullscreen) {
                 Icon(if (fullscreen) FullscreenExitIcon else FullscreenIcon, if (fullscreen) "Exit fullscreen" else "Fullscreen", tint = Color.White)
             }
         }
@@ -910,7 +965,7 @@ private fun Controls(
         Row(Modifier.align(Alignment.Center), verticalAlignment = Alignment.CenterVertically) {
             val step = App.prefs.doubleTapSeconds
             IconButton(onClick = { onSeek(-step * 1000L); onInteraction() }) { Icon(RewindIcon, "Back $step seconds", tint = Color.White) }
-            IconButton(onClick = { if (playing) player.pause() else player.play(); onInteraction() }, Modifier.padding(horizontal = 16.dp).size(64.dp)) {
+            IconButton(onClick = { if (playing) player.pause() else player.play(); onInteraction() }, Modifier.padding(horizontal = 16.dp).size(64.dp).takeFocus()) {
                 Icon(if (playing) PauseIcon else Icons.Default.PlayArrow, if (playing) "Pause" else "Play", Modifier.size(40.dp), tint = Color.White)
             }
             IconButton(onClick = { onSeek(step * 1000L); onInteraction() }) { Icon(ForwardIcon, "Forward $step seconds", tint = Color.White) }
@@ -925,13 +980,21 @@ private fun Controls(
                     value = shown.toFloat().coerceIn(0f, duration.toFloat().coerceAtLeast(1f)),
                     valueRange = 0f..duration.toFloat().coerceAtLeast(1f),
                     onValueChange = { dragging = it; onInteraction() },
-                    onValueChangeFinished = { player.seekToNearestKeyframe(dragging.toLong()); dragging = -1f },
+                    // D-pad steps can report finished without a change in between.
+                    onValueChangeFinished = { if (dragging >= 0) player.seekToNearestKeyframe(dragging.toLong()); dragging = -1f },
                     modifier = Modifier.weight(1f),
                 )
                 if (skip != null) SkipButton(skip, Modifier.padding(start = 8.dp))
             }
         }
     }
+}
+
+/** Focus for a button as it shows, so the remote's OK presses it. Touch mode ignores it. */
+private fun Modifier.takeFocus(): Modifier = composed {
+    val requester = remember { FocusRequester() }
+    LaunchedEffect(Unit) { requester.requestFocus() }
+    focusRequester(requester)
 }
 
 @Composable

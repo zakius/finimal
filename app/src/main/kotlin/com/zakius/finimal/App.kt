@@ -3,6 +3,8 @@ package com.zakius.finimal
 import android.app.Application
 import android.content.Context
 import android.content.SharedPreferences
+import android.app.UiModeManager
+import android.content.pm.PackageManager
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -68,6 +70,13 @@ class App : Application(), SingletonImageLoader.Factory, Configuration.Provider 
 
         val prefs by lazy { Prefs(instance.getSharedPreferences("finimal", Context.MODE_PRIVATE)) }
         val server by lazy { Server(instance) }
+        /** The remote-first interface: no touch-only controls, D-pad keys in the player, TV-safe margins. */
+        val tv get() = when (prefs.interfaceMode) { 1 -> false; 2 -> true; else -> autoTv }
+        /** Android TV, or a box with no touchscreen (an STB on a plain Android launcher). Some boxes claim one; the setting overrides. */
+        val autoTv by lazy {
+            instance.getSystemService(UiModeManager::class.java).currentModeType == android.content.res.Configuration.UI_MODE_TYPE_TELEVISION ||
+                !instance.packageManager.hasSystemFeature(PackageManager.FEATURE_TOUCHSCREEN)
+        }
         /** Set when the server rejects the token; the UI returns to login. Unsynced progress is kept and pushed after. Here, not on [Server], so the first frame doesn't build the API client. */
         var sessionExpired by mutableStateOf(false)
         /**
@@ -127,6 +136,8 @@ class Prefs(private val p: SharedPreferences) {
     /** Applied only while a wireless output is connected; see [AudioDelay]. */
     var audioDelayMs by int("audioDelayMs", 0)
     var storageIndex by int("storageIndex", 0)
+    /** 0 picks by device ([App.autoTv]), 1 touch, 2 TV. */
+    var interfaceMode by int("interfaceMode", 0)
 
     /** 0 means "keep next N" is off for the series. */
     fun keepNext(seriesId: String) = p.getInt("keepNext.$seriesId", 0)

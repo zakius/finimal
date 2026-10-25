@@ -16,6 +16,7 @@ import android.content.Context
 import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.border
 import androidx.compose.ui.text.input.VisualTransformation
 import org.jellyfin.sdk.model.api.LocationType
 import finimal.core.EpisodeRef
@@ -83,6 +84,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.autofill.ContentType
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.composed
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -136,6 +143,22 @@ object ListSnapshots {
     }
     @Volatile private var prefetched: Pair<List<Any?>, List<BaseItemDto>>? = null
     fun takePrefetched(key: List<Any?>) = prefetched?.takeIf { it.first == key }?.second?.also { prefetched = null }
+}
+
+/** The item last focused with the D-pad on this screen, by key, so coming back to the screen puts focus on it again. */
+private val LocalFocusedKey = compositionLocalOf<MutableState<String?>> { mutableStateOf(null) }
+
+@Composable
+fun FocusMemory(content: @Composable () -> Unit) =
+    CompositionLocalProvider(LocalFocusedKey provides rememberSaveable { mutableStateOf<String?>(null) }, content = content)
+
+/** Before the item's clickable: records D-pad focus under [key] and takes it back when the item shows again. Touch never focuses. */
+private fun Modifier.focusMemory(key: Any): Modifier = composed {
+    val memory = LocalFocusedKey.current
+    val requester = remember { FocusRequester() }
+    val k = key.toString()
+    LaunchedEffect(Unit) { if (memory.value == k) requester.requestFocus() }
+    focusRequester(requester).onFocusChanged { if (it.isFocused) memory.value = k }
 }
 
 /** A list, and why the refresh behind it failed when it is an older copy. */
@@ -437,7 +460,7 @@ fun LibrariesScreen(modifier: Modifier, push: (Screen) -> Unit) {
             else LazyColumn {
                 items(list, key = { it.id }) { lib ->
                     Text(lib.name.orEmpty(), style = MaterialTheme.typography.titleLarge,
-                        modifier = Modifier.fillMaxWidth().combinedClickable(onClick = { push(Screen.Library(lib.id.toString(), lib.name.orEmpty())) }).padding(20.dp))
+                        modifier = Modifier.fillMaxWidth().focusMemory(lib.id).combinedClickable(onClick = { push(Screen.Library(lib.id.toString(), lib.name.orEmpty())) }).padding(20.dp))
                     HorizontalDivider()
                 }
             }
@@ -482,7 +505,7 @@ fun LibraryScreen(modifier: Modifier, screen: Screen.Library, push: (Screen) -> 
                 unplayed -> "Nothing unplayed here"
                 else -> "This library is empty"
             })
-            else LazyVerticalGrid(GridCells.Adaptive(110.dp), Modifier.fillMaxSize().padding(8.dp), gridState,
+            else LazyVerticalGrid(GridCells.Adaptive(if (App.tv) 150.dp else if (LocalConfiguration.current.smallestScreenWidthDp >= 600) 140.dp else 110.dp), Modifier.fillMaxSize().padding(8.dp), gridState,
                 horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 items(list, key = { it.id }) { item ->
                     if (item.type == BaseItemKind.SERIES) Poster(item, null, onClick = { push(Screen.Series(item.id.toString(), item.name.orEmpty())) })
@@ -509,8 +532,11 @@ private fun Poster(
     val local by remember(item) { derivedStateOf { item.localState() } }
     val (state, unsynced) = local
     var menu by remember { mutableStateOf(false) }
-    Column(Modifier.combinedClickable(onClick = onClick, onLongClickLabel = "Actions", onLongClick = onChanged?.let { { menu = true } })) {
-        Box {
+    // The focus highlight doesn't show over artwork; a border does.
+    var focused by remember { mutableStateOf(false) }
+    Column(Modifier.focusMemory(item.id).onFocusChanged { focused = it.isFocused }
+        .combinedClickable(onClick = onClick, onLongClickLabel = "Actions", onLongClick = onChanged?.let { { menu = true } })) {
+        Box(if (focused) Modifier.border(3.dp, MaterialTheme.colorScheme.primary) else Modifier) {
             AsyncImage(App.server.imageUrl(item), null, contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxWidth().aspectRatio(2f / 3).background(Color.DarkGray))
             download?.let {
@@ -584,7 +610,7 @@ fun SeriesScreen(modifier: Modifier, screen: Screen.Series, push: (Screen) -> Un
             }
             else LazyColumn(state = listState) {
                 items(list, key = { it.id }) { season ->
-                    Row(Modifier.fillMaxWidth().combinedClickable(onClick = {
+                    Row(Modifier.fillMaxWidth().focusMemory(season.id).combinedClickable(onClick = {
                         push(Screen.Season(screen.id, season.id.toString(), "${screen.name} · ${season.name}"))
                     }).padding(16.dp)) {
                         Text(season.name.orEmpty(), Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
@@ -673,6 +699,7 @@ fun EpisodeRow(
     Row(
         Modifier.fillMaxWidth()
             .background(if (highlighted) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent)
+            .focusMemory(ep.id)
             .combinedClickable(onClick = onPlay, onLongClickLabel = "Actions", onLongClick = { menu = true })
             .padding(8.dp),
         horizontalArrangement = Arrangement.spacedBy(12.dp),
@@ -782,7 +809,7 @@ fun DownloadsScreen(modifier: Modifier, push: (Screen) -> Unit, pop: () -> Unit)
                 item(key = d.item.id) {
                     val id = d.item.id.toString()
                     val (state, unsynced) = d.item.localState()
-                    Row(Modifier.fillMaxWidth().combinedClickable(onClick = { push(Screen.Play(id)) }).padding(horizontal = 16.dp, vertical = 8.dp),
+                    Row(Modifier.fillMaxWidth().focusMemory(id).combinedClickable(onClick = { push(Screen.Play(id)) }).padding(horizontal = 16.dp, vertical = 8.dp),
                         verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
                             Text(itemLabel(d.item))
@@ -857,16 +884,25 @@ fun SettingsScreen(modifier: Modifier, pop: () -> Unit, onLoggedOut: () -> Unit)
 
                 Text("Playback", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(16.dp))
                 Stepper("Wireless audio delay (ms), for Bluetooth headphones and speakers", p.audioDelayMs, AUDIO_DELAYS_MS) { AudioDelay.set(it); refresh++ }
-
-                Text("Gestures", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(16.dp))
-                toggle("Brightness / volume swipes", p.gestureLevels) { p.gestureLevels = it }
-                toggle("Brightness on the left (volume on the right)", p.brightnessOnLeft, enabled = p.gestureLevels) { p.brightnessOnLeft = it }
-                toggle("Horizontal swipe seeks", p.gestureSeek) { p.gestureSeek = it }
-                toggle("Double-tap skips", p.gestureDoubleTap) { p.gestureDoubleTap = it }
-                toggle("Hold for 2× speed", p.gestureHold) { p.gestureHold = it }
                 Stepper("Skip step (s)", p.doubleTapSeconds, (5..60 step 5).toList()) { p.doubleTapSeconds = it; refresh++ }
-                toggle("Pinch to crop / fit", p.gesturePinch) { p.gesturePinch = it }
-                toggle("Swipe up / down for fullscreen", p.gestureFullscreen) { p.gestureFullscreen = it }
+
+                Text("Interface", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(16.dp))
+                Row(Modifier.padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf("Auto (${if (App.autoTv) "TV" else "touch"})", "Touch", "TV").forEachIndexed { i, label ->
+                        FilterChip(p.interfaceMode == i, { p.interfaceMode = i; refresh++ }, { Text(label) })
+                    }
+                }
+
+                if (!App.tv) {
+                    Text("Gestures", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(16.dp))
+                    toggle("Brightness / volume swipes", p.gestureLevels) { p.gestureLevels = it }
+                    toggle("Brightness on the left (volume on the right)", p.brightnessOnLeft, enabled = p.gestureLevels) { p.brightnessOnLeft = it }
+                    toggle("Horizontal swipe seeks", p.gestureSeek) { p.gestureSeek = it }
+                    toggle("Double-tap skips", p.gestureDoubleTap) { p.gestureDoubleTap = it }
+                    toggle("Hold for 2× speed", p.gestureHold) { p.gestureHold = it }
+                    toggle("Pinch to crop / fit", p.gesturePinch) { p.gesturePinch = it }
+                    toggle("Swipe up / down for fullscreen", p.gestureFullscreen) { p.gestureFullscreen = it }
+                }
 
                 Text("Account", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(16.dp))
                 Text(p.baseUrl.orEmpty(), Modifier.padding(horizontal = 16.dp))

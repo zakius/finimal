@@ -18,9 +18,10 @@ Other clients sometimes restart a series from episode 1. The cause is the server
 - A wireless audio delay setting to match Bluetooth headphones and speakers.
 - Fullscreen gestures for brightness, volume, seek, double-tap skip and pinch to crop. Each one can be turned off.
 - A "Skip intro" button from the server's media segments. It never skips on its own.
+- Android TV and TV boxes: the remote drives everything, and the player takes D-pad and media keys. Picked on its own on Android TV and on boxes without a touchscreen; Settings can override it.
 - No Google Play Services, so it runs on Huawei/EMUI devices.
 
-Not included: Android TV, background audio, picture-in-picture, Quick Connect, and home rows.
+Not included: background audio, picture-in-picture, Quick Connect, and home rows.
 
 ## Install
 

@@ -4,14 +4,22 @@ A Jellyfin client for Android that goes straight to the library. It prefers a fe
 
 ## Scope
 
-- Android phone and tablet, portrait and landscape. Minimum API 26. No Google Play Services: it must run on EMUI.
+- Android phone and tablet, portrait and landscape, and Android TV and TV boxes. Minimum API 26. No Google Play Services: it must run on EMUI.
 - One server, one user. Username/password login; the token is stored.
   - A server URL without a scheme tries https first, then http if https can't connect. A certificate problem (untrusted, expired, wrong name) never falls back: the password would go out in clear text. It says "The server's certificate isn't trusted".
   - Login stores URL, token and user in one write. The password field has Show/Hide; editing a field clears the old error.
   - Login errors say "Wrong username or password" (HTTP 401). Anything else gets the same sentence as a list that fails to load (can't reach the server, a server error with its status, or a generic message), with the raw error in small text. Can't reach the server also names the URL tried.
 - Movies and TV shows only. Other library types are hidden.
-- Out of scope: Android TV, background audio, picture-in-picture, Quick Connect, home rows, Next Up, Continue Watching.
+- Out of scope: background audio, picture-in-picture, Quick Connect, home rows, Next Up, Continue Watching.
 - Desktop is a maybe. Keep `core` free of Android imports so a JVM desktop app with libmpv could reuse it.
+
+## TV
+
+- The TV interface is picked on Android TV (TV UI mode) and on devices with no touchscreen, which covers boxes on a plain Android launcher. Settings → Interface overrides it (Auto, Touch, TV), for boxes that claim a touchscreen.
+- One app for both: the activity is in the Android TV launcher (`LEANBACK_LAUNCHER`, a banner) and the normal one; touchscreen and leanback are not required features.
+- The TV interface keeps Android TV's 48/27 dp overscan margins, shows bigger posters and hides touch-only things: the gesture settings, the fullscreen button and rotation lock.
+- D-pad focus shows as a stronger highlight on rows and buttons and a border on posters. Back puts focus on the item it left. A long press on OK opens a movie's menu.
+- Player keys: left and right skip by the skip step while the controls are hidden; OK plays or pauses and brings the controls up with Play focused; up and down bring them up; Back hides them first. Media keys (play/pause, fast-forward, rewind, next) work at any time. Buttons that appear on their own (Skip intro, Play next, Retry) take focus, so OK presses them.
 
 ## Stack
 
