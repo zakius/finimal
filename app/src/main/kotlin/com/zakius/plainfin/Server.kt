@@ -296,8 +296,13 @@ class Server(context: Context) {
         record(id, PlayState(0, knownPlayed(id, item.userData?.played ?: false), now()))
     }
 
+    /**
+     * [ids] in season order. Each gets its own date, a millisecond apart, so the newest is where a
+     * viewer would pick up: the last one marked played, or the first one marked unplayed.
+     */
     suspend fun setPlayed(ids: List<String>, played: Boolean) {
-        ids.forEach { record(it, PlayState(0, played, now())) }
+        val now = now()
+        ids.forEachIndexed { i, id -> record(id, PlayState(0, played, now - if (played) ids.lastIndex - i else i)) }
         flush()
     }
 
