@@ -1,7 +1,7 @@
 name: release
 
-# Pull requests: core and desktop tests and a debug build. A v* tag: tests, the signed release APKs (tools/release.sh)
-# and the Linux Flatpak in parallel jobs, then a GitHub release once all pass. Its notes are the tagged commit's message
+# Pull requests: core and desktop tests and a debug build. A v* tag: tests, the signed release APKs (tools/release.sh),
+# the Linux Flatpak and the .deb and .rpm in parallel jobs, then a GitHub release once all pass. Its notes are the tagged commit's message
 # body, followed by the generated changelog. Pushes to main: tests, an unsigned release build and the Flatpak, which
 # save the Gradle and flatpak-builder caches.
 on:
@@ -122,8 +122,31 @@ jobs:
           name: flatpak
           path: finimal-x86_64.flatpak
 
+  # .deb and .rpm on the distributions' Java and libmpv, each installed and checked before it can be published.
+  linux-packages:
+    needs: desktop-image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: desktop-image
+      - run: mkdir -p desktop/build/compose/binaries/main-release && tar -C desktop/build/compose/binaries/main-release -xf desktop-image.tar
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq rpm
+      - run: tools/linux-packages.sh --no-gradle
+      - name: Install the .deb and check the player
+        run: sudo apt-get install -y -qq ./dist/finimal_*_amd64.deb && finimal --check-player
+      - name: Install the .rpm on Fedora and check the player
+        run: docker run --rm -v "$PWD/dist:/dist:ro" fedora:latest bash -c 'dnf -q -y install /dist/finimal-*.rpm && finimal --check-player'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-packages
+          path: |
+            dist/finimal_*_amd64.deb
+            dist/finimal-*.rpm
+
   publish:
-    needs: [app, test, flatpak]
+    needs: [app, test, flatpak, linux-packages]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -137,10 +160,14 @@ jobs:
         with:
           name: flatpak
           path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-packages
+          path: dist
       - run: mv dist/finimal-x86_64.flatpak "dist/finimal-${GITHUB_REF_NAME#v}-x86_64.flatpak"
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           git log -1 --format=%b | grep -v '^Co-Authored-By' > "$RUNNER_TEMP/notes.md"
-          gh release create "$GITHUB_REF_NAME" dist/finimal-*.apk dist/finimal-*.flatpak --notes-file "$RUNNER_TEMP/notes.md" --generate-notes
+          gh release create "$GITHUB_REF_NAME" dist/finimal-*.apk dist/finimal-*.flatpak dist/finimal_*.deb dist/finimal-*.rpm --notes-file "$RUNNER_TEMP/notes.md" --generate-notes

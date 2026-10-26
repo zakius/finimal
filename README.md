@@ -1,6 +1,6 @@
 # finimal
 
-A Jellyfin client for Android that goes straight to your movie and TV libraries. It prefers a few extra taps over convenience features that break.
+A Jellyfin client for Android and Linux that goes straight to your movie and TV libraries. It prefers a few extra taps over convenience features that break.
 
 ## Why
 
@@ -25,6 +25,8 @@ Not included: background audio, picture-in-picture, Quick Connect, and home rows
 
 ## Install
 
+### Android
+
 Download the APK for your device from [Releases](https://github.com/zakius/finimal/releases):
 
 | File | Devices |
@@ -39,6 +41,20 @@ If you are not sure, try `arm64-v8a` first. When Android says the app isn't comp
 For updates, add `https://github.com/zakius/finimal` to [Obtainium](https://github.com/ImranR98/Obtainium). It picks the APK that matches your device; if it asks, choose with the table above.
 
 Android 8.0 (API 26) or later is required.
+
+### Linux
+
+The desktop app has the same screens and plays through mpv. [Releases](https://github.com/zakius/finimal/releases) has three packages for x86_64:
+
+| File | For |
+|------|-----|
+| `finimal_*_amd64.deb` | Debian 13, Ubuntu 24.04 and newer: `sudo apt install ./finimal_*_amd64.deb` |
+| `finimal-*.x86_64.rpm` | Fedora: `sudo dnf install ./finimal-*.x86_64.rpm` |
+| `finimal-*-x86_64.flatpak` | Any distribution with Flatpak: `flatpak install --user finimal-*-x86_64.flatpak` |
+
+The .deb and .rpm run on your distribution's Java (21 or newer) and libmpv, so their updates come with the system's. The Flatpak carries its own.
+
+In the player: Space or K plays and pauses, Left and Right (or J and L) skip, Up, Down and the mouse wheel set the volume, M mutes, F or a double-click toggles fullscreen, N plays the next episode and Esc leaves fullscreen, then the player. Right-click an episode or movie for its menu. There are no downloads on the desktop yet.
 
 ## Build
 
