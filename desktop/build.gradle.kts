@@ -20,6 +20,9 @@ dependencies {
     implementation(compose.desktop.currentOs)
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-swing:1.11.0")
     implementation("net.java.dev.jna:jna:5.19.1")
+    // Screensaver inhibition over D-Bus; the transport uses the JDK's own Unix sockets.
+    implementation("com.github.hypfvieh:dbus-java-core:5.2.2")
+    implementation("com.github.hypfvieh:dbus-java-transport-native-unixsocket:5.2.2")
     testImplementation(kotlin("test"))
 }
 

@@ -4,7 +4,6 @@ import com.zakius.finimal.App
 import com.zakius.finimal.JsonFileStore
 import com.zakius.finimal.Platform
 import java.io.File
-import java.net.InetAddress
 import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -37,7 +36,9 @@ object DesktopPlatform : Platform {
 
     override fun configure(options: JellyfinOptions.Builder) {
         val id = store["deviceId"] as String? ?: UUID.randomUUID().toString().also { id -> store.edit { put("deviceId", id) } }
-        val name = runCatching { InetAddress.getLocalHost().hostName }.getOrDefault("Desktop")
+        // Not InetAddress.getLocalHost(): it resolves the name, which can stall seconds where it doesn't resolve (a sandbox).
+        val name = System.getenv("COMPUTERNAME") ?: runCatching { File("/proc/sys/kernel/hostname").readText().trim() }.getOrNull()
+            ?.takeIf { it.isNotEmpty() } ?: "Desktop"
         options.deviceInfo = DeviceInfo(id, name)
     }
 

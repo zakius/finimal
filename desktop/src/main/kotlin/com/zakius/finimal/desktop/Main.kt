@@ -19,7 +19,14 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
-import androidx.compose.ui.window.rememberWindowState
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.ui.ExperimentalComposeUiApi
+import androidx.compose.ui.input.pointer.PointerButton
+import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.onPointerEvent
+import java.awt.KeyboardFocusManager
+import java.awt.event.KeyEvent
+import kotlinx.coroutines.flow.collectLatest
 import coil3.ImageLoader
 import coil3.SingletonImageLoader
 import coil3.network.okhttp.OkHttpNetworkFetcherFactory
@@ -31,6 +38,7 @@ import kotlinx.coroutines.delay
 import okhttp3.Dispatcher
 import kotlin.system.exitProcess
 
+@OptIn(ExperimentalComposeUiApi::class)
 fun main(args: Array<String>) {
     if ("--check-player" in args) exitProcess(checkPlayer())
     App.platform = DesktopPlatform
@@ -41,16 +49,32 @@ fun main(args: Array<String>) {
         }.build()
     }
     application {
-        val window = rememberWindowState(width = 1280.dp, height = 800.dp)
-        Window(::exitApplication, window, title = "finimal", icon = painterResource("finimal.png")) {
-            Theme { CompositionLocalProvider(LocalWindow provides window) {
-                Box(Modifier.fillMaxSize()) {
+        val control = remember { WindowControl.restore() }
+        LaunchedEffect(control) {
+            // Saved a moment after it settles, not on every pixel of a drag.
+            snapshotFlow { Triple(control.state.placement, control.state.position, control.state.size) }.collectLatest { delay(500); control.save() }
+        }
+        Window(::exitApplication, control.state, title = control.title, icon = painterResource("finimal.png"),
+            onPreviewKeyEvent = { control.keys?.invoke(it) ?: false }) {
+            Theme { CompositionLocalProvider(LocalWindow provides control) {
+                Box(Modifier.fillMaxSize().onPointerEvent(PointerEventType.Press) { e ->
+                    // The mouse's back button goes back, as Esc does.
+                    if (e.button == PointerButton.Back) pressEscape()
+                }) {
                     Root(openDownloads = false, openedDownloads = {}) { id, onBack, onPlay -> PlayerScreen(id, onBack, onPlay) }
                     ToastHost(Modifier.align(Alignment.BottomCenter))
                 }
             } }
         }
     }
+}
+
+/** Back on the desktop is Esc: the player takes it first (out of fullscreen, then out), the screens after. */
+private fun pressEscape() {
+    val target = KeyboardFocusManager.getCurrentKeyboardFocusManager().focusOwner ?: return
+    val now = System.currentTimeMillis()
+    for (id in listOf(KeyEvent.KEY_PRESSED, KeyEvent.KEY_RELEASED))
+        target.dispatchEvent(KeyEvent(target, id, now, 0, KeyEvent.VK_ESCAPE, KeyEvent.CHAR_UNDEFINED))
 }
 
 /** Shows each [com.zakius.finimal.toast] for 3 s. */

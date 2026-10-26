@@ -2,7 +2,6 @@ package com.zakius.finimal.desktop
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -31,7 +30,6 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -43,8 +41,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -52,7 +48,8 @@ import androidx.compose.ui.graphics.vector.addPathNodes
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
-import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.KeyEvent
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.PointerIcon
@@ -62,8 +59,6 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.window.WindowPlacement
-import androidx.compose.ui.window.WindowState
 import com.zakius.finimal.App
 import com.zakius.finimal.AUDIO_DELAYS_MS
 import com.zakius.finimal.ErrorText
@@ -90,14 +85,12 @@ import org.jellyfin.sdk.model.api.BaseItemKind
 import org.jellyfin.sdk.model.api.MediaSegmentDto
 import org.jellyfin.sdk.model.api.MediaSegmentType
 
-/** The window, for fullscreen. */
-val LocalWindow = compositionLocalOf<WindowState?> { null }
-
 private const val REPORT_INTERVAL_MS = 10_000L
 private const val RESUME_REWIND_MS = 5_000L
 
-/** Chosen speed, kept for the session so "Play next" does not reset it. */
+/** Chosen speed and volume, kept for the session so "Play next" does not reset them. */
 private var sessionSpeed = 1.0
+private var sessionVolume = 100.0
 
 private fun icon(name: String, path: String) = ImageVector.Builder(name, 24.dp, 24.dp, 24f, 24f)
     .addPath(addPathNodes(path), fill = SolidColor(Color.Black)).build()
@@ -168,6 +161,7 @@ private fun Playback(item: BaseItemDto, siblings: List<BaseItemDto>, onBack: () 
             "stream-lavf-o" to "reconnect=1,reconnect_streamed=1,reconnect_on_network_error=1,reconnect_delay_max=10",
             "sub-scale" to "${prefs.subtitleScale / 100.0}",
             "speed" to "$sessionSpeed",
+            "volume" to "$sessionVolume",
             // Late wireless audio: holding the video back matches it. The desktop can't tell which output is wireless.
             "audio-delay" to "${-prefs.audioDelayMs / 1000.0}",
         )) }
@@ -260,6 +254,15 @@ private fun Playback(item: BaseItemDto, siblings: List<BaseItemDto>, onBack: () 
         }
     }
     LaunchedEffect(resumedAt) { if (resumedAt != null) { delay(5_000); resumedAt = null } }
+    LaunchedEffect(mpv) { snapshotFlow { mpv.volume }.collect { if (mpv.loaded) sessionVolume = it } }
+    // The screen stays on only while playing; paused, ended or failed, it times out.
+    LaunchedEffect(mpv) { snapshotFlow { mpv.loaded && !mpv.paused && !mpv.eof && mpv.error == null }.collect { ScreenSaver.inhibit(it) } }
+    DisposableEffect(mpv) { onDispose { ScreenSaver.inhibit(false) } }
+    val window = LocalWindow.current
+    DisposableEffect(window) {
+        window?.title = "${playerTitle(item)} – finimal"
+        onDispose { window?.title = "finimal"; window?.setFullscreen(false) }
+    }
     LaunchedEffect(mpv) { snapshotFlow { mpv.position }.collect { if (mpv.loaded && it > 0) lastPositionMs = (it * 1000).toLong() } }
 
     VideoSurface(mpv, item, transcoding, segments, ended, next, resumedAt,
@@ -300,8 +303,8 @@ private fun VideoSurface(
 ) {
     val prefs = App.prefs
     val window = LocalWindow.current
-    val fullscreen = window?.placement == WindowPlacement.Fullscreen
-    fun toggleFullscreen() { window?.placement = if (fullscreen) WindowPlacement.Floating else WindowPlacement.Fullscreen }
+    val fullscreen = window?.fullscreen == true
+    fun toggleFullscreen() { window?.toggleFullscreen() }
     var controls by remember { mutableStateOf(true) }
     var lastInteraction by remember { mutableLongStateOf(System.currentTimeMillis()) }
     var overlay by remember { mutableStateOf<String?>(null) }
@@ -311,6 +314,11 @@ private fun VideoSurface(
     fun clamp(ms: Long) = if (durationMs > 0) ms.coerceIn(0, durationMs) else ms.coerceAtLeast(0)
     fun seekBy(ms: Long) { onSeek(clamp(positionMs + ms), true); overlay = (if (ms > 0) "+" else "−") + "${kotlin.math.abs(ms) / 1000}s" }
     fun togglePlay() = if (mpv.paused) mpv.play() else mpv.pause()
+    fun volumeBy(step: Double) {
+        val v = (mpv.volume + step).coerceIn(0.0, 130.0)
+        mpv.set("volume", "$v")
+        overlay = "Volume ${v.toInt()}%"
+    }
     fun interact() { lastInteraction = System.currentTimeMillis(); controls = true }
 
     LaunchedEffect(Unit) {
@@ -332,31 +340,36 @@ private fun VideoSurface(
         }
     }
 
-    val focus = remember { FocusRequester() }
-    LaunchedEffect(Unit) { focus.requestFocus() }
+    // At the window, not on a focused node: covered screens stay composed and can keep focus, and menus take it.
+    val keys by rememberUpdatedState { e: KeyEvent ->
+        // The release too: a focused button would otherwise click on it (Space), undoing the toggle.
+        if (e.type == KeyEventType.KeyUp) e.key in playerKeys
+        else if (e.type != KeyEventType.KeyDown) false
+        else {
+            interact()
+            when (e.key) {
+                Key.Spacebar, Key.K, Key.MediaPlayPause -> { togglePlay(); true }
+                Key.DirectionLeft, Key.J -> { seekBy(-step); true }
+                Key.DirectionRight, Key.L -> { seekBy(step); true }
+                Key.DirectionUp -> { volumeBy(5.0); true }
+                Key.DirectionDown -> { volumeBy(-5.0); true }
+                Key.M -> { mpv.command("cycle", "mute"); true }
+                Key.F -> { toggleFullscreen(); true }
+                Key.N, Key.MediaNext -> { next?.let { onPlay(it.id.toString()) }; true }
+                Key.Escape -> { if (fullscreen) toggleFullscreen() else onBack(); true }
+                else -> false
+            }
+        }
+    }
+    DisposableEffect(window) {
+        val handler: (KeyEvent) -> Boolean = { keys(it) }
+        window?.keys = handler
+        onDispose { if (window?.keys === handler) window.keys = null }
+    }
     Box(
         Modifier.fillMaxSize().background(Color.Black)
-            .onPreviewKeyEvent { e ->
-                // The release too: a focused button would otherwise click on it (Space), undoing the toggle.
-                if (e.type == KeyEventType.KeyUp) return@onPreviewKeyEvent e.key in playerKeys
-                if (e.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
-                interact()
-                when (e.key) {
-                    Key.Spacebar, Key.K, Key.MediaPlayPause -> togglePlay()
-                    Key.DirectionLeft, Key.J -> seekBy(-step)
-                    Key.DirectionRight, Key.L -> seekBy(step)
-                    Key.DirectionUp -> { mpv.set("volume", "${(mpv.volume + 5).coerceAtMost(130.0)}"); overlay = "Volume ${(mpv.volume + 5).coerceAtMost(130.0).toInt()}%" }
-                    Key.DirectionDown -> { mpv.set("volume", "${(mpv.volume - 5).coerceAtLeast(0.0)}"); overlay = "Volume ${(mpv.volume - 5).coerceAtLeast(0.0).toInt()}%" }
-                    Key.M -> mpv.command("cycle", "mute")
-                    Key.F -> toggleFullscreen()
-                    Key.N, Key.MediaNext -> next?.let { onPlay(it.id.toString()) }
-                    Key.Escape -> if (fullscreen) toggleFullscreen() else onBack()
-                    else -> return@onPreviewKeyEvent false
-                }
-                true
-            }
-            .focusRequester(focus).focusable()
             .onPointerEvent(PointerEventType.Move) { interact() }
+            .onPointerEvent(PointerEventType.Scroll) { e -> e.changes.firstOrNull()?.scrollDelta?.y?.let { if (it != 0f) volumeBy(if (it < 0) 5.0 else -5.0) } }
             // The cursor hides with the controls, as in other players.
             .pointerHoverIcon(if (controls) PointerIcon.Default else PointerIcon(java.awt.Toolkit.getDefaultToolkit()
                 .createCustomCursor(java.awt.image.BufferedImage(1, 1, java.awt.image.BufferedImage.TYPE_INT_ARGB), java.awt.Point(), "none")))

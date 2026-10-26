@@ -15,6 +15,8 @@ finish-args:
   - --socket=pulseaudio
   # GPU: VA-API video decoding and Skia's OpenGL.
   - --device=dri
+  # Keeping the screen on while playing: the portal's Inhibit first, this where there is no portal.
+  - --talk-name=org.freedesktop.ScreenSaver
 modules:
   - name: ffmpeg
     cleanup:
@@ -102,7 +104,9 @@ modules:
     buildsystem: simple
     build-commands:
       - cp -a app /app/finimal
-      - install -Dm755 /dev/stdin /app/bin/finimal <<< $'#!/bin/sh\nexec /app/finimal/bin/finimal "$@"'
+      # The Java runtime's base class-data archive, which jlink leaves out; the launcher builds on it.
+      - JAVA_TOOL_OPTIONS=-Xshare:dump /app/finimal/bin/finimal
+      - install -Dm755 finimal.sh /app/bin/finimal
       - install -Dm644 io.github.zakius.finimal.desktop -t /app/share/applications
       - install -Dm644 io.github.zakius.finimal.metainfo.xml -t /app/share/metainfo
       - install -Dm644 finimal.svg /app/share/icons/hicolor/scalable/apps/io.github.zakius.finimal.svg
@@ -110,6 +114,8 @@ modules:
       - type: dir
         path: ../../desktop/build/compose/binaries/main/app/finimal
         dest: app
+      - type: file
+        path: finimal.sh
       - type: file
         path: io.github.zakius.finimal.desktop
       - type: file

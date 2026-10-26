@@ -10,6 +10,8 @@ mkdir -p dist
 # Builder state persists between runs in .flatpak-builder, so libmpv and FFmpeg build once.
 docker run --rm --privileged -v "$PWD:/src" -w /src ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-25.08 bash -c "
   set -e
+  # The cache is handed back to the host user after each run; git would refuse its mirrors as not root's.
+  export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0='*'
   flatpak-builder --force-clean --disable-rofiles-fuse --repo=build/flatpak-repo \
     build/flatpak-app packaging/flatpak/io.github.zakius.finimal.yml
   flatpak build build/flatpak-app /app/bin/finimal --check-player

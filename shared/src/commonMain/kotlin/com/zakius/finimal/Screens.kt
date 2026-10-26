@@ -9,6 +9,8 @@ import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.border
 import androidx.compose.ui.text.input.VisualTransformation
@@ -401,7 +403,9 @@ fun LoginScreen(modifier: Modifier, onDone: () -> Unit) {
         }
     }
     // The padded modifier already includes the IME inset; scrolling keeps the button reachable above it.
-    Column(modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    // A phone-wide form on tablets and desktop windows: full-width fields there are hard to read.
+    Box(modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
+    Column(Modifier.widthIn(max = 560.dp).fillMaxHeight().verticalScroll(rememberScrollState()).padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("finimal", style = MaterialTheme.typography.headlineMedium)
         if (App.sessionExpired) Text("The server ended this session. Log in again; unsynced progress is kept.")
         OutlinedTextField(url, { url = it; error = null }, label = { Text("Server URL") }, placeholder = { Text("jellyfin.example.com:8096") }, singleLine = true, enabled = !busy, modifier = Modifier.fillMaxWidth(),
@@ -422,6 +426,7 @@ fun LoginScreen(modifier: Modifier, onDone: () -> Unit) {
         Button(enabled = !busy, onClick = ::submit) {
             if (busy) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp) else Text("Log in")
         }
+    }
     }
 }
 

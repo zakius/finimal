@@ -38,6 +38,20 @@ class MpvTest {
         }
     }
 
+    /** Closing while the event, render and caller threads are busy: the crash left the JVM aborting on a corrupt heap. */
+    @Test fun closingUnderLoadIsSafe() {
+        repeat(15) {
+            val mpv = Mpv(mapOf("ao" to "null"))
+            mpv.resize(160, 90)
+            mpv.load("av://lavfi:testsrc=duration=5:size=320x240:rate=50", 0.0)
+            val callers = (1..3).map { kotlin.concurrent.thread { repeat(200) { mpv.tracks(); mpv.get("time-pos"); mpv.seek(1.0) } } }
+            Thread.sleep(30L * it % 200)
+            mpv.close()
+            callers.forEach { it.join() }
+        }
+        Thread.sleep(500) // the closes finish on their own thread
+    }
+
     @Test fun aMissingFileIsAnError() {
         val mpv = Mpv(mapOf("ao" to "null"))
         try {

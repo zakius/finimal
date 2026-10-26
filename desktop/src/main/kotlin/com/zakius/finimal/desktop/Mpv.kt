@@ -14,6 +14,9 @@ import com.sun.jna.Native
 import com.sun.jna.Pointer
 import com.sun.jna.ptr.PointerByReference
 import java.lang.ref.Reference
+import java.util.concurrent.locks.ReentrantReadWriteLock
+import kotlin.concurrent.read
+import kotlin.concurrent.write
 import java.util.concurrent.Executors
 import kotlin.concurrent.thread
 import org.jetbrains.skia.Bitmap
@@ -111,6 +114,9 @@ class Mpv(options: Map<String, String>) {
 
     private var render: Pointer? = null
     private lateinit var renderThread: Thread
+    private lateinit var eventThread: Thread
+    /** Calls into the handle hold it shared; destroying it takes it alone, so no call ever runs on a freed handle. */
+    private val handle = ReentrantReadWriteLock()
     private val renderSignal = Object()
     @Volatile private var dirty = false
     @Volatile private var closed = false
@@ -136,7 +142,7 @@ class Mpv(options: Map<String, String>) {
         Reference.reachabilityFence(apiType)
         render = ref.value
         lib.mpv_render_context_set_update_callback(render!!, updateCallback, null)
-        thread(name = "mpv-events", isDaemon = true) { events() }
+        eventThread = thread(name = "mpv-events", isDaemon = true) { events() }
         renderThread = thread(name = "mpv-render", isDaemon = true) { renderLoop() }
     }
 
@@ -147,6 +153,8 @@ class Mpv(options: Map<String, String>) {
     private fun events() {
         while (true) {
             val e = lib.mpv_wait_event(ctx, -1.0)
+            // close() wakes this with an empty event; the handle is destroyed only after this thread is gone.
+            if (closed) return
             when (e.getInt(0)) {
                 EVENT_SHUTDOWN -> return
                 EVENT_FILE_LOADED -> { onLoaded(); loaded = true; tracksChanged++ }
@@ -160,7 +168,8 @@ class Mpv(options: Map<String, String>) {
                     val d = if (format == FORMAT_DOUBLE && data != null) data.getDouble(0) else null
                     val f = if (format == FORMAT_FLAG && data != null) data.getInt(0) != 0 else null
                     when (name) {
-                        "time-pos" -> position = d ?: 0.0
+                        // Every frame would recompose the player; a quarter second is what the clock and reports need.
+                        "time-pos" -> (d ?: 0.0).let { if (kotlin.math.abs(it - position) >= 0.25 || it == 0.0) position = it }
                         "duration" -> duration = d ?: 0.0
                         "demuxer-cache-time" -> cachedUntil = d ?: 0.0
                         "pause" -> paused = f ?: false
@@ -234,7 +243,7 @@ class Mpv(options: Map<String, String>) {
         return m
     }
 
-    fun command(vararg args: String) {
+    fun command(vararg args: String) = handle.read {
         if (!closed) lib.mpv_command_async(ctx, 0, arrayOf(*args, null))
     }
 
@@ -251,9 +260,10 @@ class Mpv(options: Map<String, String>) {
     fun seek(seconds: Double, exact: Boolean = true) = command("seek", "$seconds", if (exact) "absolute+exact" else "absolute+keyframes")
 
     /** Reads a property; for the event thread and menus, never the UI thread's frame path. */
-    fun get(name: String): String? {
+    fun get(name: String): String? = handle.read {
+        if (closed) return null
         val p = lib.mpv_get_property_string(ctx, name) ?: return null
-        return p.getString(0).also { lib.mpv_free(p) }
+        p.getString(0).also { lib.mpv_free(p) }
     }
 
     class Track(val id: String, val type: String, val language: String?, val title: String?, val selected: Boolean, val channels: Int?)
@@ -272,10 +282,13 @@ class Mpv(options: Map<String, String>) {
         synchronized(renderSignal) { renderSignal.notifyAll() }
         closer.execute {
             renderThread.join() // it may be inside a render call
-            render?.let { lib.mpv_render_context_set_update_callback(it, null, null); lib.mpv_render_context_free(it) }
-            render = null
-            lib.mpv_terminate_destroy(ctx)
-            bitmaps.forEach { it.close() }
+            lib.mpv_wakeup(ctx)
+            eventThread.join()
+            handle.write {
+                render?.let { lib.mpv_render_context_set_update_callback(it, null, null); lib.mpv_render_context_free(it) }
+                render = null
+                lib.mpv_terminate_destroy(ctx)
+            }
         }
     }
 
