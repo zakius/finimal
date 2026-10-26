@@ -13,6 +13,7 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -21,12 +22,20 @@ jobs:
           java-version: 21
       - uses: gradle/actions/setup-gradle@v4
       # The desktop player tests load the distribution's libmpv.
-      - run: sudo apt-get update -qq && sudo apt-get install -y -qq libmpv2
+      - name: Install libmpv
+        timeout-minutes: 8
+        # GitHub's runners start unattended-upgrades after boot. It holds dpkg's lock, and apt waited on it, silently
+        # under -qq, until the step was killed. Stop it; a lock still held fails in 5 minutes with apt saying so.
+        run: |
+          sudo systemctl stop unattended-upgrades.service apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
+          sudo apt-get -o DPkg::Lock::Timeout=300 update -q
+          sudo apt-get -o DPkg::Lock::Timeout=300 install -y -q libmpv2
       - run: ./gradlew :core:test :desktop:test
 
   debug:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -41,6 +50,7 @@ jobs:
   warm:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       GRADLE_BUILD_ACTION_CACHE_KEY_JOB: release # the cache is keyed by job; app reads this one
     steps:
@@ -55,6 +65,7 @@ jobs:
   app:
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       GRADLE_BUILD_ACTION_CACHE_KEY_JOB: release
     steps:
@@ -83,6 +94,7 @@ jobs:
   desktop-image:
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -100,6 +112,7 @@ jobs:
   flatpak:
     needs: desktop-image
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     container:
       image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-25.08
       options: --privileged
@@ -126,7 +139,7 @@ jobs:
   linux-packages:
     needs: desktop-image
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     env:
       DEBIAN_FRONTEND: noninteractive
       NEEDRESTART_MODE: a
@@ -136,15 +149,23 @@ jobs:
         with:
           name: desktop-image
       - run: mkdir -p desktop/build/compose/binaries/main-release && tar -C desktop/build/compose/binaries/main-release -xf desktop-image.tar
-      - run: sudo apt-get update -qq && sudo apt-get install -y -qq rpm
+      - name: Install rpmbuild
+        timeout-minutes: 8
+        # GitHub's runners start unattended-upgrades after boot. It holds dpkg's lock, and apt waited on it, silently
+        # under -qq, until the step was killed. Stop it; a lock still held fails in 5 minutes with apt saying so.
+        run: |
+          sudo systemctl stop unattended-upgrades.service apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
+          sudo apt-get -o DPkg::Lock::Timeout=300 update -q
+          sudo apt-get -o DPkg::Lock::Timeout=300 install -y -q rpm
       - run: tools/linux-packages.sh --no-gradle
-      # One step each, with its own limit, so a hang shows where it is and can't hold the release for hours.
-      - name: Install the .deb
+      # In clean containers, not on the runner: no background upgrades holding apt, and no preinstalled JDKs to hide
+      # what a user's system lacks. One step each, with its own limit.
+      - name: Install the .deb on Ubuntu 24.04 and check the player
         timeout-minutes: 10
-        run: sudo -E apt-get install -y -qq ./dist/finimal_*_amd64.deb
-      - name: Check the player from the .deb
-        timeout-minutes: 3
-        run: timeout 120 finimal --check-player
+        run: docker run --rm -e DEBIAN_FRONTEND=noninteractive -v "$PWD/dist:/dist:ro" ubuntu:24.04 bash -c 'apt-get update -q > /dev/null && apt-get install -y -q /dist/finimal_*_amd64.deb > /tmp/apt.log || { tail -40 /tmp/apt.log; exit 1; }; timeout 120 finimal --check-player'
+      - name: Install the .deb on Debian 13 and check the player
+        timeout-minutes: 10
+        run: docker run --rm -e DEBIAN_FRONTEND=noninteractive -v "$PWD/dist:/dist:ro" debian:trixie bash -c 'apt-get update -q > /dev/null && apt-get install -y -q /dist/finimal_*_amd64.deb > /tmp/apt.log || { tail -40 /tmp/apt.log; exit 1; }; timeout 120 finimal --check-player'
       - name: Start Fedora
         timeout-minutes: 5
         run: docker run -d --name fedora -v "$PWD/dist:/dist:ro" fedora:latest sleep infinity
@@ -164,6 +185,7 @@ jobs:
   publish:
     needs: [app, test, flatpak, linux-packages]
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: write
     steps:
