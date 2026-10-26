@@ -126,6 +126,10 @@ jobs:
   linux-packages:
     needs: desktop-image
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      NEEDRESTART_MODE: a
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -134,10 +138,22 @@ jobs:
       - run: mkdir -p desktop/build/compose/binaries/main-release && tar -C desktop/build/compose/binaries/main-release -xf desktop-image.tar
       - run: sudo apt-get update -qq && sudo apt-get install -y -qq rpm
       - run: tools/linux-packages.sh --no-gradle
-      - name: Install the .deb and check the player
-        run: sudo apt-get install -y -qq ./dist/finimal_*_amd64.deb && finimal --check-player
-      - name: Install the .rpm on Fedora and check the player
-        run: docker run --rm -v "$PWD/dist:/dist:ro" fedora:latest bash -c 'dnf -q -y install /dist/finimal-*.rpm && finimal --check-player'
+      # One step each, with its own limit, so a hang shows where it is and can't hold the release for hours.
+      - name: Install the .deb
+        timeout-minutes: 10
+        run: sudo -E apt-get install -y -qq ./dist/finimal_*_amd64.deb
+      - name: Check the player from the .deb
+        timeout-minutes: 3
+        run: timeout 120 finimal --check-player
+      - name: Start Fedora
+        timeout-minutes: 5
+        run: docker run -d --name fedora -v "$PWD/dist:/dist:ro" fedora:latest sleep infinity
+      - name: Install the .rpm on Fedora
+        timeout-minutes: 10
+        run: docker exec fedora bash -c 'dnf -q -y install /dist/finimal-*.rpm'
+      - name: Check the player from the .rpm
+        timeout-minutes: 3
+        run: docker exec fedora timeout 120 finimal --check-player
       - uses: actions/upload-artifact@v4
         with:
           name: linux-packages
@@ -152,6 +168,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the notes come from the release commit, which needn't be the tagged one
       - uses: actions/download-artifact@v4
         with:
           name: apks
@@ -169,5 +187,5 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          git log -1 --format=%b | grep -v '^Co-Authored-By' > "$RUNNER_TEMP/notes.md"
+          git log -1 --format=%b --fixed-strings --grep "Release ${GITHUB_REF_NAME#v}" | grep -v '^Co-Authored-By' > "$RUNNER_TEMP/notes.md"
           gh release create "$GITHUB_REF_NAME" dist/finimal-*.apk dist/finimal-*.flatpak dist/finimal_*.deb dist/finimal-*.rpm --notes-file "$RUNNER_TEMP/notes.md" --generate-notes
