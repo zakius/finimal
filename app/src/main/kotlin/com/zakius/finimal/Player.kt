@@ -267,7 +267,8 @@ private fun Playback(
     val cacheKey = Media.key(item)
     // A file the device can't decode starts as a transcode. Downloads play as they are; a failure still switches.
     var transcoding by remember { mutableStateOf(online && localPlaylist == null && download?.transcoded != false && !playsDirectly(item)) }
-    var transcodeFromMs by remember { mutableLongStateOf(0L) }
+    // Where a direct play switched to a transcode; null for a play that started as one, which resumes like any other.
+    var transcodeFromMs by remember { mutableStateOf<Long?>(null) }
     var playerError by remember { mutableStateOf<PlaybackException?>(null) }
     // Set while a network failure is being retried; see reconnectDelayMs.
     var failedSince by remember { mutableStateOf<Long?>(null) }
@@ -330,10 +331,10 @@ private fun Playback(
             })
             .build()
         val resumeMs = (item.localState().first?.positionTicks ?: 0) / TICKS_PER_MS
-        val startMs = if (transcoding) transcodeFromMs else (resumeMs - RESUME_REWIND_MS).coerceAtLeast(0)
+        val startMs = transcodeFromMs ?: (resumeMs - RESUME_REWIND_MS).coerceAtLeast(0)
         startTicks = startMs * TICKS_PER_MS
         startedAt = SystemClock.elapsedRealtime()
-        if (!transcoding && startMs > 0) resumedAt = startMs
+        if (transcodeFromMs == null && startMs > 0) resumedAt = startMs
         player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().apply {
             prefs.audioLang(seriesKey)?.let { setPreferredAudioLanguage(it) }
             when (val sub = prefs.subLang(seriesKey)) {
