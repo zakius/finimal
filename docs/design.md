@@ -11,7 +11,7 @@ A Jellyfin client for Android that goes straight to the library. It prefers a fe
   - Login errors say "Wrong username or password" (HTTP 401). Anything else gets the same sentence as a list that fails to load (can't reach the server, a server error with its status, or a generic message), with the raw error in small text. Can't reach the server also names the URL tried.
 - Movies and TV shows only. Other library types are hidden.
 - Out of scope: background audio, picture-in-picture, Quick Connect, home rows, Next Up, Continue Watching.
-- Desktop is a maybe. Keep `core` free of Android imports so a JVM desktop app with libmpv could reuse it.
+- Desktop: Linux (Flatpak) now, Windows later. See [Desktop](#desktop).
 
 ## TV
 
@@ -26,6 +26,18 @@ A Jellyfin client for Android that goes straight to the library. It prefers a fe
 - Kotlin, Jetpack Compose, Media3 with the Jellyfin FFmpeg audio decoder, libass-android for ASS/SSA subtitles, jellyfin-sdk-kotlin, WorkManager.
 - License GPL-3.0. Findroid (GPL-3.0) code may be copied. jellyfin-android is GPL-2.0 without "or later", so it is a reference only.
 - Distribution: GitHub Actions builds one signed APK per ABI (arm64-v8a, armeabi-v7a, x86_64, x86) on each tag and attaches them to a release. Updates come through Obtainium.
+- Desktop: Compose for Desktop, libmpv through JNA, jpackage. CI builds the Linux Flatpak on each tag and attaches it to the release.
+
+## Desktop
+
+- One UI for both: the screens, `Server`, `Prefs` and navigation are in the `shared` Kotlin Multiplatform module (Android and desktop JVM). Each app supplies a `Platform`: storage folders, settings store (SharedPreferences, or a JSON file under `$XDG_CONFIG_HOME`/`%APPDATA%`), the Jellyfin device identity, downloads, background housekeeping. Android-only settings rows (interface mode, touch gestures, metered networks, decoder limits) hide on the desktop.
+- Each app has its own player. The desktop one embeds libmpv (JNA) and renders through mpv's software renderer into Skia bitmaps, so our Compose controls draw over the video. libmpv is never called on the UI thread: commands are async, properties arrive as observed events, frames render on their own thread. If the software renderer turns out too slow for 4K, the next step is mpv's OpenGL render API.
+- mpv decodes everything, so the desktop only transcodes when "Direct play up to" caps the height (for bandwidth).
+- Streams go through the same scratch and loopback proxy as on Android, buffering to the end. No downloads on the desktop yet.
+- Keyboard: Space/K play-pause, Left/Right (J/L) skip by the skip step, Up/Down volume, M mute, F or double-click fullscreen, N next episode, Esc leaves fullscreen, then the player. Mouse movement shows the controls; they and the cursor hide after 3 s of playing.
+- Linux ships as a Flatpak: libmpv 0.41 with FFmpeg, libass and libplacebo built in the manifest (after Celluloid's), on the freedesktop runtime, around the jpackage app image. Library bumps come as manifest updates through x-checker-data. AWT is X11 only on Java 21, so it runs on XWayland under Wayland.
+- Windows will ship libmpv-2.dll (shinchiro's builds, which mpv.io links) inside the app; a newer DLL in `%APPDATA%\finimal` takes precedence, so mpv can be updated without a new finimal.
+- `finimal --check-player` plays a generated clip headless and exits 0 when libmpv works: the packaging check in CI.
 
 ## Navigation
 

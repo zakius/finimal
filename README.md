@@ -50,6 +50,14 @@ You need JDK 21 and the Android SDK.
 
 Debug APKs go to `app/build/outputs/apk/debug/`, one per ABI. `tools/release.sh` builds the signed release APKs into `dist/`, with the baseline profile embedded so Android 15+ compiles the app at install; it reads the key from `keystore.properties`. CI runs it when a `v*` tag is pushed.
 
+The desktop app (Linux now, Windows later) shares the Android app's screens and plays through libmpv:
+
+```sh
+./gradlew :desktop:run          # needs libmpv installed (libmpv2 on Debian and Ubuntu)
+./gradlew :desktop:test         # player tests against the installed libmpv
+tools/flatpak.sh                # the Linux Flatpak into dist/, built in Docker; libmpv is built inside
+```
+
 ## License
 
 GPL-3.0. See [LICENSE](LICENSE).
