@@ -81,19 +81,22 @@ Libraries → poster grid → series → seasons → episodes. A series with one
 
 ## Buffering and downloads
 
-There is one persistent on-disk cache. The key is the item ID plus the media source ETag, so a file replaced on the server never mixes with bytes cached from the old one. A finished download keeps playing its own version.
+There is one persistent on-disk store, the scratch (`core`'s `Scratch`), shared by streaming, buffering and downloads, and plain JVM so a desktop app can use it too. The key is the item ID plus the media source ETag, so a file replaced on the server never mixes with bytes from the old one. A finished download keeps playing its own version.
 
-- Buffering is a background fill of the cache to the end of the episode. Playback reads from the cache.
-- A download is the same fill, marked pinned. Downloads run one at a time in the order requested. Pause and delete act on one episode; the rest of the queue carries on. So does a file the server refuses (HTTP 4xx, e.g. deleted there): that download shows "failed", and Resume tries it again. A finished file whose length differs from the size the server lists (a captive portal or proxy page) is removed and fails the same way. When the disk fills during a download, the buffer is evicted; if that doesn't free 100 MB, the download pauses as "storage full" and the queue stops until Resume or the next start.
+- An entry is a folder per key: a `length` file, then the file in 4 MiB chunks `0`, `1`…. A chunk is written as `<n>.part` and renamed once whole and synced, so a crash leaves at most one `.part`, which is fetched again. No index file to go stale, and no sparse file (slow on exFAT SD cards).
+- One filler thread per entry is the only writer. It fetches what the open demands ask for, with HTTP ranges from chunk boundaries, nearest need first: the newest reader (64 MB ahead of what it has sent), then buffer-to-end, then a download from byte 0. A seek elsewhere drops the fetch nobody wants any more. Chunks already on disk are never fetched again.
+- The player reads through a loopback HTTP server (`ScratchServer`, `127.0.0.1` with a random token in the path, since other apps can reach loopback ports). Readers never fetch: they wait for the filler and read the chunk being written as its bytes land. When the filler's last try failed (no network, server down), a reader fails at once so the player shows "Reconnecting…"; the player's retry is a new request, which wakes the filler.
+- Buffering is a buffer-to-end demand while the player is open.
+- A download is a whole-file demand on the same entry, marked pinned. Downloads run one at a time in the order requested. Pause and delete act on one episode; the rest of the queue carries on. So does a file the server refuses (HTTP 4xx, e.g. deleted there): that download shows "failed", and Resume tries it again. A finished file whose length differs from the size the server lists (a captive portal or proxy page) is removed and fails the same way. When a chunk can't be written, the buffer is evicted and the write tried again; if that doesn't help, buffering and downloading stop for that entry (the reader still gets chunks while there is room), and the download pauses as "storage full" and the queue stops until Resume or the next start.
 - A queued download fetches its item again when it starts, so a file replaced on the server since queuing downloads under its new key.
-- Playing an unfinished download moves it to the front, and the worker fills from just before the playhead first (again after a seek into an uncached part), then the rest. The player reads the cache without writing it; the worker is the only writer.
+- Playing an unfinished download needs nothing special: the reader's demand comes first, so the part being watched lands first, and the download takes the rest. What was buffered while watching counts towards the download, and an item fully buffered becomes a finished download at once.
 - Buffered entries are evicted oldest-first above a size limit (default 5 GB; the setting steps through 1, 2, 5, 10, 20, 50, 100 GB), counting buffered bytes only. The limit drops further to keep max(2 GB, 5 % of the volume) free. Pinned entries are removed only by the user. An entry is pinned by its download record's file name, so a record that no longer decodes (renamed to `.corrupt`) still keeps its bytes.
-- An interrupted fill resumes from the last byte, including after a crash or reboot. A buffer fill does not outlive the app: one left by an earlier process ends as soon as it runs, and app start cancels the rest. A seek past the cached part restarts it there.
+- An interrupted fill resumes at the first missing chunk, including after a crash or reboot. A buffer fill ends with the player.
 - Two toggles, both off by default: "buffer to end on metered" and "download on metered". They follow Android's metered flag, not wifi/cellular. With buffering off on a metered network, the player uses its normal buffer.
-- Downloads are original files in app-specific storage. The SD card can be selected. Switching applies at once and asks first: it deletes every download and the buffer cache instead of moving them (bytes left on the old volume would be orphaned, and the downloads would silently fetch again).
+- Downloads live in app-specific storage. The SD card can be selected. Switching applies at once and asks first: it deletes every download and the buffer instead of moving them (bytes left on the old volume would be orphaned, and the downloads would silently fetch again).
   - A selected SD card missing at start leaves downloads waiting: the queue and buffering stop, the Downloads screen and queued items say "waiting for SD card", and playback streams. The card is checked again at the next start. Switching to internal storage stays possible, as the way out of a lost card.
 - Where data lives:
-  - The media cache (downloads and buffer, one Media3 cache) is in app-specific storage on the selected volume, not the system cache directory: Android may delete cache files at any time, and a download must stay until the user deletes it. The buffer part is held to its own limit instead.
+  - The scratch (downloads and buffer) is in app-specific storage on the selected volume, not the system cache directory: Android may delete cache files at any time, and a download must stay until the user deletes it. The buffer part is held to its own limit instead.
   - Download records, their subtitles and unsynced play state are app files. Subtitles fetched only to stream are deleted by housekeeping.
   - Saved lists and thumbnails are in the system cache directory: they can be fetched again, so "Clear cache" and low storage may remove them.
   - Nothing is backed up or copied to a new phone: downloads are too large, and records without their bytes or login would only mislead.
@@ -135,7 +138,8 @@ Rules:
 
 ## Testing
 
-- Unit tests in `core`: sync queue, conflict rule, played limits, the keep-next-N anchor, eviction. Resuming an interrupted fill relies on Media3's `CacheWriter`, which skips cached ranges.
+- Unit tests in `core`: sync queue, conflict rule, played limits, the keep-next-N anchor, eviction, and the scratch against a local origin server (streaming, ranges, seeks pre-empting the fill, resuming after a dropped connection or a crash's `.part`, refusals, wrong sizes, servers ignoring ranges, an unreachable server, players hanging up mid-body).
+- Downloads and the buffer moved from Media3's cache to the scratch in 0.7. There is no migration: the old cache is deleted at start, and existing downloads fetch again.
 - A local Jellyfin server in Docker with sample media for end-to-end checks.
 
 ## Start-up

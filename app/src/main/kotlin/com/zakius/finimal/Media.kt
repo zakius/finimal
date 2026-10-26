@@ -14,20 +14,9 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.setValue
 import androidx.core.app.NotificationCompat
-import androidx.media3.common.C
-import androidx.media3.database.StandaloneDatabaseProvider
-import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.DefaultDataSource
-import androidx.media3.datasource.HttpDataSource
-import androidx.media3.datasource.cache.CacheDataSink
-import androidx.media3.datasource.cache.CacheDataSource
-import androidx.media3.datasource.cache.CacheWriter
-import androidx.media3.datasource.cache.ContentMetadata
-import androidx.media3.datasource.cache.NoOpCacheEvictor
-import androidx.media3.datasource.cache.SimpleCache
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.work.BackoffPolicy
-import kotlin.concurrent.thread
 import androidx.work.Constraints
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingWorkPolicy
@@ -37,7 +26,6 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
-import androidx.work.workDataOf
 import java.io.File
 import java.io.IOException
 import java.util.UUID
@@ -68,16 +56,20 @@ import finimal.core.evictionOrder
 import finimal.core.keepNextDeletions
 import finimal.core.keepNextWindow
 import finimal.core.writeAtomically
+import finimal.core.HttpStatus
+import finimal.core.Scratch
+import finimal.core.ScratchServer
+import finimal.core.WrongFile
 
 /**
- * One persistent cache, keyed by item ID, serves streaming, buffering and downloads. A download is
- * a cache fill with a metadata file under `downloads/`; that file is what "pinned" means.
+ * One [Scratch] on the chosen storage, keyed by file version, serves streaming, buffering and downloads; the player
+ * reads it through [proxy]. A download is a whole-file fill with a metadata file under `downloads/`; that file is
+ * what "pinned" means. A download the device can't play is the server's transcode instead, under `transcodes/`.
  */
 object Media {
-    @Volatile lateinit var cache: SimpleCache
+    @Volatile lateinit var scratch: Scratch
         private set
     private lateinit var ctx: Context
-    private lateinit var db: StandaloneDatabaseProvider
     /** Shared by the SDK, Coil and the player, so they reuse connections to the server. */
     val http by lazy { OkHttpClient() }
     private val json = Json { ignoreUnknownKeys = true }
@@ -99,49 +91,60 @@ object Media {
     private const val PLAYLIST = "index.m3u8"
     private fun isSegment(line: String) = line.isNotBlank() && !line.startsWith("#")
     fun playlist(d: Download) = File(transcodeDir(d.item.id.toString()), PLAYLIST).takeIf { d.transcoded && it.exists() }
-    fun isDone(d: Download) = if (d.transcoded) playlist(d) != null else isComplete(key(d.item))
+    fun isDone(d: Download) = if (d.transcoded) playlist(d) != null else scratch.entry(key(d.item)).complete
+
+    /** Loopback HTTP over [scratch], for the player. */
+    private val proxy by lazy { ScratchServer({ scratch }) }
+
+    /** [item]'s entry, with the server's file as its source. */
+    fun entry(item: BaseItemDto): Scratch.Entry {
+        val source = item.mediaSources!!.first()
+        return scratch.entry(key(item)).apply { source({ App.server.streamUrl(item.id.toString(), source.id!!) }, source.size) }
+    }
+
+    /** What the player opens for a direct play: the item's file through [scratch], so it reads what is on disk. */
+    fun streamUrl(item: BaseItemDto): String = entry(item).let { proxy.url(key(item)) }
 
     /** Cache key of what the player has open; eviction never touches it. */
     @Volatile var playing: String? = null
 
-    /** Tags every buffer fill, so [switchStorage] can stop them all. */
+    /** Buffer fills ran as work with this tag before 0.7; any left in WorkManager's database are cancelled. */
     private const val FILL_TAG = "fill"
 
     /**
-     * The selected SD card was missing at app start. The cache then opens on internal storage for
-     * streaming only: nothing downloads or buffers into it, so nothing downloads twice or is left
-     * behind when the card comes back. Checked again at the next start.
+     * The selected SD card was missing at app start. The scratch then opens on internal storage for
+     * streaming only: nothing downloads or buffers to the end into it, so nothing downloads twice or
+     * is left behind when the card comes back. Checked again at the next start.
      */
     @Volatile var storageMissing = false
         private set
 
     fun onAppStart(context: Context) {
         ctx = context
-        db = StandaloneDatabaseProvider(context)
         storageMissing = App.prefs.storageIndex >= storageRoots().size
-        cache = openCache()
+        scratch = openScratch()
     }
 
     /** Off the main thread, after the first frame; see [App.afterFirstFrame]. */
     fun afterFirstFrame(context: Context) {
         val wm = WorkManager.getInstance(context)
-        // The player that wanted them is gone with the old process (and [FillWorker] ends any that run before this).
         wm.cancelAllWorkByTag(FILL_TAG)
+        // Media3's cache, which held downloads and the buffer before 0.7. Its downloads fetch again into the scratch.
+        storageRoots().forEach { File(it, "media").deleteRecursively() }
+        context.deleteDatabase("exoplayer_internal.db")
         // Replaced unless running, so a queue left waiting out a retry backoff starts at once.
         kickDownloads(restart = wm.getWorkInfosForUniqueWork("downloads").get().none { it.state == WorkInfo.State.RUNNING })
         Housekeeping.enqueue(context)
     }
 
-    /** Tells buffer fills of this process from those left by an earlier one. */
-    val processStart = android.os.Process.getStartElapsedRealtime()
-
     /** App-specific storage; index 1+ are removable volumes. Read once per process: a card is checked again at the next start. */
     private val roots by lazy { ctx.getExternalFilesDirs(null).filterNotNull().ifEmpty { listOf(ctx.filesDir) } }
     fun storageRoots(): List<File> = roots
     private fun storageRoot() = storageRoots().getOrElse(App.prefs.storageIndex) { storageRoots()[0] }
-    private fun cacheDir() = File(storageRoot(), "media")
-    // Each cache folder has its own UID, and the shared database keeps one table per UID.
-    private fun openCache() = SimpleCache(cacheDir(), NoOpCacheEvictor(), db)
+    private fun openScratch() = Scratch(File(storageRoot(), "scratch"), http).apply {
+        // Buffer first; a fill that still can't write then stops buffering and downloading.
+        onStorageFull = { val before = freeBytes(); evict(); freeBytes() > before }
+    }
 
     /**
      * Moves storage to root [index] at once. Bytes are not copied: every download and the buffer
@@ -150,73 +153,47 @@ object Media {
      */
     @Synchronized
     fun switchStorage(index: Int) {
-        val wm = WorkManager.getInstance(ctx)
-        wm.cancelUniqueWork("downloads")
-        wm.cancelAllWorkByTag(FILL_TAG)
+        WorkManager.getInstance(ctx).cancelUniqueWork("downloads")
+        stopBuffer(null)
         downloads().forEach { val id = it.item.id.toString(); metaFile(id).delete(); subsDir(id).deleteRecursively() }
         File(storageRoot(), "transcodes").deleteRecursively()
         memo = null
         changes++
-        val old = cache
-        val oldDir = cacheDir()
+        val old = scratch
         App.prefs.storageIndex = index
         storageMissing = false
-        // ponytail: a cancelled worker still mid-write fails on the released cache rather than being awaited.
-        old.release()
-        SimpleCache.delete(oldDir, db)
-        cache = openCache()
+        // A player still open on the old one fails its next read and reconnects to the new one.
+        old.close()
+        old.dir.deleteRecursively()
+        scratch = openScratch()
     }
 
-    /** Plain HTTP plus file:// for downloaded subtitles. */
+    /** Plain HTTP plus file:// for downloaded subtitles and transcoded downloads. */
     fun upstreamFactory() = DefaultDataSource.Factory(ctx, OkHttpDataSource.Factory(http))
 
-    /** The server holds an HLS segment request open until ffmpeg has written it, which can pass OkHttp's 10 s default. */
-    fun transcodeFactory() = DefaultDataSource.Factory(ctx, OkHttpDataSource.Factory(http.newBuilder().readTimeout(30, TimeUnit.SECONDS).build()))
-
-    /** For [FillWorker], the only cache writer. Waits for its own earlier locks instead of skipping ranges. */
-    fun writerFactory(): CacheDataSource.Factory =
-        CacheDataSource.Factory()
-            .setCache(cache)
-            .setUpstreamDataSourceFactory(upstreamFactory())
-            // 1 MB writes instead of the default 20 KB: far fewer syscalls on SD cards and FUSE.
-            .setCacheWriteDataSinkFactory(CacheDataSink.Factory().setCache(cache).setBufferSize(1 shl 20))
-            .setFlags(CacheDataSource.FLAG_BLOCK_ON_CACHE)
-
     /**
-     * For the player: reads the cache, never writes it. A writing reader locks the whole uncached
-     * rest of the file while its stream is open, which starved the buffer worker until playback
-     * caught up. Read-only, it streams uncached ranges directly and rechecks the cache every 100 KB.
+     * For the player, through [proxy] or straight to the server for a transcode. 30 s reads: the proxy waits up to
+     * 20 s for the filler, and the server holds an HLS segment request open until ffmpeg has written it.
      */
-    fun playerFactory(): CacheDataSource.Factory =
-        CacheDataSource.Factory()
-            .setCache(cache)
-            .setUpstreamDataSourceFactory(upstreamFactory())
-            .setCacheWriteDataSinkFactory(null)
-            .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
+    fun playerFactory() = DefaultDataSource.Factory(ctx, OkHttpDataSource.Factory(http.newBuilder().readTimeout(30, TimeUnit.SECONDS).build()))
 
-    // --- progress ------------------------------------------------------------------------------
+    /** The file's length once the server told it; -1 before. */
+    fun lengthOf(key: String) = scratch.entry(key).length
 
-    fun contentLength(key: String) = ContentMetadata.getContentLength(cache.getContentMetadata(key))
-    fun cachedBytes(key: String) = cache.getCachedSpans(key).sumOf { it.length }
-    /** How far, in ms, the disk cache reaches without a gap from [positionMs]; bytes map to time linearly. */
+    /** How far, in ms, the scratch reaches without a gap from [positionMs]; bytes map to time linearly. */
     fun cachedUntilMs(key: String, positionMs: Long, durationMs: Long): Long {
-        val len = contentLength(key)
+        val e = scratch.entry(key)
+        val len = e.length
         if (len <= 0 || durationMs <= 0) return 0
         val start = len * positionMs / durationMs
-        val run = cache.getCachedLength(key, start, len - start).coerceAtLeast(0)
-        return (start + run) * durationMs / len
-    }
-
-    fun isComplete(key: String): Boolean {
-        val len = contentLength(key)
-        return len > 0 && cache.isCached(key, 0, len)
+        return (start + e.contiguous(start)) * durationMs / len
     }
 
     // --- downloads -------------------------------------------------------------------------------
 
     /**
-     * A pinned item. Downloads run one at a time, oldest [queuedAt] first; playing an unfinished
-     * download moves it to the front.
+     * A pinned item. Downloads run one at a time, oldest [queuedAt] first. Playing an unfinished
+     * download fills from the playhead first, through the same scratch entry.
      */
     @Serializable
     data class Download(
@@ -224,8 +201,6 @@ object Media {
         val auto: Boolean,
         val queuedAt: Long = 0,
         val paused: Boolean = false,
-        /** Byte to fill from first, set while the episode plays so the player's part lands on disk first. */
-        val startAt: Long = 0,
         /** The server refused the file (HTTP 4xx, e.g. deleted there); paused with it. Resuming tries again. */
         val failed: Boolean = false,
         /** The disk was full even after evicting the buffer; paused with it. Resuming tries again. */
@@ -316,7 +291,6 @@ object Media {
         // An unfinished download takes the fresh item, so a file changed on the server restarts cleanly.
         val same = existing != null && key(existing.item) == key(item)
         if (existing != null && !same) removeDownloadBytes(existing)
-        WorkManager.getInstance(ctx).cancelUniqueWork("fill-$id") // the queue takes over from a buffer fill
         write(Download(item, existing?.auto ?: auto, existing?.queuedAt ?: System.currentTimeMillis(), paused = false,
             transcoded = if (same) existing!!.transcoded else !playsDirectly(item)))
         kickDownloads(restart = false)
@@ -329,34 +303,13 @@ object Media {
         if (downloading == id) kickDownloads(restart = true)
     }
 
-    /**
-     * Playing an unfinished download moves it to the front, unless the user paused it, and makes the
-     * worker fill from [fromByte] first. Nothing happens when the worker is already on it and that
-     * position is cached, so rebuffering doesn't restart the worker.
-     */
     /** Takes [id] out of the queue without restarting the worker that calls this. */
     @Synchronized
     fun failDownload(id: String, storageFull: Boolean = false) {
         download(id)?.let { write(it.copy(paused = true, failed = !storageFull, storageFull = storageFull)) }
     }
 
-    @Synchronized
-    fun prioritize(id: String, fromByte: Long) {
-        val d = download(id) ?: return
-        val key = key(d.item)
-        // Segments are fetched in order.
-        if (d.paused || d.transcoded || isComplete(key)) return
-        if (downloading == id && cache.getCachedLength(key, fromByte, Long.MAX_VALUE) > 0) return
-        write(d.copy(queuedAt = Long.MIN_VALUE, startAt = fromByte))
-        kickDownloads(restart = true)
-    }
-
-    @Synchronized
-    fun clearStartAt(id: String) {
-        download(id)?.let { write(it.copy(startAt = 0)) }
-    }
-
-    /** The bytes go outside the lock: a whole episode is hundreds of fragments, and the player waits on these locks. */
+    /** The bytes go outside the lock: a whole episode is hundreds of files on an SD card. */
     fun deleteDownload(id: String) {
         val d = synchronized(this) {
             val d = download(id)
@@ -370,11 +323,10 @@ object Media {
         if (d != null && playing != key(d.item)) removeDownloadBytes(d)
     }
 
-    private fun removeDownloadBytes(d: Download) =
-        if (d.transcoded) { transcodeDir(d.item.id.toString()).deleteRecursively(); Unit } else removeBytes(key(d.item))
-
-    /** Span by span, so SimpleCache's lock is free between files for the player and the workers. */
-    private fun removeBytes(key: String) = cache.getCachedSpans(key).forEach(cache::removeSpan)
+    /** A direct download open in the player stays, now as buffer, for eviction to take later. */
+    private fun removeDownloadBytes(d: Download) {
+        if (d.transcoded) transcodeDir(d.item.id.toString()).deleteRecursively() else scratch.delete(key(d.item))
+    }
 
     /**
      * "Keep next N" turned off for [seriesId]: its finished, unplayed downloads become regular
@@ -417,10 +369,10 @@ object Media {
     /** Bytes on disk, percent, and whether it is all there. A transcode counts segments: their sizes aren't known ahead. */
     private fun progress(d: Download): Triple<Long, Int, Boolean> {
         if (!d.transcoded) {
-            val key = key(d.item)
-            val len = contentLength(key)
-            val bytes = cachedBytes(key)
-            return Triple(bytes, if (len > 0) (bytes * 100 / len).toInt() else 0, len > 0 && cache.isCached(key, 0, len))
+            val e = scratch.entry(key(d.item))
+            val len = e.length.takeIf { it > 0 } ?: d.item.mediaSources?.firstOrNull()?.size ?: 0
+            val bytes = e.bytes()
+            return Triple(bytes, if (len > 0) (bytes * 100 / len).toInt() else 0, e.complete)
         }
         val dir = transcodeDir(d.item.id.toString())
         val files = dir.listFiles().orEmpty()
@@ -437,7 +389,6 @@ object Media {
     suspend fun downloadTranscode(d: Download, sourceId: String, onProgress: (Int) -> Unit) = withContext(Dispatchers.IO) {
         val id = d.item.id.toString()
         val dir = transcodeDir(id).apply { mkdirs() }
-        cache.removeResource(key(d.item) + "-ts") // 0.6.0 kept a transcode in the cache as one file
         val base = "${App.prefs.baseUrl}/Videos/$id/"
         val remote = File(dir, "remote.m3u8")
         if (!remote.exists()) {
@@ -472,9 +423,7 @@ object Media {
     /** The server holds a segment request open until its encoder has written it. */
     private val transcodeHttp by lazy { http.newBuilder().readTimeout(30, TimeUnit.SECONDS).build() }
 
-    class HttpStatus(val code: Int) : IOException("HTTP $code")
-
-    /** Status of every download from the cache and the queue. Reads files: call off the main thread. */
+    /** Status of every download from the scratch and the queue. Reads files: call off the main thread. */
     fun downloadStatuses(): Map<String, DownloadStatus> {
         val current = downloading
         val all = downloads()
@@ -498,48 +447,52 @@ object Media {
 
     // --- buffering -------------------------------------------------------------------------------
 
-    /** Fills the cache from [position] to the end while the player is open. */
+    /** The open player's buffer-to-end demand. */
+    private var buffer: Pair<String, Scratch.Demand>? = null
+
+    /**
+     * Fills the scratch from byte [position] to the end while the player is open, where the network allows. The
+     * player's reads fetch what they need regardless; this keeps going while it is paused or reading from memory.
+     */
+    @Synchronized
     fun startBuffer(item: BaseItemDto, position: Long) {
-        val id = item.id.toString()
-        if (download(id) == null) enqueueFill(item, position) else prioritize(id, position)
-    }
-
-    fun stopBuffer(id: String) {
-        if (download(id) == null) WorkManager.getInstance(ctx).cancelUniqueWork("fill-$id")
-    }
-
-    private fun enqueueFill(item: BaseItemDto, position: Long) {
-        val source = item.mediaSources?.firstOrNull() ?: return
-        val id = item.id.toString()
         val key = key(item)
-        val request = OneTimeWorkRequestBuilder<FillWorker>()
-            .addTag(FILL_TAG)
-            // The URL carries the token; it is built when the work runs rather than stored in WorkManager's database.
-            .setInputData(workDataOf("key" to key, "id" to id, "sourceId" to source.id!!, "size" to (source.size ?: 0L), "position" to position, "process" to processStart))
-            .setConstraints(Constraints(requiredNetworkType = if (App.prefs.bufferOnMetered) NetworkType.CONNECTED else NetworkType.UNMETERED))
-            .build()
-        // A seek past the cached part restarts the fill there, as [prioritize] does for a download.
-        val policy = if (cache.getCachedLength(key, position, Long.MAX_VALUE) > 0) ExistingWorkPolicy.KEEP else ExistingWorkPolicy.REPLACE
-        WorkManager.getInstance(ctx).enqueueUniqueWork("fill-$id", policy, request)
+        val cm = ctx.getSystemService(ConnectivityManager::class.java)
+        if (storageMissing || !App.prefs.bufferOnMetered && cm.isActiveNetworkMetered) return stopBuffer(null)
+        val current = buffer
+        if (current?.first == key) return current.second.moveTo(position)
+        stopBuffer(null)
+        buffer = key to entry(item).demand(position, Long.MAX_VALUE, Scratch.Priority.BUFFER)
     }
 
-    /** Bytes of unpinned (buffered) cache entries, the part [evict] limits. */
+    /** Ends the buffer fill; null ends any. */
+    @Synchronized
+    fun stopBuffer(id: String?) {
+        val current = buffer ?: return
+        if (id != null && !current.first.startsWith("$id-")) return
+        current.second.close()
+        buffer = null
+        evict()
+    }
+
+    /** Bytes of unpinned (buffered) scratch entries, the part [evict] limits. */
     fun bufferedBytes(): Long {
         val ids = pinnedIds()
-        return cache.keys.filter { !isPinned(it, ids) }.sumOf(::cachedBytes)
+        return scratch.keys().filter { !isPinned(it, ids) }.sumOf { scratch.entry(it).bytes() }
     }
 
     fun freeBytes() = storageRoot().usableSpace
 
     fun evict() {
         val ids = pinnedIds()
-        val entries = cache.keys.map { key ->
-            val spans = cache.getCachedSpans(key)
-            CacheEntry(key, spans.sumOf { it.length }, spans.maxOfOrNull { it.lastTouchTimestamp } ?: 0, isPinned(key, ids))
+        val entries = scratch.keys().map { key ->
+            val e = scratch.entry(key)
+            CacheEntry(key, e.bytes(), e.touched(), isPinned(key, ids))
         }
         val limit = bufferLimit(App.prefs.cacheLimitGb * 1_000_000_000L, entries.filter { !it.pinned }.sumOf { it.bytes },
             freeBytes(), storageRoot().totalSpace)
-        evictionOrder(entries, limit, playing).forEach(::removeBytes)
+        // An entry still open (the player, a download) refuses, and goes at a later pass.
+        evictionOrder(entries, limit, playing).forEach { scratch.delete(it) }
     }
 
     /** After a failed write: true when the disk is still nearly full once the buffer is evicted. */
@@ -547,16 +500,6 @@ object Media {
         if (freeBytes() >= 100_000_000) return false
         evict()
         return freeBytes() < 100_000_000
-    }
-
-    /**
-     * A captive portal or auth proxy answers 200 with its own page, which would be cached and count
-     * as complete. When the server lists the file's [size], a cached length that differs removes the
-     * bytes and returns true.
-     */
-    fun wrongFile(key: String, size: Long?): Boolean {
-        val len = contentLength(key)
-        return (size != null && size > 0 && len > 0 && len != size).also { if (it) cache.removeResource(key) }
     }
 
     /** Subtitles fetched for items that were only streamed; downloads and the playing item keep theirs. */
@@ -594,50 +537,6 @@ object Media {
 fun externalSubs(item: BaseItemDto): List<MediaStream> =
     item.mediaSources?.firstOrNull()?.mediaStreams.orEmpty().filter { it.type == MediaStreamType.SUBTITLE && it.isExternal }
 
-/**
- * Writes [key] from [position] to the end into the cache; returns once it is all there. A range
- * can come back uncached (another writer held it), so it loops until the cache holds everything.
- * An interrupted run keeps every committed 5 MB fragment, and the next run skips them.
- */
-private suspend fun fillCache(key: String, url: String, position: Long, onProgress: CacheWriter.ProgressListener?): Boolean {
-    repeat(5) {
-        val writer = CacheWriter(
-            Media.writerFactory().createDataSource(),
-            DataSpec.Builder().setUri(url).setPosition(position).setKey(key)
-                .setFlags(DataSpec.FLAG_ALLOW_CACHE_FRAGMENTATION).build(),
-            null,
-            onProgress,
-        )
-        runInterruptible(Dispatchers.IO) { writer.cache() }
-        val len = Media.contentLength(key)
-        if (len > 0 && Media.cache.isCached(key, position, len - position)) return true
-    }
-    return false
-}
-
-/** Buffer-to-end for the episode the player has open. */
-class FillWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
-    override suspend fun doWork(): Result = try {
-        if (Media.storageMissing) return Result.success()
-        // Left by an earlier process: its player is gone. Can run before that process's start-up cancels it.
-        if (inputData.getLong("process", 0) != Media.processStart) return Result.success()
-        val key = inputData.getString("key")!!
-        val url = App.server.streamUrl(inputData.getString("id")!!, inputData.getString("sourceId")!!)
-        val done = fillCache(key, url, inputData.getLong("position", 0), null)
-        Media.evict()
-        when {
-            !done -> Result.retry()
-            Media.wrongFile(key, inputData.getLong("size", 0)) -> Result.failure()
-            else -> Result.success()
-        }
-    } catch (e: HttpDataSource.InvalidResponseCodeException) {
-        // A refused file stays refused; the player shows its own error.
-        if (e.responseCode < 500) Result.failure() else Result.retry()
-    } catch (e: IOException) {
-        if (Media.storageFull()) Result.failure() else Result.retry()
-    }
-}
-
 /** Works through the download queue one episode at a time. */
 class DownloadWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
     override suspend fun doWork(): Result {
@@ -670,27 +569,19 @@ class DownloadWorker(context: Context, params: WorkerParameters) : CoroutineWork
                         setForegroundAsync(foregroundInfo(d, percent))
                     }
                 }
-                val progress = CacheWriter.ProgressListener { length, cached, _ -> report(if (length > 0) (cached * 100 / length).toInt() else -1) }
-                val key = Media.key(d.item)
                 try {
                     if (d.transcoded) {
                         Media.downloadTranscode(d, source.id!!, ::report)
                         continue
                     }
-                    val url = App.server.streamUrl(id, source.id!!)
-                    // From the playhead first while the episode plays, then the rest (cached parts are skipped).
-                    if (d.startAt > 0) {
-                        if (!fillCache(key, url, d.startAt, progress)) return Result.retry()
-                        Media.clearStartAt(id)
-                    }
-                    if (!fillCache(key, url, 0, progress)) return Result.retry()
-                    if (Media.wrongFile(key, source.size)) Media.failDownload(id)
-                } catch (e: HttpDataSource.InvalidResponseCodeException) {
+                    // Chunks already on disk (buffered while playing, or from an interrupted run) are skipped.
+                    val entry = Media.entry(d.item)
+                    runInterruptible(Dispatchers.IO) { entry.download { bytes, total -> if (total > 0) report((bytes * 100 / total).toInt()) } }
+                } catch (e: HttpStatus) {
                     // Refused for this item only; retrying would pick it again forever. A 401 is the token: retry.
-                    if (e.responseCode !in 400..499 || e.responseCode == 401) throw e
-                    Media.failDownload(id)
-                } catch (e: Media.HttpStatus) {
                     if (e.code !in 400..499 || e.code == 401) throw e
+                    Media.failDownload(id)
+                } catch (e: WrongFile) {
                     Media.failDownload(id)
                 }
             }
@@ -732,7 +623,7 @@ class DownloadWorker(context: Context, params: WorkerParameters) : CoroutineWork
     private companion object { const val NOTIFICATION_ID = 1 }
 }
 
-/** Pushes unsynced progress, applies "keep next N" and trims the cache. Runs whenever a network is up. */
+/** Pushes unsynced progress, applies "keep next N" and trims the buffer. Runs whenever a network is up. */
 class Housekeeping(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
     override suspend fun doWork(): Result {
         val server = App.server

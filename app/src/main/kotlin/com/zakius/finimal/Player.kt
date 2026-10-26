@@ -296,7 +296,7 @@ private fun Playback(
             ))
         }
     }
-    val player = remember(transcoding) { buildPlayer(context, playerView, transcoding) }
+    val player = remember(transcoding) { buildPlayer(context, playerView) }
     // Per player: ties reports to the transcode, so a stop ends the server's job, but the direct-play stop never ends the transcode after it.
     val playSession = remember(player) { UUID.randomUUID().toString() }
 
@@ -310,10 +310,9 @@ private fun Playback(
         val streams = externalSubs(item).associateBy { it.index }
         val audioIndex = prefs.audioLang(seriesKey)?.let { audioIndex(source, it) }
         val url = if (transcoding) App.server.transcodeUrl(id, sourceId, audioIndex, playSession)
-            else localPlaylist?.let { Uri.fromFile(it).toString() } ?: App.server.streamUrl(id, sourceId)
+            else localPlaylist?.let { Uri.fromFile(it).toString() } ?: Media.streamUrl(item)
         val mediaItem = MediaItem.Builder()
             .setUri(url)
-            .setCustomCacheKey(cacheKey.takeIf { localPlaylist == null })
             .setSubtitleConfigurations(subs.mapNotNull { (index, file) ->
                 val stream = streams[index] ?: return@mapNotNull null
                 val mime = when (file.extension) {
@@ -385,8 +384,7 @@ private fun Playback(
                     val fraction = player.currentPosition.toDouble() / player.duration.coerceAtLeast(1)
                     // On App.buffers, so a start never lands after the stop on leaving.
                     scope.launch(App.buffers) {
-                        // The player only reads the cache, so the length may not be recorded yet; the server knows it.
-                        val len = Media.contentLength(cacheKey).takeIf { it > 0 } ?: source.size ?: 0
+                        val len = Media.lengthOf(cacheKey).takeIf { it > 0 } ?: source.size ?: 0
                         // A fixed margin behind the playhead: a share of the file would be a gigabyte behind on a big remux.
                         Media.startBuffer(item, if (len > 0) ((len * fraction).toLong() - 32_000_000).coerceAtLeast(0) else 0)
                     }
@@ -556,11 +554,11 @@ private fun Playback(
     }
 }
 
-private fun buildPlayer(context: Context, view: PlayerView, transcoding: Boolean): ExoPlayer {
+private fun buildPlayer(context: Context, view: PlayerView): ExoPlayer {
     AudioDelay.watch(context)
     val renderers = AudioDelay.renderers(context).setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
         .setEnableDecoderFallback(true) // another device decoder before giving up and transcoding
-    // The RAM buffer stays modest; buffering to the end happens on disk through FillWorker.
+    // The RAM buffer stays modest; buffering to the end happens on disk, in Media's scratch.
     // A 15 s back buffer lets skip-back and the subtitle re-read seek stay in memory instead of reloading.
     val load = DefaultLoadControl.Builder().setBufferDurationsMs(30_000, 120_000, 1_000, 2_000)
         .setBackBuffer(15_000, true).build()
@@ -573,7 +571,7 @@ private fun buildPlayer(context: Context, view: PlayerView, transcoding: Boolean
             context,
             renderType = AssRenderType.OVERLAY_OPEN_GL,
             subtitleView = view.subtitleView,
-            dataSourceFactory = if (transcoding) Media.transcodeFactory() else Media.playerFactory(),
+            dataSourceFactory = Media.playerFactory(),
             renderersFactory = renderers,
         )
 }
