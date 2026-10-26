@@ -25,8 +25,10 @@ jobs:
       - name: Install libmpv
         timeout-minutes: 15
         # The runner's Azure mirror of Ubuntu crawled at tens of kB/s, and the install outran its time limit on some
-        # runs; Ubuntu's own mirror, which the containers use, was fast. Output stays on so a slow fetch shows.
+        # runs; Ubuntu's own mirror, which the containers use, was fast. GitHub's images list their mirrors in
+        # apt-mirrors.txt (ubuntu.sources points there), Azure first. Output stays on so a slow fetch shows.
         run: |
+          echo "http://archive.ubuntu.com/ubuntu/" | sudo tee /etc/apt/apt-mirrors.txt
           sudo sed -i 's|http://azure.archive.ubuntu.com|http://archive.ubuntu.com|g' /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list 2>/dev/null || true
           sudo systemctl stop unattended-upgrades.service apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
           sudo apt-get -o DPkg::Lock::Timeout=300 update -q
