@@ -48,6 +48,12 @@ object ScreenSaver {
         release = runCatching { hold() }.onFailure { System.err.println("finimal: can't keep the screen on: $it") }.getOrNull()
     }
 
+    /** For --check-player on Windows: sets and clears the state as playing would, on the same thread; throws if it can't. */
+    fun checkWindows() {
+        if (!System.getProperty("os.name").startsWith("Windows")) return
+        worker.submit { hold()!!.invoke() }.get()
+    }
+
     private fun hold(): (() -> Unit)? {
         if (System.getProperty("os.name").startsWith("Windows")) {
             val kernel = com.sun.jna.Native.load("kernel32", Kernel32::class.java)

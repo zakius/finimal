@@ -193,10 +193,26 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
       - run: tools/fetch-libmpv-windows.sh
       - run: ./gradlew :desktop:packageReleaseMsi :desktop:createReleaseDistributable
-      # The launcher is a windowed program: no console output, but its exit code says whether the player works.
+      # The launcher is a windowed program: run from bash it neither waited for the app nor passed on its result. Start-
+      # Process waits for it and keeps its output and exit code.
       - name: Check the player
         timeout-minutes: 3
-        run: desktop/build/compose/binaries/main-release/app/finimal/finimal.exe --check-player
+        shell: pwsh
+        run: |
+          $p = Start-Process desktop/build/compose/binaries/main-release/app/finimal/finimal.exe -ArgumentList --check-player -Wait -PassThru -RedirectStandardOutput check.txt -RedirectStandardError check-err.txt
+          Get-Content check.txt, check-err.txt
+          if ($p.ExitCode -ne 0) { throw "--check-player exited $($p.ExitCode)" }
+      # The check must be able to fail: without libmpv it has to.
+      - name: The check fails without libmpv
+        timeout-minutes: 3
+        shell: pwsh
+        run: |
+          $dll = Get-ChildItem -Recurse desktop/build/compose/binaries/main-release/app/finimal -Filter libmpv-2.dll | Select-Object -First 1
+          Move-Item $dll.FullName "$($dll.FullName).off"
+          $p = Start-Process desktop/build/compose/binaries/main-release/app/finimal/finimal.exe -ArgumentList --check-player -Wait -PassThru -RedirectStandardOutput check.txt
+          Get-Content check.txt
+          Move-Item "$($dll.FullName).off" $dll.FullName
+          if ($p.ExitCode -eq 0) { throw "--check-player passed without libmpv: it doesn't check anything" }
       - name: A look at the window
         timeout-minutes: 3
         shell: pwsh

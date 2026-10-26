@@ -113,6 +113,7 @@ private fun checkPlayer(): Int = try {
     val icon = File.createTempFile("finimal-check", ".png").apply { deleteOnExit(); writeBytes(object {}.javaClass.getResource("/finimal.png")!!.readBytes()) }
     val image = runBlocking { imageLoader(PlatformContext.INSTANCE).execute(ImageRequest.Builder(PlatformContext.INSTANCE).data(icon).build()) }
     check(image is SuccessResult) { "images don't load: ${(image as? ErrorResult)?.throwable}" }
+    ScreenSaver.checkWindows()
     val mpv = Mpv(mapOf("ao" to "null"))
     mpv.resize(64, 36)
     mpv.load("av://lavfi:testsrc=duration=1:size=64x48:rate=10", 0.0)
