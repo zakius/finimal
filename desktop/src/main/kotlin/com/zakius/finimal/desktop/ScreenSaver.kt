@@ -39,7 +39,7 @@ object ScreenSaver {
     fun inhibit(on: Boolean) = worker.execute {
         if (on == (release != null)) return@execute
         if (!on) { runCatching { release?.invoke() }; release = null; return@execute }
-        release = runCatching { hold() }.getOrNull()
+        release = runCatching { hold() }.onFailure { System.err.println("finimal: can't keep the screen on: $it") }.getOrNull()
     }
 
     private fun hold(): (() -> Unit)? {

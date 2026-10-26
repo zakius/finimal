@@ -90,7 +90,7 @@ jobs:
           distribution: temurin
           java-version: 21
       - uses: gradle/actions/setup-gradle@v4
-      - run: ./gradlew :desktop:createDistributable && tar -C desktop/build/compose/binaries/main -cf desktop-image.tar app
+      - run: ./gradlew :desktop:createReleaseDistributable && tar -C desktop/build/compose/binaries/main-release -cf desktop-image.tar app
       - uses: actions/upload-artifact@v4
         with:
           name: desktop-image
@@ -108,7 +108,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: desktop-image
-      - run: mkdir -p desktop/build/compose/binaries/main && tar -C desktop/build/compose/binaries/main -xf desktop-image.tar
+      - run: mkdir -p desktop/build/compose/binaries/main-release && tar -C desktop/build/compose/binaries/main-release -xf desktop-image.tar
       - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
         with:
           bundle: finimal-x86_64.flatpak

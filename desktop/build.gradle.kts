@@ -34,6 +34,11 @@ compose.desktop {
     application {
         mainClass = "com.zakius.finimal.desktop.MainKt"
         jvmArgs += "-Dfinimal.version=$versionName"
+        // The release distribution (createReleaseDistributable) drops what the app never calls: about half the jars.
+        buildTypes.release.proguard {
+            configurationFiles.from(project.file("proguard-rules.pro"))
+            obfuscate = false
+        }
         nativeDistributions {
             // Linux ships as a Flatpak (packaging/flatpak), built from createDistributable's app image.
             targetFormats(TargetFormat.Msi)
@@ -44,8 +49,8 @@ compose.desktop {
             licenseFile = rootProject.file("LICENSE")
             // windows/libmpv-2.dll from tools/fetch-libmpv-windows.sh; Linux uses the distribution's libmpv2.
             appResourcesRootDir = layout.projectDirectory.dir("resources")
-            // What the code needs beyond java.base and the desktop modules: OkHttp's DNS and TLS, JNA.
-            modules("java.naming", "jdk.crypto.ec", "jdk.unsupported")
+            // Beyond java.base and the desktop modules: OkHttp's DNS and TLS, JNA, and dbus-java's login as the user's uid.
+            modules("java.naming", "jdk.crypto.ec", "jdk.unsupported", "jdk.security.auth")
             windows {
                 iconFile = rootProject.file("packaging/finimal.ico")
                 menuGroup = "finimal"

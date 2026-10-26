@@ -9,6 +9,10 @@ import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.foundation.background
+import androidx.compose.ui.input.pointer.isSecondaryPressed
+import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.clickable
@@ -522,6 +526,7 @@ private fun Poster(
     // The focus highlight doesn't show over artwork; a border does.
     var focused by remember { mutableStateOf(false) }
     Column(Modifier.focusMemory(item.id).onFocusChanged { focused = it.isFocused }
+        .onSecondaryClick(onChanged?.let { { menu = true } })
         .combinedClickable(onClick = onClick, onLongClickLabel = "Actions", onLongClick = onChanged?.let { { menu = true } })) {
         Box(if (focused) Modifier.border(3.dp, MaterialTheme.colorScheme.primary) else Modifier) {
             AsyncImage(App.server.imageUrl(item), null, contentScale = ContentScale.Crop,
@@ -686,6 +691,7 @@ fun EpisodeRow(
         Modifier.fillMaxWidth()
             .background(if (highlighted) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent)
             .focusMemory(ep.id)
+            .onSecondaryClick { menu = true }
             .combinedClickable(onClick = onPlay, onLongClickLabel = "Actions", onLongClick = { menu = true })
             .padding(8.dp),
         horizontalArrangement = Arrangement.spacedBy(12.dp),
@@ -855,7 +861,8 @@ fun SettingsScreen(modifier: Modifier, pop: () -> Unit, onLoggedOut: () -> Unit)
     }
     Column(modifier.fillMaxSize()) {
         Bar("Settings", pop)
-        Column(Modifier.verticalScroll(rememberScrollState())) {
+        // A readable width on tablets and desktop windows, where a label and its control would sit a screen apart.
+        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).wrapContentWidth(Alignment.Start).widthIn(max = 720.dp)) {
             key(refresh) {
                 val android = App.platform.android
                 val downloads = App.downloads
@@ -870,7 +877,8 @@ fun SettingsScreen(modifier: Modifier, pop: () -> Unit, onLoggedOut: () -> Unit)
                 }
 
                 Text("Playback", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(16.dp))
-                Stepper("Wireless audio delay (ms), for Bluetooth headphones and speakers", p.audioDelayMs, AUDIO_DELAYS_MS) { App.platform.setAudioDelay(it); refresh++ }
+                // Android applies it only while a wireless output is connected; the desktop can't tell, so always.
+                Stepper(if (android) "Wireless audio delay (ms), for Bluetooth headphones and speakers" else "Audio delay (ms)", p.audioDelayMs, AUDIO_DELAYS_MS) { App.platform.setAudioDelay(it); refresh++ }
                 Stepper("Skip step (s)", p.doubleTapSeconds, (5..60 step 5).toList()) { p.doubleTapSeconds = it; refresh++ }
                 // Files past these limits start as a transcode. Auto asks the hardware decoders per file.
                 remember { App.platform.decoderSummary() }?.let {
@@ -919,6 +927,16 @@ fun SettingsScreen(modifier: Modifier, pop: () -> Unit, onLoggedOut: () -> Unit)
                 Text("finimal ${App.platform.versionName}", Modifier.padding(16.dp), style = MaterialTheme.typography.labelSmall)
                 Spacer(Modifier.padding(24.dp))
             }
+        }
+    }
+}
+
+/** A right click does what a long press does: the mouse's way to an item's menu. Touch has no secondary button. */
+private fun Modifier.onSecondaryClick(action: (() -> Unit)?): Modifier = if (action == null) this else pointerInput(action) {
+    awaitPointerEventScope {
+        while (true) {
+            val e = awaitPointerEvent()
+            if (e.type == PointerEventType.Press && e.buttons.isSecondaryPressed) { e.changes.forEach { it.consume() }; action() }
         }
     }
 }

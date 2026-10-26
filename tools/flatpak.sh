@@ -5,7 +5,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 version=$(sed -n 's/^finimal.versionName=//p' gradle.properties)
-[ "${1:-}" = --no-gradle ] || ./gradlew -q :desktop:createDistributable
+[ "${1:-}" = --no-gradle ] || ./gradlew -q :desktop:createReleaseDistributable
 mkdir -p dist
 # Builder state persists between runs in .flatpak-builder, so libmpv and FFmpeg build once.
 docker run --rm --privileged -v "$PWD:/src" -w /src ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-25.08 bash -c "

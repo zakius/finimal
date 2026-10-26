@@ -52,6 +52,19 @@ class MpvTest {
         Thread.sleep(500) // the closes finish on their own thread
     }
 
+    /** The resume point: set before loadfile, which works on every libmpv 2.x (0.37 rejected loadfile's options). */
+    @Test fun startsAtTheGivenPosition() {
+        val mpv = Mpv(mapOf("ao" to "null"))
+        try {
+            mpv.resize(64, 36)
+            mpv.load("av://lavfi:testsrc=duration=10:size=64x48:rate=10", 6.0)
+            waitFor(what = "the position") { mpv.loaded && mpv.position >= 5.9 }
+            assertTrue(mpv.position < 9, "position ${mpv.position}")
+        } finally {
+            mpv.close()
+        }
+    }
+
     @Test fun aMissingFileIsAnError() {
         val mpv = Mpv(mapOf("ao" to "null"))
         try {

@@ -127,9 +127,13 @@ class Mpv(options: Map<String, String>) {
 
     init {
         // Ours first; config files and key bindings would only get in the way of an embedded player.
-        val defaults = mapOf("config" to "no", "input-default-bindings" to "no", "osc" to "no", "vo" to "libmpv", "keep-open" to "yes",
-            "hwdec" to "auto-copy", "idle" to "yes", "terminal" to "no")
-        (defaults + options).forEach { (k, v) -> lib.mpv_set_option_string(ctx, k, v) }
+        // No scripts: the built-in ones (stats, console, the ytdl hook, which runs yt-dlp on extension-less http URLs
+        // like the scratch proxy's) do nothing for an embedded player but cost start time.
+        val defaults = mapOf("config" to "no", "input-default-bindings" to "no", "osc" to "no", "load-scripts" to "no", "ytdl" to "no",
+            "vo" to "libmpv", "keep-open" to "yes", "hwdec" to "auto-copy", "idle" to "yes", "terminal" to "no")
+        // FINIMAL_MPV_LOG=<file> keeps mpv's own log, for bug reports.
+        val log = System.getenv("FINIMAL_MPV_LOG")?.let { mapOf("log-file" to it, "msg-level" to "all=v") }.orEmpty()
+        (defaults + options + log).forEach { (k, v) -> lib.mpv_set_option_string(ctx, k, v) }
         check(lib.mpv_initialize(ctx) >= 0) { "mpv_initialize failed" }
         listOf("time-pos" to FORMAT_DOUBLE, "duration" to FORMAT_DOUBLE, "demuxer-cache-time" to FORMAT_DOUBLE, "pause" to FORMAT_FLAG,
             "paused-for-cache" to FORMAT_FLAG, "seeking" to FORMAT_FLAG, "eof-reached" to FORMAT_FLAG, "speed" to FORMAT_DOUBLE,
@@ -252,7 +256,10 @@ class Mpv(options: Map<String, String>) {
     fun load(url: String, startSeconds: Double) {
         error = null
         loaded = false
-        command("loadfile", url, "replace", "-1", "start=$startSeconds")
+        // Not loadfile's per-file options: their position moved in mpv 0.38 (an index came first), and 0.37 (Ubuntu
+        // 24.04) refused the command. Commands run in order, so the start is set when the file opens.
+        set("start", "$startSeconds")
+        command("loadfile", url, "replace")
     }
 
     fun play() = set("pause", "no")

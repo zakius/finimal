@@ -1,4 +1,4 @@
-# finimal for Linux. The app is the jpackage image from `./gradlew :desktop:createDistributable` (Java runtime
+# finimal for Linux. The app is the jpackage image from `./gradlew :desktop:createReleaseDistributable` (Java runtime
 # included); libmpv and the libraries it needs beyond the runtime are built here, as Celluloid's Flathub manifest does,
 # pinned and bumped through x-checker-data.
 # Build: tools/flatpak.sh
@@ -106,19 +106,19 @@ modules:
       - cp -a app /app/finimal
       # The Java runtime's base class-data archive, which jlink leaves out; the launcher builds on it.
       - JAVA_TOOL_OPTIONS=-Xshare:dump /app/finimal/bin/finimal
-      - install -Dm755 finimal.sh /app/bin/finimal
+      - sed 's|@APPDIR@|/app/finimal|' finimal.sh | install -Dm755 /dev/stdin /app/bin/finimal
       - install -Dm644 io.github.zakius.finimal.desktop -t /app/share/applications
       - install -Dm644 io.github.zakius.finimal.metainfo.xml -t /app/share/metainfo
       - install -Dm644 finimal.svg /app/share/icons/hicolor/scalable/apps/io.github.zakius.finimal.svg
     sources:
       - type: dir
-        path: ../../desktop/build/compose/binaries/main/app/finimal
+        path: ../../desktop/build/compose/binaries/main-release/app/finimal
         dest: app
       - type: file
-        path: finimal.sh
+        path: ../finimal.sh
       - type: file
-        path: io.github.zakius.finimal.desktop
+        path: ../io.github.zakius.finimal.desktop
       - type: file
-        path: io.github.zakius.finimal.metainfo.xml
+        path: ../io.github.zakius.finimal.metainfo.xml
       - type: file
         path: ../finimal.svg

@@ -94,13 +94,18 @@ private fun ToastHost(modifier: Modifier) {
  * Prints the outcome; exit code 0 when it worked.
  */
 private fun checkPlayer(): Int = try {
+    // One class from each runtime module beyond the defaults (desktop/build.gradle.kts), which a trimmed runtime can
+    // lack while the Gradle run, on the full JDK, works: dbus-java needed jdk.security.auth.
+    listOf("com.sun.security.auth.module.UnixSystem", "javax.naming.directory.InitialDirContext", "sun.misc.Unsafe",
+        "sun.security.ec.ECKeyFactory").forEach { Class.forName(it) }
     val mpv = Mpv(mapOf("ao" to "null"))
     mpv.resize(64, 36)
     mpv.load("av://lavfi:testsrc=duration=1:size=64x48:rate=10", 0.0)
     val deadline = System.currentTimeMillis() + 20_000
     while ((mpv.frame == null || !mpv.eof) && mpv.error == null && System.currentTimeMillis() < deadline) Thread.sleep(50)
-    val ok = mpv.frame != null && mpv.eof && mpv.error == null
-    println(if (ok) "player ok" else "player failed: frame=${mpv.frame != null} eof=${mpv.eof} error=${mpv.error}")
+    // A duration proves the file opened: an idle mpv draws black frames too.
+    val ok = mpv.frame != null && mpv.duration > 0.5 && mpv.eof && mpv.error == null
+    println(if (ok) "player ok" else "player failed: frame=${mpv.frame != null} duration=${mpv.duration} eof=${mpv.eof} error=${mpv.error}")
     mpv.close()
     if (ok) 0 else 1
 } catch (e: Throwable) {
