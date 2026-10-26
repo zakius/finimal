@@ -1,0 +1,118 @@
+# finimal for Linux. The app is the jpackage image from `./gradlew :desktop:createDistributable` (Java runtime
+# included); libmpv and the libraries it needs beyond the runtime are built here, as Celluloid's Flathub manifest does,
+# pinned and bumped through x-checker-data.
+# Build: tools/flatpak.sh
+app-id: io.github.zakius.finimal
+runtime: org.freedesktop.Platform
+runtime-version: '25.08'
+sdk: org.freedesktop.Sdk
+command: finimal
+finish-args:
+  - --share=network
+  - --share=ipc
+  # Compose for Desktop draws through AWT, which is X11 only on Java 21 (XWayland on Wayland desktops).
+  - --socket=x11
+  - --socket=pulseaudio
+  # GPU: VA-API video decoding and Skia's OpenGL.
+  - --device=dri
+modules:
+  - name: ffmpeg
+    cleanup:
+      - /include
+      - /lib/pkgconfig
+      - /share/ffmpeg
+    config-opts:
+      - --enable-shared
+      - --disable-static
+      - --enable-gnutls
+      - --enable-gpl
+      - --disable-doc
+      - --disable-programs
+      - --disable-encoders
+      - --disable-muxers
+      - --enable-libdav1d
+    sources:
+      - type: archive
+        url: https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz
+        sha256: 8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e
+        x-checker-data:
+          type: anitya
+          project-id: 5405
+          stable-only: true
+          url-template: https://ffmpeg.org/releases/ffmpeg-$version.tar.xz
+
+  - name: libass
+    cleanup:
+      - /include
+      - /lib/*.la
+      - /lib/pkgconfig
+    config-opts:
+      - --disable-static
+    sources:
+      - type: archive
+        url: https://github.com/libass/libass/releases/download/0.17.5/libass-0.17.5.tar.xz
+        sha256: 2dca25c0e0c837ddf00b52011b3f82cac1e4ddd3ad018227806b0c2288864acc
+        x-checker-data:
+          type: anitya
+          project-id: 1560
+          stable-only: true
+          url-template: https://github.com/libass/libass/releases/download/$version/libass-$version.tar.xz
+
+  - name: libplacebo
+    buildsystem: meson
+    cleanup:
+      - /bin
+      - /include
+      - /lib/pkgconfig
+    sources:
+      - type: git
+        url: https://github.com/haasn/libplacebo.git
+        tag: v7.360.1
+        commit: cee9b076f2c63104ccfd497fa79c39a867293ec4
+        x-checker-data:
+          type: git
+          tag-pattern: ^v([\d.]+)$
+
+  # The library only: no player binary, no scripting (the app drives mpv itself).
+  - name: libmpv
+    buildsystem: meson
+    cleanup:
+      - /include
+      - /lib/pkgconfig
+      - /share
+    config-opts:
+      - -Dlibmpv=true
+      - -Dcplayer=false
+      - -Dbuild-date=false
+      - -Dlua=disabled
+      - -Djavascript=disabled
+      - -Dalsa=disabled
+      - -Dmanpage-build=disabled
+    sources:
+      - type: archive
+        url: https://github.com/mpv-player/mpv/archive/v0.41.0.tar.gz
+        sha256: ee21092a5ee427353392360929dc64645c54479aefdb5babc5cfbb5fad626209
+        x-checker-data:
+          type: anitya
+          project-id: 5348
+          stable-only: true
+          url-template: https://github.com/mpv-player/mpv/archive/v$version.tar.gz
+
+  - name: finimal
+    buildsystem: simple
+    build-commands:
+      - cp -a app /app/finimal
+      - install -Dm755 /dev/stdin /app/bin/finimal <<< $'#!/bin/sh\nexec /app/finimal/bin/finimal "$@"'
+      - install -Dm644 io.github.zakius.finimal.desktop -t /app/share/applications
+      - install -Dm644 io.github.zakius.finimal.metainfo.xml -t /app/share/metainfo
+      - install -Dm644 finimal.svg /app/share/icons/hicolor/scalable/apps/io.github.zakius.finimal.svg
+    sources:
+      - type: dir
+        path: ../../desktop/build/compose/binaries/main/app/finimal
+        dest: app
+      - type: file
+        path: io.github.zakius.finimal.desktop
+      - type: file
+        path: io.github.zakius.finimal.metainfo.xml
+      - type: file
+        path: ../finimal.svg

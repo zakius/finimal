@@ -6,3 +6,5 @@ local.properties
 keystore.properties
 *.jks
 dist/
+/desktop/resources/windows/
+/.flatpak-builder/

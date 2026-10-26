@@ -1,8 +1,9 @@
 name: release
 
-# Pull requests: core tests and a debug build. A v* tag: core tests and the signed release APKs (tools/release.sh) in
-# parallel jobs, then a GitHub release once both pass. Its notes are the tagged commit's message body, followed by
-# the generated changelog. Pushes to main: core tests and an unsigned release build, which save the Gradle cache.
+# Pull requests: core and desktop tests and a debug build. A v* tag: tests, the signed release APKs (tools/release.sh)
+# and the Linux Flatpak in parallel jobs, then a GitHub release once all pass. Its notes are the tagged commit's message
+# body, followed by the generated changelog. Pushes to main: tests, an unsigned release build and the Flatpak, which
+# save the Gradle and flatpak-builder caches.
 on:
   push:
     branches: [main]
@@ -19,7 +20,9 @@ jobs:
           distribution: temurin
           java-version: 21
       - uses: gradle/actions/setup-gradle@v4
-      - run: ./gradlew :core:test
+      # The desktop player tests load the distribution's libmpv.
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq libmpv2
+      - run: ./gradlew :core:test :desktop:test
 
   debug:
     if: github.event_name == 'pull_request'
@@ -76,8 +79,51 @@ jobs:
           name: apks
           path: dist/finimal-*.apk
 
+  # The jpackage app image (Java runtime included), tarred: artifacts drop the executable bit.
+  desktop-image:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@v4
+      - run: ./gradlew :desktop:createDistributable && tar -C desktop/build/compose/binaries/main -cf desktop-image.tar app
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-image
+          path: desktop-image.tar
+
+  # libmpv and FFmpeg build here; flatpak-builder's cache keeps them while the manifest's modules are unchanged.
+  flatpak:
+    needs: desktop-image
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-25.08
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: desktop-image
+      - run: mkdir -p desktop/build/compose/binaries/main && tar -C desktop/build/compose/binaries/main -xf desktop-image.tar
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          bundle: finimal-x86_64.flatpak
+          manifest-path: packaging/flatpak/io.github.zakius.finimal.yml
+          cache-key: flatpak-${{ hashFiles('packaging/flatpak/io.github.zakius.finimal.yml') }}
+          upload-artifact: false
+      - name: Player check inside the Flatpak
+        run: flatpak build flatpak_app /app/bin/finimal --check-player
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flatpak
+          path: finimal-x86_64.flatpak
+
   publish:
-    needs: [app, test]
+    needs: [app, test, flatpak]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -87,9 +133,14 @@ jobs:
         with:
           name: apks
           path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: flatpak
+          path: dist
+      - run: mv dist/finimal-x86_64.flatpak "dist/finimal-${GITHUB_REF_NAME#v}-x86_64.flatpak"
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           git log -1 --format=%b | grep -v '^Co-Authored-By' > "$RUNNER_TEMP/notes.md"
-          gh release create "$GITHUB_REF_NAME" dist/finimal-*.apk --notes-file "$RUNNER_TEMP/notes.md" --generate-notes
+          gh release create "$GITHUB_REF_NAME" dist/finimal-*.apk dist/finimal-*.flatpak --notes-file "$RUNNER_TEMP/notes.md" --generate-notes

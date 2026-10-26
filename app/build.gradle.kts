@@ -13,8 +13,8 @@ android {
         applicationId = "com.zakius.finimal"
         minSdk = 26
         targetSdk = 36
-        versionCode = 16
-        versionName = "0.7.0"
+        versionCode = providers.gradleProperty("finimal.versionCode").get().toInt()
+        versionName = providers.gradleProperty("finimal.versionName").get()
     }
 
     buildTypes {

@@ -25,13 +25,32 @@ dependencies {
 
 tasks.test { useJUnitPlatform() }
 
+val versionName = providers.gradleProperty("finimal.versionName").get()
+
 compose.desktop {
     application {
         mainClass = "com.zakius.finimal.desktop.MainKt"
+        jvmArgs += "-Dfinimal.version=$versionName"
         nativeDistributions {
-            targetFormats(TargetFormat.Deb, TargetFormat.Msi)
+            // Linux ships as a Flatpak (packaging/flatpak), built from createDistributable's app image.
+            targetFormats(TargetFormat.Msi)
             packageName = "finimal"
-            packageVersion = "0.7.0"
+            packageVersion = versionName
+            description = "Jellyfin client for movies and TV"
+            vendor = "zakius"
+            licenseFile = rootProject.file("LICENSE")
+            // windows/libmpv-2.dll from tools/fetch-libmpv-windows.sh; Linux uses the distribution's libmpv2.
+            appResourcesRootDir = layout.projectDirectory.dir("resources")
+            // What the code needs beyond java.base and the desktop modules: OkHttp's DNS and TLS, JNA.
+            modules("java.naming", "jdk.crypto.ec", "jdk.unsupported")
+            windows {
+                iconFile = rootProject.file("packaging/finimal.ico")
+                menuGroup = "finimal"
+                perUserInstall = true
+                shortcut = true
+                // Fixed, so a new MSI replaces the installed version instead of installing beside it.
+                upgradeUuid = "3f7c2a4e-8b1d-4e6a-9c2f-5d8e1a7b4c90"
+            }
         }
     }
 }

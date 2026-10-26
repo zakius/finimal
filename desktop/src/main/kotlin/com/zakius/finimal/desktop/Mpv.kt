@@ -53,6 +53,11 @@ private object Lib {
         // libmpv refuses to start unless numbers parse the C way, and the JVM sets the user's locale (a decimal comma
         // in Polish). LC_NUMERIC is 1 on Linux and 4 on macOS; Windows has no such check.
         val os = System.getProperty("os.name")
+        // Windows has no system libmpv: the app carries one in its resources folder. A newer libmpv-2.dll in
+        // %APPDATA%\finimal comes first, so mpv can be updated without a new finimal.
+        val dirs = listOfNotNull(System.getenv("APPDATA")?.let { "$it\\finimal" }.takeIf { os.startsWith("Windows") },
+            System.getProperty("compose.application.resources.dir"))
+        if (dirs.isNotEmpty()) System.setProperty("jna.library.path", dirs.joinToString(java.io.File.pathSeparator))
         if (!os.startsWith("Windows")) Native.load("c", LibC::class.java).setlocale(if (os.startsWith("Mac")) 4 else 1, "C")
         val names = listOf("mpv", "libmpv.so.2", "libmpv-2", "mpv-2", "mpv-1")
         names.firstNotNullOfOrNull { runCatching { Native.load(it, LibMpv::class.java) }.getOrNull() }

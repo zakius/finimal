@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=finimal
+Comment=Jellyfin client for movies and TV
+Exec=finimal
+Icon=io.github.zakius.finimal
+Categories=AudioVideo;Video;Player;
+StartupWMClass=finimal

@@ -10,7 +10,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 sdk=${ANDROID_HOME:-$(sed -n 's/^sdk.dir=//p' local.properties 2>/dev/null)}
 tools=$(ls -d "$sdk/build-tools/"* | sort -V | tail -n 1)
-version=$(sed -n 's/.*versionName = "\(.*\)".*/\1/p' app/build.gradle.kts)
+version=$(sed -n 's/^finimal.versionName=//p' gradle.properties)
 [ "${1:-}" = --no-build ] || ./gradlew -q :app:assembleRelease
 source <(sed 's/^\([a-zA-Z]*\)=\(.*\)$/\1="\2"/' "${KEYSTORE_PROPERTIES:-keystore.properties}")
 built=app/build/outputs/apk/release

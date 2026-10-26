@@ -16,6 +16,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
@@ -28,8 +29,10 @@ import com.zakius.finimal.Theme
 import com.zakius.finimal.Toasts
 import kotlinx.coroutines.delay
 import okhttp3.Dispatcher
+import kotlin.system.exitProcess
 
-fun main() {
+fun main(args: Array<String>) {
+    if ("--check-player" in args) exitProcess(checkPlayer())
     App.platform = DesktopPlatform
     // Own dispatcher: a screen of thumbnails must not queue behind or ahead of API calls (5 per host each).
     SingletonImageLoader.setSafe { ctx ->
@@ -39,7 +42,7 @@ fun main() {
     }
     application {
         val window = rememberWindowState(width = 1280.dp, height = 800.dp)
-        Window(::exitApplication, window, title = "finimal") {
+        Window(::exitApplication, window, title = "finimal", icon = painterResource("finimal.png")) {
             Theme { CompositionLocalProvider(LocalWindow provides window) {
                 Box(Modifier.fillMaxSize()) {
                     Root(openDownloads = false, openedDownloads = {}) { id, onBack, onPlay -> PlayerScreen(id, onBack, onPlay) }
@@ -60,4 +63,23 @@ private fun ToastHost(modifier: Modifier) {
         Text(text, modifier.padding(32.dp).background(MaterialTheme.colorScheme.inverseSurface, MaterialTheme.shapes.small).padding(horizontal = 16.dp, vertical = 10.dp),
             color = MaterialTheme.colorScheme.inverseOnSurface)
     }
+}
+
+/**
+ * For package checks without a screen: loads libmpv, renders a frame of a clip mpv generates and plays it to the end.
+ * Prints the outcome; exit code 0 when it worked.
+ */
+private fun checkPlayer(): Int = try {
+    val mpv = Mpv(mapOf("ao" to "null"))
+    mpv.resize(64, 36)
+    mpv.load("av://lavfi:testsrc=duration=1:size=64x48:rate=10", 0.0)
+    val deadline = System.currentTimeMillis() + 20_000
+    while ((mpv.frame == null || !mpv.eof) && mpv.error == null && System.currentTimeMillis() < deadline) Thread.sleep(50)
+    val ok = mpv.frame != null && mpv.eof && mpv.error == null
+    println(if (ok) "player ok" else "player failed: frame=${mpv.frame != null} eof=${mpv.eof} error=${mpv.error}")
+    mpv.close()
+    if (ok) 0 else 1
+} catch (e: Throwable) {
+    println("player failed: $e")
+    1
 }

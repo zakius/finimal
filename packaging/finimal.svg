@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="108" height="108" viewBox="0 0 108 108">
+  <!-- The Android launcher icon (app/src/main/res/drawable/ic_launcher_foreground.xml) on its background colour. -->
+  <rect width="108" height="108" rx="24" fill="#1E3A5F"/>
+  <path d="M44,36 L74,54 L44,72 Z" fill="#FFFFFF" stroke="#FFFFFF" stroke-width="6" stroke-linejoin="round"/>
+</svg>
