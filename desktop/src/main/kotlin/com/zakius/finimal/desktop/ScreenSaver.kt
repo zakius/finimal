@@ -26,10 +26,16 @@ private interface FreedesktopScreenSaver : DBusInterface {
     fun UnInhibit(cookie: UInt32)
 }
 
+@Suppress("FunctionName")
+private interface Kernel32 : com.sun.jna.Library {
+    fun SetThreadExecutionState(flags: Int): Int
+}
+
 /**
  * Keeps the screen on while a video plays. mpv does this itself only with its own window; embedded, it's ours to do.
- * Linux: the desktop portal's Inhibit (what a Flatpak may use), else org.freedesktop.ScreenSaver. D-Bus calls run on
- * their own thread, so a slow bus never holds up the player.
+ * Linux: the desktop portal's Inhibit (what a Flatpak may use), else org.freedesktop.ScreenSaver. Windows:
+ * SetThreadExecutionState, which holds while the thread that set it lives, so everything runs on one worker thread,
+ * which also keeps a slow D-Bus from holding up the player.
  */
 object ScreenSaver {
     private val worker = Executors.newSingleThreadExecutor { Thread(it, "screensaver").apply { isDaemon = true } }
@@ -43,7 +49,12 @@ object ScreenSaver {
     }
 
     private fun hold(): (() -> Unit)? {
-        if (System.getProperty("os.name").startsWith("Windows")) return null
+        if (System.getProperty("os.name").startsWith("Windows")) {
+            val kernel = com.sun.jna.Native.load("kernel32", Kernel32::class.java)
+            // ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED; ES_CONTINUOUS alone clears them.
+            check(kernel.SetThreadExecutionState(0x80000000.toInt() or 0x2 or 0x1) != 0) { "SetThreadExecutionState failed" }
+            return { kernel.SetThreadExecutionState(0x80000000.toInt()) }
+        }
         val conn = bus ?: DBusConnectionBuilder.forSessionBus().build().also { bus = it }
         return runCatching {
             val portal = conn.getRemoteObject("org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop", PortalInhibit::class.java)

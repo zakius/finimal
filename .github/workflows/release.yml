@@ -177,8 +177,59 @@ jobs:
             dist/finimal_*_amd64.deb
             dist/finimal-*.rpm
 
+  # The Windows app: an MSI and a portable zip, carrying libmpv-2.dll (Windows has no system libmpv).
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@v4
+      - run: tools/fetch-libmpv-windows.sh
+      - run: ./gradlew :desktop:packageReleaseMsi :desktop:createReleaseDistributable
+      # The launcher is a windowed program: no console output, but its exit code says whether the player works.
+      - name: Check the player
+        timeout-minutes: 3
+        run: desktop/build/compose/binaries/main-release/app/finimal/finimal.exe --check-player
+      - name: A look at the window
+        timeout-minutes: 3
+        shell: pwsh
+        run: |
+          $app = Start-Process desktop/build/compose/binaries/main-release/app/finimal/finimal.exe -PassThru
+          Start-Sleep 15
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+          [System.Drawing.Graphics]::FromImage($bmp).CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
+          $bmp.Save("$PWD/windows-screen.png")
+          Stop-Process $app
+      - name: Package
+        run: |
+          version=$(sed -n 's/^finimal.versionName=//p' gradle.properties)
+          mkdir -p dist
+          cp desktop/build/compose/binaries/main-release/msi/*.msi "dist/finimal-$version-x64.msi"
+          (cd desktop/build/compose/binaries/main-release/app && 7z a -tzip -mx=9 "$OLDPWD/dist/finimal-$version-windows-x64.zip" finimal > /dev/null)
+          ls -l dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            dist/finimal-*.msi
+            dist/finimal-*-windows-x64.zip
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-screen
+          path: windows-screen.png
+
   publish:
-    needs: [app, test, flatpak, linux-packages]
+    needs: [app, test, flatpak, linux-packages, windows]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -199,10 +250,14 @@ jobs:
         with:
           name: linux-packages
           path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows
+          path: dist
       - run: mv dist/finimal-x86_64.flatpak "dist/finimal-${GITHUB_REF_NAME#v}-x86_64.flatpak"
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           git log -1 --format=%b --fixed-strings --grep "Release ${GITHUB_REF_NAME#v}" | grep -v '^Co-Authored-By' > "$RUNNER_TEMP/notes.md"
-          gh release create "$GITHUB_REF_NAME" dist/finimal-*.apk dist/finimal-*.flatpak dist/finimal_*.deb dist/finimal-*.rpm --notes-file "$RUNNER_TEMP/notes.md" --generate-notes
+          gh release create "$GITHUB_REF_NAME" dist/finimal-*.apk dist/finimal-*.flatpak dist/finimal_*.deb dist/finimal-*.rpm dist/finimal-*.msi dist/finimal-*-windows-x64.zip --notes-file "$RUNNER_TEMP/notes.md" --generate-notes
