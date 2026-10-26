@@ -28,7 +28,14 @@ import java.awt.KeyboardFocusManager
 import java.awt.event.KeyEvent
 import kotlinx.coroutines.flow.collectLatest
 import coil3.ImageLoader
+import coil3.PlatformContext
 import coil3.SingletonImageLoader
+import coil3.request.ErrorResult
+import coil3.request.ImageRequest
+import coil3.request.SuccessResult
+import java.io.File
+import kotlinx.coroutines.runBlocking
+import coil3.serviceLoaderEnabled
 import coil3.network.okhttp.OkHttpNetworkFetcherFactory
 import com.zakius.finimal.App
 import com.zakius.finimal.Root
@@ -42,12 +49,7 @@ import kotlin.system.exitProcess
 fun main(args: Array<String>) {
     if ("--check-player" in args) exitProcess(checkPlayer())
     App.platform = DesktopPlatform
-    // Own dispatcher: a screen of thumbnails must not queue behind or ahead of API calls (5 per host each).
-    SingletonImageLoader.setSafe { ctx ->
-        ImageLoader.Builder(ctx).components {
-            add(OkHttpNetworkFetcherFactory(callFactory = { App.http.newBuilder().dispatcher(Dispatcher()).build() }))
-        }.build()
-    }
+    SingletonImageLoader.setSafe(::imageLoader)
     application {
         val control = remember { WindowControl.restore() }
         LaunchedEffect(control) {
@@ -68,6 +70,15 @@ fun main(args: Array<String>) {
         }
     }
 }
+
+/**
+ * Own dispatcher: a screen of thumbnails must not queue behind or ahead of API calls (5 per host each). No
+ * ServiceLoader scan, as on Android: the one fetcher is added here, and in the ProGuard build the scan found a
+ * registration whose class was gone, and no image loaded.
+ */
+private fun imageLoader(ctx: PlatformContext) = ImageLoader.Builder(ctx).serviceLoaderEnabled(false).components {
+    add(OkHttpNetworkFetcherFactory(callFactory = { App.http.newBuilder().dispatcher(Dispatcher()).build() }))
+}.build()
 
 /** Back on the desktop is Esc: the player takes it first (out of fullscreen, then out), the screens after. */
 private fun pressEscape() {
@@ -98,6 +109,10 @@ private fun checkPlayer(): Int = try {
     // lack while the Gradle run, on the full JDK, works: dbus-java needed jdk.security.auth.
     listOf("com.sun.security.auth.module.UnixSystem", "javax.naming.directory.InitialDirContext", "sun.misc.Unsafe",
         "sun.security.ec.ECKeyFactory").forEach { Class.forName(it) }
+    // The image loader as the app builds it, decoding the bundled icon: in a ProGuard build it once loaded nothing.
+    val icon = File.createTempFile("finimal-check", ".png").apply { deleteOnExit(); writeBytes(object {}.javaClass.getResource("/finimal.png")!!.readBytes()) }
+    val image = runBlocking { imageLoader(PlatformContext.INSTANCE).execute(ImageRequest.Builder(PlatformContext.INSTANCE).data(icon).build()) }
+    check(image is SuccessResult) { "images don't load: ${(image as? ErrorResult)?.throwable}" }
     val mpv = Mpv(mapOf("ao" to "null"))
     mpv.resize(64, 36)
     mpv.load("av://lavfi:testsrc=duration=1:size=64x48:rate=10", 0.0)

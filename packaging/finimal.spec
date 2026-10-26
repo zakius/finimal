@@ -1,5 +1,8 @@
 # Fedora package around the tree tools/linux-packages.sh stages. Java and libmpv come from Fedora, so their fixes
 # arrive with system updates.
+# xz, as the .deb: Ubuntu's rpmbuild (CI) defaults to gzip, which left the package 40 % bigger.
+%global _binary_payload w9.xzdio
+
 Name:           finimal
 Version:        %{version}
 Release:        1

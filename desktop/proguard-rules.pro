@@ -12,6 +12,11 @@
 -keep class org.freedesktop.dbus.** { *; }
 -keep interface * extends org.freedesktop.dbus.interfaces.DBusInterface { *; }
 
+# What jars register in META-INF/services must stay: ProGuard, unlike R8, doesn't keep it on its own.
+-keep class * implements coil3.util.FetcherServiceLoaderTarget { *; }
+-keep class * implements coil3.util.DecoderServiceLoaderTarget { *; }
+-keep class * implements kotlinx.coroutines.internal.MainDispatcherFactory { *; }
+
 # kotlinx.serialization: the generated serializers of our classes and the Jellyfin SDK's.
 -keep,includedescriptorclasses class **$$serializer { *; }
 -keepclassmembers class * { *** Companion; }
