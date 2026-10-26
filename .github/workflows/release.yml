@@ -23,10 +23,11 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
       # The desktop player tests load the distribution's libmpv.
       - name: Install libmpv
-        timeout-minutes: 8
-        # GitHub's runners start unattended-upgrades after boot. It holds dpkg's lock, and apt waited on it, silently
-        # under -qq, until the step was killed. Stop it; a lock still held fails in 5 minutes with apt saying so.
+        timeout-minutes: 15
+        # The runner's Azure mirror of Ubuntu crawled at tens of kB/s, and the install outran its time limit on some
+        # runs; Ubuntu's own mirror, which the containers use, was fast. Output stays on so a slow fetch shows.
         run: |
+          sudo sed -i 's|http://azure.archive.ubuntu.com|http://archive.ubuntu.com|g' /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list 2>/dev/null || true
           sudo systemctl stop unattended-upgrades.service apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
           sudo apt-get -o DPkg::Lock::Timeout=300 update -q
           sudo apt-get -o DPkg::Lock::Timeout=300 install -y -q libmpv2
@@ -149,14 +150,8 @@ jobs:
         with:
           name: desktop-image
       - run: mkdir -p desktop/build/compose/binaries/main-release && tar -C desktop/build/compose/binaries/main-release -xf desktop-image.tar
-      - name: Install rpmbuild
-        timeout-minutes: 8
-        # GitHub's runners start unattended-upgrades after boot. It holds dpkg's lock, and apt waited on it, silently
-        # under -qq, until the step was killed. Stop it; a lock still held fails in 5 minutes with apt saying so.
-        run: |
-          sudo systemctl stop unattended-upgrades.service apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
-          sudo apt-get -o DPkg::Lock::Timeout=300 update -q
-          sudo apt-get -o DPkg::Lock::Timeout=300 install -y -q rpm
+      # The .rpm builds in a Fedora container (the script's way without rpmbuild): no apt on the runner, whose
+      # mirror was slow.
       - run: tools/linux-packages.sh --no-gradle
       # In clean containers, not on the runner: no background upgrades holding apt, and no preinstalled JDKs to hide
       # what a user's system lacks. One step each, with its own limit.
