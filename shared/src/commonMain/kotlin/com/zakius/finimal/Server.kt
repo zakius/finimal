@@ -53,6 +53,7 @@ import org.jellyfin.sdk.model.api.UserItemDataDto
 import finimal.core.PlayState
 import finimal.core.ResumeRules
 import finimal.core.shouldPush
+import finimal.core.serverCandidates
 
 enum class Sort(val label: String, val by: ItemSortBy, val order: SortOrder) {
     NAME("Name", ItemSortBy.SORT_NAME, SortOrder.ASCENDING),
@@ -98,14 +99,15 @@ class Server {
     val loggedIn get() = prefs.loggedIn
     private val userId get() = UUID.fromString(prefs.userId)
 
-    /** A URL without a scheme tries https, then http (Jellyfin's LAN default) if https can't connect. */
-    suspend fun login(url: String, username: String, password: String) {
-        val base = url.trim().trimEnd('/')
+    /** Tries the addresses [serverCandidates] makes of the form's fields in turn, the next only if one can't connect. */
+    suspend fun login(server: String, port: String, username: String, password: String) {
         val credentials = AuthenticateUserByName(username, password)
-        if ("://" in base) return login(base, credentials)
-        try { login("https://$base", credentials) }
-        // A certificate problem is not a server without https: falling back would send the password in clear text.
-        catch (e: Exception) { if (unreachable(e) && !untrustedCertificate(e)) login("http://$base", credentials) else throw e }
+        val tries = serverCandidates(server, port)
+        for ((i, base) in tries.withIndex()) {
+            try { return login(base, credentials) }
+            // A certificate problem is not a server without https: falling back would send the password in clear text.
+            catch (e: Exception) { if (i == tries.lastIndex || !unreachable(e) || untrustedCertificate(e)) throw e }
+        }
     }
 
     private suspend fun login(base: String, credentials: AuthenticateUserByName) {

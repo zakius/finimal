@@ -9,6 +9,9 @@ import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.foundation.background
+import finimal.core.isValidPort
+import finimal.core.splitServerAddress
+import finimal.core.serverCandidates
 import androidx.compose.ui.input.pointer.isSecondaryPressed
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.pointerInput
@@ -389,18 +392,21 @@ private fun Empty(text: String) = Box(Modifier.fillMaxSize().padding(24.dp), con
 
 @Composable
 fun LoginScreen(modifier: Modifier, onDone: () -> Unit) {
-    var url by rememberSaveable { mutableStateOf(App.prefs.baseUrl.orEmpty()) }
+    val saved = remember { splitServerAddress(App.prefs.baseUrl) }
+    var url by rememberSaveable { mutableStateOf(saved.first) }
+    var port by rememberSaveable { mutableStateOf(saved.second) }
     var user by rememberSaveable { mutableStateOf("") }
     var pass by remember { mutableStateOf("") }
     var error by remember { mutableStateOf<Throwable?>(null) }
     var busy by remember { mutableStateOf(false) }
     var showPass by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
+    val portOk = isValidPort(port.trim())
     fun submit() {
-        if (busy) return
+        if (busy || !portOk) return
         busy = true
         scope.launch {
-            runCatching { App.server.login(url, user, pass) }
+            runCatching { App.server.login(url, port, user, pass) }
                 .onSuccess { onDone() }
                 .onFailure { error = it }
             busy = false
@@ -412,8 +418,16 @@ fun LoginScreen(modifier: Modifier, onDone: () -> Unit) {
     Column(Modifier.widthIn(max = 560.dp).fillMaxHeight().verticalScroll(rememberScrollState()).padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("finimal", style = MaterialTheme.typography.headlineMedium)
         if (App.sessionExpired) Text("The server ended this session. Log in again; unsynced progress is kept.")
-        OutlinedTextField(url, { url = it; error = null }, label = { Text("Server URL") }, placeholder = { Text("jellyfin.example.com:8096") }, singleLine = true, enabled = !busy, modifier = Modifier.fillMaxWidth(),
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Next))
+        // The port apart, prefilled with Jellyfin's; one written into the server field wins (see serverCandidates).
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            OutlinedTextField(url, { url = it; error = null }, label = { Text("Server") }, placeholder = { Text("jellyfin.example.com") }, singleLine = true, enabled = !busy,
+                modifier = Modifier.weight(1f), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Next))
+            OutlinedTextField(port, { port = it.filter(Char::isDigit).take(5); error = null }, label = { Text("Port") }, singleLine = true, enabled = !busy,
+                isError = !portOk, modifier = Modifier.width(112.dp),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Next))
+        }
+        if (!portOk) Text("The port is a number from 1 to 65535, or empty for the default of https or http.", color = MaterialTheme.colorScheme.error,
+            style = MaterialTheme.typography.bodySmall)
         OutlinedTextField(user, { user = it; error = null }, label = { Text("Username") }, singleLine = true, enabled = !busy,
             modifier = Modifier.fillMaxWidth().semantics { contentType = ContentType.Username },
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next))
@@ -425,9 +439,9 @@ fun LoginScreen(modifier: Modifier, onDone: () -> Unit) {
             keyboardActions = KeyboardActions(onDone = { submit() }))
         error?.let { e ->
             if (e is InvalidStatusException && e.status == 401) Text("Wrong username or password", color = MaterialTheme.colorScheme.error)
-            else ErrorText(loadError(e) + if (unreachable(e)) " at ${url.trim()}" else "", e.message ?: e.javaClass.simpleName, MaterialTheme.colorScheme.error)
+            else ErrorText(loadError(e) + if (unreachable(e)) " at ${serverCandidates(url, port).joinToString(" or ")}" else "", e.message ?: e.javaClass.simpleName, MaterialTheme.colorScheme.error)
         }
-        Button(enabled = !busy, onClick = ::submit) {
+        Button(enabled = !busy && portOk, onClick = ::submit) {
             if (busy) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp) else Text("Log in")
         }
     }

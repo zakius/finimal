@@ -6,9 +6,9 @@ A Jellyfin client for Android that goes straight to the library. It prefers a fe
 
 - Android phone and tablet, portrait and landscape, and Android TV and TV boxes. Minimum API 26. No Google Play Services: it must run on EMUI.
 - One server, one user. Username/password login; the token is stored.
-  - A server URL without a scheme tries https first, then http if https can't connect. A certificate problem (untrusted, expired, wrong name) never falls back: the password would go out in clear text. It says "The server's certificate isn't trusted".
+  - The form has the server and, beside it, the port, prefilled with Jellyfin's 8096 (`serverCandidates` in `core`). Without a scheme it tries https, then http, on that port; with 8096 left as it is, https on 443 last, for a server behind a reverse proxy. A port in the server field wins; an empty port means the scheme's default; a written scheme is tried as written. A certificate problem (untrusted, expired, wrong name) never falls back: the password would go out in clear text. It says "The server's certificate isn't trusted". Logging in again shows the saved address split back into the two fields.
   - Login stores URL, token and user in one write. The password field has Show/Hide; editing a field clears the old error.
-  - Login errors say "Wrong username or password" (HTTP 401). Anything else gets the same sentence as a list that fails to load (can't reach the server, a server error with its status, or a generic message), with the raw error in small text. Can't reach the server also names the URL tried.
+  - Login errors say "Wrong username or password" (HTTP 401). Anything else gets the same sentence as a list that fails to load (can't reach the server, a server error with its status, or a generic message), with the raw error in small text. Can't reach the server also names the addresses tried.
 - Movies and TV shows only. Other library types are hidden.
 - Out of scope: background audio, picture-in-picture, Quick Connect, home rows, Next Up, Continue Watching.
 - Desktop: Linux (Flatpak) now, Windows later. See [Desktop](#desktop).
