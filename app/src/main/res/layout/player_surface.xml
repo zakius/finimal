@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Media3's exo_player_view without the views finimal never shows. Without exo_controller_placeholder, PlayerView
+     doesn't build its PlayerControlView (half of its 6 ms construction on the phone), which useController = false
+     doesn't prevent. -->
+<merge xmlns:android="http://schemas.android.com/apk/res/android">
+
+  <androidx.media3.ui.AspectRatioFrameLayout android:id="@id/exo_content_frame"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:layout_gravity="center">
+
+    <!-- Video surface will be inserted as the first child of the content frame. -->
+
+    <View android:id="@id/exo_shutter"
+      android:layout_width="match_parent"
+      android:layout_height="match_parent"
+      android:background="@android:color/black"/>
+
+    <androidx.media3.ui.SubtitleView android:id="@id/exo_subtitles"
+      android:layout_width="match_parent"
+      android:layout_height="match_parent"/>
+
+  </androidx.media3.ui.AspectRatioFrameLayout>
+
+  <FrameLayout android:id="@id/exo_overlay"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"/>
+
+</merge>

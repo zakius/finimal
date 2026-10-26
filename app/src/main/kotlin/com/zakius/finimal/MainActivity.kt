@@ -23,6 +23,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.material.ripple.RippleAlpha
 import androidx.compose.material3.LocalRippleConfiguration
@@ -36,7 +37,21 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.toMutableStateList
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.layout.Box
+import androidx.compose.runtime.State
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.staticCompositionLocalOf
+import androidx.compose.ui.layout.layout
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.ui.graphics.painter.Painter
+import androidx.compose.ui.graphics.vector.rememberVectorPainter
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 
@@ -126,20 +141,50 @@ private fun Root(openDownloads: Boolean, openedDownloads: () -> Unit) {
         openedDownloads()
     }
     LaunchedEffect(App.sessionExpired) { if (App.sessionExpired) reset(Screen.Login) }
-    val top = stack.last()
     val topKey = keyOf(stack.lastIndex)
+    // D-pad focus stays on a covered screen's item otherwise; the screen coming back on top takes its own back.
+    val focus = LocalFocusManager.current
+    LaunchedEffect(topKey) { focus.clearFocus(force = true) }
     // TVs may crop the picture's edges (overscan); Android TV's guideline margin keeps the UI inside.
     val padded = Modifier.safeDrawingPadding().then(if (App.tv) Modifier.padding(horizontal = 48.dp, vertical = 27.dp) else Modifier)
-    // key() gives each screen its own state, so the next episode never inherits the previous player.
-    key(topKey) { saved.SaveableStateProvider(topKey) { FocusMemory { when (top) {
-        Screen.Login -> LoginScreen(padded) { reset(Screen.Libraries) }
-        Screen.Libraries -> LibrariesScreen(padded, ::push)
-        Screen.Downloads -> DownloadsScreen(padded, ::push, ::pop)
-        Screen.Settings -> SettingsScreen(padded, ::pop) { reset(Screen.Login) }
-        is Screen.Library -> LibraryScreen(padded, top, ::push, ::pop)
-        is Screen.Series -> SeriesScreen(padded, top, ::push, ::pop)
-        is Screen.Season -> SeasonScreen(padded, top, ::push, ::pop)
-        // "Play next" replaces the player instead of stacking players.
-        is Screen.Play -> PlayerScreen(top.itemId, ::pop) { next -> pop(); push(Screen.Play(next)) }
-    } } } }
+    val back = rememberVectorPainter(Icons.AutoMirrored.Filled.ArrowBack)
+    val more = rememberVectorPainter(Icons.Default.MoreVert)
+    val settings = rememberVectorPainter(Icons.Default.Settings)
+    val play = rememberVectorPainter(Icons.Default.PlayArrow)
+    val icons = remember(back, more, settings, play) { ListIcons(back, more, settings, play) }
+    // Covered screens stay composed, so going back only lays out and draws: rebuilding the poster grid took 13 ms of the
+    // main thread on the phone (2026-10-26). Screens read LocalShown to pause their own work while covered.
+    // key() gives each entry its own state, so the next episode never inherits the previous player.
+    CompositionLocalProvider(LocalIcons provides icons) { stack.forEachIndexed { i, screen -> key(keyOf(i)) {
+        val shown = i == stack.lastIndex
+        // A State, not a value: screens watch it from their effects, so covering or uncovering one recomposes nothing.
+        val shownState = rememberUpdatedState(shown)
+        Box(if (shown) Modifier.fillMaxSize() else Modifier.hidden(), propagateMinConstraints = true) {
+            CompositionLocalProvider(LocalShown provides shownState) { saved.SaveableStateProvider(keyOf(i)) { FocusMemory { when (screen) {
+                Screen.Login -> LoginScreen(padded) { reset(Screen.Libraries) }
+                Screen.Libraries -> LibrariesScreen(padded, ::push)
+                Screen.Downloads -> DownloadsScreen(padded, ::push, ::pop)
+                Screen.Settings -> SettingsScreen(padded, ::pop) { reset(Screen.Login) }
+                is Screen.Library -> LibraryScreen(padded, screen, ::push, ::pop)
+                is Screen.Series -> SeriesScreen(padded, screen, ::push, ::pop)
+                is Screen.Season -> SeasonScreen(padded, screen, ::push, ::pop)
+                // "Play next" replaces the player instead of stacking players.
+                is Screen.Play -> PlayerScreen(screen.itemId, ::pop) { next -> pop(); push(Screen.Play(next)) }
+            } } } }
+        }
+    } } }
 }
+
+/**
+ * The list screens' icons, one painter each for the whole activity. Each Icon otherwise renders its own bitmap, and
+ * the first bitmap a frame uploads stalled the main thread 7 to 8 ms on the phone's GPU driver (2026-10-26): once
+ * per screen opened. The player keeps its own: its play icon is bigger, and a shared painter redraws at each size.
+ */
+class ListIcons(val back: Painter, val more: Painter, val settings: Painter, val play: Painter)
+val LocalIcons = staticCompositionLocalOf<ListIcons> { error("provided by Root") }
+
+/** False while another screen covers this one; see Root. Read it in effects (snapshotFlow), not in composition. */
+val LocalShown = staticCompositionLocalOf<State<Boolean>> { mutableStateOf(true) }
+
+// Composed but never measured or placed: not drawn or touched, and no semantics for accessibility services.
+private fun Modifier.hidden() = clearAndSetSemantics {}.layout { _, c -> layout(c.minWidth, c.minHeight) {} }

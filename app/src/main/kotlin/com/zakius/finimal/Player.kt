@@ -284,8 +284,7 @@ private fun Playback(
     val scope = rememberCoroutineScope()
 
     val playerView = remember {
-        PlayerView(context).apply {
-            useController = false
+        (android.view.LayoutInflater.from(context).inflate(R.layout.player_view, null) as PlayerView).apply {
             setShutterBackgroundColor(android.graphics.Color.BLACK)
             setKeepContentOnPlayerReset(true) // a reconnect reloads the item; the last frame stays up meanwhile
             subtitleView?.setFractionalTextSize(SubtitleView.DEFAULT_TEXT_SIZE_FRACTION * prefs.subtitleScale / 100f)

@@ -46,10 +46,6 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -103,7 +99,11 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
+import androidx.compose.runtime.snapshotFlow
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -157,7 +157,8 @@ private fun Modifier.focusMemory(key: Any): Modifier = composed {
     val memory = LocalFocusedKey.current
     val requester = remember { FocusRequester() }
     val k = key.toString()
-    LaunchedEffect(Unit) { if (memory.value == k) requester.requestFocus() }
+    val shown = LocalShown.current // Root clears focus while another screen covers this one
+    LaunchedEffect(Unit) { snapshotFlow { shown.value }.collect { if (it && memory.value == k) requester.requestFocus() } }
     focusRequester(requester).onFocusChanged { if (it.isFocused) memory.value = k }
 }
 
@@ -166,8 +167,9 @@ class Load(val result: Result<List<BaseItemDto>>?, val refreshError: Throwable?)
 
 /**
  * Loads [block] after pushing unsynced progress, so the list never shows state older than this device's.
- * Until the load ends, the list from the last visit shows (from memory, else from disk when [persist]);
- * unsynced local state is drawn over it. A failed load keeps that list and says why above it.
+ * Loads again each time the screen comes back on top. Until the load ends, the list from the last visit
+ * shows (from memory, else from disk when [persist]); unsynced local state is drawn over it. A failed load
+ * keeps that list and says why above it.
  */
 @Composable
 private fun loadFresh(vararg keys: Any?, refresh: Int, persist: Boolean = true, block: suspend () -> List<BaseItemDto>): Load {
@@ -175,7 +177,8 @@ private fun loadFresh(vararg keys: Any?, refresh: Int, persist: Boolean = true, 
     val cacheKey = listOf(App.prefs.baseUrl, App.prefs.userId) + k
     var last by remember { mutableStateOf((lastGood[cacheKey] ?: ListSnapshots.takePrefetched(cacheKey))?.let { k to Result.success(it) }) }
     var refreshError by remember { mutableStateOf<Throwable?>(null) }
-    LaunchedEffect(k, refresh) {
+    val shown = LocalShown.current
+    LaunchedEffect(k, refresh) { snapshotFlow { shown.value }.collectLatest { if (it) coroutineScope {
         refreshError = null
         if (last?.second?.isFailure == true) last = null // a retry shows "Loading…" again
         if (last?.first != k) (lastGood[cacheKey] ?: if (persist) withContext(Dispatchers.IO) { ListSnapshots.read(cacheKey) } else null)
@@ -184,7 +187,8 @@ private fun loadFresh(vararg keys: Any?, refresh: Int, persist: Boolean = true, 
         // An unreachable server would only time out a second time on the fetch.
         val result = if (pushed != null && unreachable(pushed)) Result.failure(pushed) else runCatching { block() }
             .onFailure { if (it is InvalidStatusException && it.status == 401) App.server.expire() }
-        val shown = last
+        ensureActive() // covered meanwhile: not a failure, and the next visit loads again
+        val prev = last
         when {
             result.isSuccess -> {
                 val list = result.getOrThrow()
@@ -192,25 +196,29 @@ private fun loadFresh(vararg keys: Any?, refresh: Int, persist: Boolean = true, 
                 if (persist) launch(Dispatchers.IO) { ListSnapshots.write(cacheKey, list) }
                 last = k to result
             }
-            shown != null && shown.first == k && shown.second.isSuccess -> refreshError = result.exceptionOrNull()
+            prev != null && prev.first == k && prev.second.isSuccess -> refreshError = result.exceptionOrNull()
             else -> last = k to result
         }
-    }
+    } } }
     return Load(last?.second, refreshError)
 }
 
 /**
  * Download statuses while the screen is shown, null until first read. Re-read on every download
- * change, and polled every second while one runs, else every 5 s.
+ * change, and polled every second while one runs, else every 5 s. Not while covered by another screen.
  */
 @Composable
-fun rememberDownloadStatuses(): Map<String, Media.DownloadStatus>? =
-    produceState<Map<String, Media.DownloadStatus>?>(null, Media.changes) {
-        while (true) {
-            value = withContext(Dispatchers.IO) { Media.downloadStatuses() }
-            delay(if (value.orEmpty().values.any { it.fill == Media.Fill.RUNNING }) 1_000 else 5_000)
+fun rememberDownloadStatuses(): Map<String, Media.DownloadStatus>? {
+    val shown = LocalShown.current
+    return produceState<Map<String, Media.DownloadStatus>?>(null, Media.changes) {
+        snapshotFlow { shown.value }.collectLatest { visible ->
+            while (visible) {
+                value = withContext(Dispatchers.IO) { Media.downloadStatuses() }
+                delay(if (value.orEmpty().values.any { it.fill == Media.Fill.RUNNING }) 1_000 else 5_000)
+            }
         }
     }.value
+}
 
 /** Queues downloads and says how many were queued. */
 private suspend fun downloadAll(context: Context, episodes: List<BaseItemDto>) {
@@ -244,7 +252,8 @@ private fun downloadAllAction(fetch: suspend () -> List<BaseItemDto>): () -> Uni
     var pending by remember { mutableStateOf<List<BaseItemDto>?>(null) }
     val scope = rememberCoroutineScope()
     val ctx = LocalContext.current
-    pending?.let { eps ->
+    // A fetch that ends after the screen was covered asks once it is back on top, not over another screen.
+    pending?.takeIf { LocalShown.current.value }?.let { eps ->
         val total = eps.mapNotNull { it.mediaSources?.firstOrNull()?.size }.takeIf { it.size == eps.size }?.sum()
         Confirm("Download ${eps.size} episode${if (eps.size == 1) "" else "s"}" + (total?.let { ", about ${formatBytes(it)}" } ?: "") + "?", "Download", {
             busy = true
@@ -271,7 +280,7 @@ private fun downloadAllAction(fetch: suspend () -> List<BaseItemDto>): () -> Uni
 private fun BarMenu(content: @Composable (close: () -> Unit) -> Unit) {
     var open by remember { mutableStateOf(false) }
     Box {
-        IconButton(onClick = { open = true }) { Icon(Icons.Default.MoreVert, "More options") }
+        IconButton(onClick = { open = true }) { Icon(LocalIcons.current.more, "More options") }
         DropdownMenu(open, { open = false }) { content { open = false } }
     }
 }
@@ -327,7 +336,7 @@ fun formatBytes(b: Long) = if (b >= 1e9) "%.1f GB".format(b / 1e9) else "%.0f MB
 @Composable
 private fun Bar(title: String, onBack: (() -> Unit)?, actions: @Composable () -> Unit = {}) = TopAppBar(
     title = { Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-    navigationIcon = { onBack?.let { IconButton(onClick = it) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } } },
+    navigationIcon = { onBack?.let { IconButton(onClick = it) { Icon(LocalIcons.current.back, "Back") } } },
     actions = { actions() },
 )
 
@@ -453,7 +462,7 @@ fun LibrariesScreen(modifier: Modifier, push: (Screen) -> Unit) {
         Bar("finimal", null) {
             TextButton(onClick = { push(Screen.Library(null, "Search")) }) { Text("Search") }
             TextButton(onClick = { push(Screen.Downloads) }) { Text("Downloads") }
-            IconButton(onClick = { push(Screen.Settings) }) { Icon(Icons.Default.Settings, "Settings") }
+            IconButton(onClick = { push(Screen.Settings) }) { Icon(LocalIcons.current.settings, "Settings") }
         }
         Loaded(libs, { refresh++ }, { push(Screen.Downloads) }) { list ->
             if (list.isEmpty()) Empty("No movie or TV libraries on this server")
@@ -676,7 +685,7 @@ private fun ContinueButton(ep: BaseItemDto, onClick: () -> Unit) {
     val position = ep.localState().first?.positionTicks ?: 0
     val left = ep.runTimeTicks?.takeIf { position > 0 }?.let { (it - position) / TICKS_PER_MS / 60_000 }
     Button(onClick, Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
-        Icon(Icons.Default.PlayArrow, null)
+        Icon(LocalIcons.current.play, null)
         Text((if (position > 0) "Continue " else "Play ") + episodeLabel(ep) + (left?.let { " · ${it.coerceAtLeast(1)} min left" } ?: ""),
             Modifier.padding(start = 8.dp), maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
@@ -720,7 +729,7 @@ fun EpisodeRow(
             Text(bits.joinToString(" · "), style = MaterialTheme.typography.labelSmall)
         }
         Box {
-            IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, "More options") }
+            IconButton(onClick = { menu = true }) { Icon(LocalIcons.current.more, "More options") }
             ItemMenu(ep, state?.played == true, unsynced, menu, { menu = false }, download != null, onStartOver, onChanged)
         }
     }

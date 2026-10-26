@@ -25,15 +25,25 @@ import finimal.core.PendingStore
 
 /** Process-wide singletons. There is one server and one user, so nothing here needs scoping. */
 class App : Application(), SingletonImageLoader.Factory, Configuration.Provider {
+    @android.annotation.SuppressLint("MissingSuperCall") // called on the fonts thread
     override fun onCreate() {
-        super.onCreate()
+        // Android's own Application.onCreate is empty. ASUS's applies its FlipFont theme and rebuilds the system font
+        // map, theme or not: 31 ms of main thread at each cold start on a Zenfone 10. Here it runs beside the rest of
+        // start-up; Activity.onCreate makes the same call under the same lock, so the activity waits for it there.
+        // With the ICU warm-up below: main-thread CPU to the first frame 93 → 62 ms, cold start 146 → 138 ms (2026-10-26).
+        thread(name = "fonts") { superOnCreate() }
         instance = this
         Media.onAppStart(this)
         thread(name = "warm-up") {
+            // ICU's locale-key data, which the first line break would load in the first frame (10 ms). Not by laying
+            // out text: that would race the font swap above.
+            java.util.Locale.forLanguageTag(java.util.Locale.getDefault().toLanguageTag() + "-u-lb-normal").displayName
             if (prefs.loggedIn) ListSnapshots.prefetchLibraries()
             server // the first list load needs the API client right after the first frame
         }
     }
+
+    private fun superOnCreate() = super.onCreate()
 
     /**
      * Start-up work the first frame doesn't need, run once per process after MainActivity's first frame. A process
