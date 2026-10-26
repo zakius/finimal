@@ -66,22 +66,15 @@ import finimal.core.WrongFile
  * reads it through [proxy]. A download is a whole-file fill with a metadata file under `downloads/`; that file is
  * what "pinned" means. A download the device can't play is the server's transcode instead, under `transcodes/`.
  */
-object Media {
+object Media : Downloads {
     @Volatile lateinit var scratch: Scratch
         private set
     private lateinit var ctx: Context
     /** Shared by the SDK, Coil and the player, so they reuse connections to the server. */
-    val http by lazy { OkHttpClient() }
+    val http get() = App.http
     private val json = Json { ignoreUnknownKeys = true }
 
-    /**
-     * Cache key: item plus file version, so a file replaced on the server never mixes with bytes
-     * cached from the old one.
-     */
-    fun key(item: BaseItemDto): String {
-        val source = item.mediaSources?.firstOrNull()
-        return "${item.id}-${source?.eTag ?: source?.size ?: 0}"
-    }
+    fun key(item: BaseItemDto) = scratchKey(item)
 
     /**
      * A transcoded download: the server's HLS segments as `0.ts`, `1.ts`…, the server's playlist they
@@ -116,7 +109,7 @@ object Media {
      * streaming only: nothing downloads or buffers to the end into it, so nothing downloads twice or
      * is left behind when the card comes back. Checked again at the next start.
      */
-    @Volatile var storageMissing = false
+    @Volatile override var storageMissing = false
         private set
 
     fun onAppStart(context: Context) {
@@ -139,7 +132,7 @@ object Media {
 
     /** App-specific storage; index 1+ are removable volumes. Read once per process: a card is checked again at the next start. */
     private val roots by lazy { ctx.getExternalFilesDirs(null).filterNotNull().ifEmpty { listOf(ctx.filesDir) } }
-    fun storageRoots(): List<File> = roots
+    override fun storageRoots(): List<File> = roots
     private fun storageRoot() = storageRoots().getOrElse(App.prefs.storageIndex) { storageRoots()[0] }
     private fun openScratch() = Scratch(File(storageRoot(), "scratch"), http).apply {
         // Buffer first; a fill that still can't write then stops buffering and downloading.
@@ -152,7 +145,7 @@ object Media {
      * Deletes many files: call off the main thread.
      */
     @Synchronized
-    fun switchStorage(index: Int) {
+    override fun switchStorage(index: Int) {
         WorkManager.getInstance(ctx).cancelUniqueWork("downloads")
         stopBuffer(null)
         downloads().forEach { val id = it.item.id.toString(); metaFile(id).delete(); subsDir(id).deleteRecursively() }
@@ -191,23 +184,6 @@ object Media {
 
     // --- downloads -------------------------------------------------------------------------------
 
-    /**
-     * A pinned item. Downloads run one at a time, oldest [queuedAt] first. Playing an unfinished
-     * download fills from the playhead first, through the same scratch entry.
-     */
-    @Serializable
-    data class Download(
-        val item: BaseItemDto,
-        val auto: Boolean,
-        val queuedAt: Long = 0,
-        val paused: Boolean = false,
-        /** The server refused the file (HTTP 4xx, e.g. deleted there); paused with it. Resuming tries again. */
-        val failed: Boolean = false,
-        /** The disk was full even after evicting the buffer; paused with it. Resuming tries again. */
-        val storageFull: Boolean = false,
-        /** The device can't play the file, so it is stored as the server's transcode, in [transcodeDir]. */
-        val transcoded: Boolean = false,
-    )
 
     private val downloadsDir get() = File(ctx.filesDir, "downloads").apply { mkdirs() }
     private fun metaFile(id: String) = File(downloadsDir, "$id.json")
@@ -219,7 +195,7 @@ object Media {
     }
 
     /** Bumped on every download change, so open screens re-read statuses at once rather than at the next poll. */
-    var changes by mutableIntStateOf(0)
+    override var changes by mutableIntStateOf(0)
         private set
     fun subsDir(id: String) = File(ctx.filesDir, "subs/$id")
 
@@ -228,7 +204,7 @@ object Media {
 
     /** All writes go through [write], [deleteDownload] and [switchStorage], which clear [memo]. */
     @Synchronized
-    fun downloads(): List<Download> = memo ?: downloadsDir.listFiles { f -> f.extension == "json" }.orEmpty()
+    override fun downloads(): List<Download> = memo ?: downloadsDir.listFiles { f -> f.extension == "json" }.orEmpty()
         .mapNotNull { f ->
             runCatching { json.decodeFromString<Download>(f.readText()) }
                 // Undecodable (e.g. SDK schema drift): kept aside, still pinning its bytes through [pinnedIds].
@@ -244,23 +220,19 @@ object Media {
     private fun pinnedIds() = downloadsDir.list().orEmpty().map { it.substringBefore('.') }.toSet()
     private fun isPinned(key: String, ids: Set<String>) = ids.any { key.startsWith("$it-") }
 
-    fun download(id: String): Download? = downloads().firstOrNull { it.item.id.toString() == id }
+    override fun download(id: String): Download? = downloads().firstOrNull { it.item.id.toString() == id }
 
     /** The ID the queue worker is writing now. */
     @Volatile var downloading: String? = null
         set(value) { field = value; changes++ }
 
-    val queueOrder = compareBy<Download>({ it.queuedAt }, { it.item.parentIndexNumber }, { it.item.indexNumber })
-    /** Finished downloads: grouped by series in season order, movies last. */
-    val shelfOrder = compareBy<Download>({ it.item.seriesId == null }, { it.item.seriesName }, { it.item.seriesId },
-        { it.item.parentIndexNumber }, { it.item.indexNumber }, { it.item.name })
 
     /** Next unfinished, unpaused download in queue order. */
     fun nextDownload(): Download? =
         downloads().filter { !it.paused && !isDone(it) }.minWithOrNull(queueOrder)
 
     /** Why the queue can't run on the current network, or null when it can. Mirrors [kickDownloads]' constraint. */
-    fun downloadsWaitingFor(): String? {
+    override fun downloadsWaitingFor(): String? {
         val cm = ctx.getSystemService(ConnectivityManager::class.java)
         return when {
             storageMissing -> "waiting for SD card"
@@ -274,7 +246,7 @@ object Media {
      * Starts the queue worker. With [restart] a running worker is stopped first, so it picks again
      * (after pause, delete, reprioritise or a network-setting change); its partial file is kept.
      */
-    fun kickDownloads(restart: Boolean) {
+    override fun kickDownloads(restart: Boolean) {
         val request = OneTimeWorkRequestBuilder<DownloadWorker>()
             .setBackoffCriteria(BackoffPolicy.LINEAR, 30, TimeUnit.SECONDS)
             .setConstraints(Constraints(requiredNetworkType = if (App.prefs.downloadOnMetered) NetworkType.CONNECTED else NetworkType.UNMETERED))
@@ -284,7 +256,7 @@ object Media {
 
     /** [item] must carry media sources ([Server.item], or episodes fetched with sources) for offline playback. Also resumes a paused download. */
     @Synchronized
-    fun startDownload(item: BaseItemDto, auto: Boolean) {
+    override fun startDownload(item: BaseItemDto, auto: Boolean) {
         val id = item.id.toString()
         val existing = download(id)
         if (existing != null && isDone(existing)) return
@@ -297,7 +269,7 @@ object Media {
     }
 
     @Synchronized
-    fun pauseDownload(id: String) {
+    override fun pauseDownload(id: String) {
         val d = download(id) ?: return
         write(d.copy(paused = true))
         if (downloading == id) kickDownloads(restart = true)
@@ -310,7 +282,7 @@ object Media {
     }
 
     /** The bytes go outside the lock: a whole episode is hundreds of files on an SD card. */
-    fun deleteDownload(id: String) {
+    override fun deleteDownload(id: String) {
         val d = synchronized(this) {
             val d = download(id)
             metaFile(id).delete()
@@ -333,7 +305,7 @@ object Media {
      * downloads; the played and unfinished ones are deleted.
      */
     @Synchronized
-    fun releaseKeepNext(seriesId: String) {
+    override fun releaseKeepNext(seriesId: String) {
         for (d in downloads().filter { it.auto && it.item.seriesId?.toString() == seriesId }) {
             if (d.item.userData?.played != true && isDone(d)) write(d.copy(auto = false))
             else deleteDownload(d.item.id.toString())
@@ -342,7 +314,7 @@ object Media {
 
     /** Keeps a download's stored play state current, so offline playback resumes where the user left off. */
     @Synchronized
-    fun rememberState(id: String, state: PlayState?) {
+    override fun rememberState(id: String, state: PlayState?) {
         val d = download(id) ?: return
         if (state == null) return
         val data = d.item.userData?.copy(
@@ -355,16 +327,6 @@ object Media {
         try { write(d.copy(item = d.item.copy(userData = data))) } catch (e: IOException) {}
     }
 
-    enum class Fill { DONE, RUNNING, QUEUED, PAUSED }
-    /** [position] is 1 for the next queued item; [waitingFor] is [downloadsWaitingFor]. */
-    data class DownloadStatus(val download: Download, val percent: Int, val fill: Fill, val bytes: Long, val position: Int, val waitingFor: String?) {
-        val label get() = when (fill) {
-            Fill.DONE -> if (download.transcoded) "downloaded, transcoded" else "downloaded"
-            Fill.RUNNING -> "${waitingFor ?: "downloading"} · $percent%"
-            Fill.QUEUED -> "${waitingFor ?: "queued #$position"} · $percent%"
-            Fill.PAUSED -> "${if (download.failed) "failed" else if (download.storageFull) "storage full" else "paused"} · $percent%"
-        }
-    }
 
     /** Bytes on disk, percent, and whether it is all there. A transcode counts segments: their sizes aren't known ahead. */
     private fun progress(d: Download): Triple<Long, Int, Boolean> {
@@ -424,7 +386,7 @@ object Media {
     private val transcodeHttp by lazy { http.newBuilder().readTimeout(30, TimeUnit.SECONDS).build() }
 
     /** Status of every download from the scratch and the queue. Reads files: call off the main thread. */
-    fun downloadStatuses(): Map<String, DownloadStatus> {
+    override fun downloadStatuses(): Map<String, DownloadStatus> {
         val current = downloading
         val all = downloads()
         if (all.isEmpty()) return emptyMap()
@@ -476,12 +438,12 @@ object Media {
     }
 
     /** Bytes of unpinned (buffered) scratch entries, the part [evict] limits. */
-    fun bufferedBytes(): Long {
+    override fun bufferedBytes(): Long {
         val ids = pinnedIds()
         return scratch.keys().filter { !isPinned(it, ids) }.sumOf { scratch.entry(it).bytes() }
     }
 
-    fun freeBytes() = storageRoot().usableSpace
+    override fun freeBytes() = storageRoot().usableSpace
 
     fun evict() {
         val ids = pinnedIds()
@@ -534,8 +496,6 @@ object Media {
     }
 }
 
-fun externalSubs(item: BaseItemDto): List<MediaStream> =
-    item.mediaSources?.firstOrNull()?.mediaStreams.orEmpty().filter { it.type == MediaStreamType.SUBTITLE && it.isExternal }
 
 /** Works through the download queue one episode at a time. */
 class DownloadWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
@@ -605,7 +565,7 @@ class DownloadWorker(context: Context, params: WorkerParameters) : CoroutineWork
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
     }
 
-    private fun foregroundInfo(d: Media.Download, percent: Int?): ForegroundInfo {
+    private fun foregroundInfo(d: Download, percent: Int?): ForegroundInfo {
         val item = d.item
         val name = if (item.type == BaseItemKind.EPISODE) "${item.seriesName} · ${episodeLabel(item)}" else item.name.orEmpty()
         val n = NotificationCompat.Builder(applicationContext, "downloads")

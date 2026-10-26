@@ -1,12 +1,9 @@
 package com.zakius.finimal
 
-import android.content.Context
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
-import androidx.lifecycle.ProcessLifecycleOwner
-import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -67,13 +64,13 @@ enum class Sort(val label: String, val by: ItemSortBy, val order: SortOrder) {
  * All server traffic. Next Up and Resume endpoints are never called: the "restart from episode 1"
  * bugs in other clients come from them (see docs/design.md).
  */
-class Server(context: Context) {
+class Server {
     private val prefs = App.prefs
     val api = createJellyfin {
-        clientInfo = ClientInfo("finimal", BuildConfig.VERSION_NAME)
-        this.context = context
+        clientInfo = ClientInfo("finimal", App.platform.versionName)
+        App.platform.configure(this)
         // One connection pool for API, images and streams. API answers also set the server clock.
-        apiClientFactory = OkHttpFactory(Media.http.newBuilder().addNetworkInterceptor { chain ->
+        apiClientFactory = OkHttpFactory(App.http.newBuilder().addNetworkInterceptor { chain ->
             chain.proceed(chain.request()).also { r -> r.headers.getDate("Date")?.let { setClock(it.time) } }
         }.build())
     }.createApi(prefs.baseUrl, prefs.token)
@@ -216,7 +213,7 @@ class Server(context: Context) {
     // [playSession] goes in the stop report too, so leaving ends the server's ffmpeg job at once.
     fun transcodeUrl(id: String, mediaSourceId: String, audioIndex: Int?, playSession: String) =
         "${prefs.baseUrl}/Videos/$id/master.m3u8?mediaSourceId=$mediaSourceId&videoCodec=h264&audioCodec=aac" +
-            "&maxAudioChannels=2&maxHeight=${prefs.maxHeight.takeIf { it > 0 } ?: HardwareDecoders.h264Height}&videoBitrate=8000000&audioBitrate=192000&playSessionId=$playSession" +
+            "&maxAudioChannels=2&maxHeight=${prefs.maxHeight.takeIf { it > 0 } ?: App.platform.transcodeHeight}&videoBitrate=8000000&audioBitrate=192000&playSessionId=$playSession" +
             (audioIndex?.let { "&audioStreamIndex=$it" } ?: "") + "&ApiKey=${prefs.token}"
 
     fun subtitleUrl(id: String, mediaSourceId: String, stream: MediaStream) =
@@ -257,7 +254,7 @@ class Server(context: Context) {
      * then reports the stop. Always sends a position: without one the server marks the item played at 0.
      */
     fun reportStop(id: String, mediaSourceId: String, positionTicks: Long, runtimeTicks: Long?, serverPlayed: Boolean, playSession: String) {
-        ProcessLifecycleOwner.get().lifecycleScope.launch(App.disk) {
+        App.platform.scope.launch(App.disk) {
             val previous = knownPlayed(id, serverPlayed)
             val state = ResumeRules.onStop(PlayState(0, previous, null), positionTicks, runtimeTicks, now())
             record(id, state)
@@ -267,7 +264,7 @@ class Server(context: Context) {
                         PlaybackStopInfo(itemId = UUID.fromString(id), mediaSourceId = mediaSourceId, positionTicks = positionTicks, playSessionId = playSession, failed = false)
                     )
                 }.onSuccess { confirm(id, state) } }
-                Housekeeping.enqueue(App.instance)
+                App.platform.scheduleHousekeeping()
             }
         }
     }
@@ -288,7 +285,7 @@ class Server(context: Context) {
     private suspend fun record(id: String, state: PlayState): Unit = withContext(App.disk) {
         recorded[id] = state
         App.pending.put(id, state)
-        Media.rememberState(id, state)
+        App.downloads?.rememberState(id, state)
         localChanges++
     }
 

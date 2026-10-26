@@ -15,4 +15,4 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "finimal"
-include(":core", ":app")
+include(":core", ":shared", ":app", ":desktop")

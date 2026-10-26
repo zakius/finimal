@@ -148,9 +148,6 @@ private var sessionSpeed = 1f
 /** Forced fullscreen and rotation lock, handed from a player to the "Play next" one so the screen doesn't flip in between. */
 private var carried: Pair<Boolean, Boolean>? = null
 
-/** Choices for [AudioDelay]; negative values are for audio that arrives early. */
-val AUDIO_DELAYS_MS = (-200..500 step 50).toList()
-
 // Material icons missing from material-icons-core; extended would add thousands of classes for five paths.
 private fun icon(name: String, path: String) = ImageVector.Builder(name, 24.dp, 24.dp, 24f, 24f)
     .addPath(addPathNodes(path), fill = SolidColor(Color.Black)).build()
@@ -256,9 +253,7 @@ private fun Playback(
     val sourceId = source.id!!
     val seriesKey = item.seriesId?.toString() ?: id
     val serverPlayed = item.userData?.played ?: false
-    val playable = siblings.filter { it.parentIndexNumber != 0 && it.locationType != LocationType.VIRTUAL }
-    val next = playable.getOrNull(playable.indexOfFirst { it.id == item.id } + 1)
-        ?.takeIf { playable.any { p -> p.id == item.id } }
+    val next = nextEpisode(item, siblings)
 
     val videoStream = remember(source) { videoInfo(source) }
     val download = remember(id) { Media.download(id) }
@@ -584,13 +579,6 @@ private fun systemBars(activity: Activity, hidden: Boolean) {
     } else {
         controller.show(WindowInsetsCompat.Type.systemBars())
     }
-}
-
-fun episodeLabel(ep: BaseItemDto) = "S${ep.parentIndexNumber ?: "?"}E${ep.indexNumber ?: "?"} · ${ep.name.orEmpty()}"
-
-fun formatMs(ms: Long): String {
-    val s = (ms / 1000).coerceAtLeast(0)
-    return if (s >= 3600) "%d:%02d:%02d".format(s / 3600, s / 60 % 60, s % 60) else "%d:%02d".format(s / 60, s % 60)
 }
 
 @Composable
@@ -1044,14 +1032,6 @@ private fun trackLabel(f: Format): String {
     val channels = when (f.channelCount) { Format.NO_VALUE -> null; 1 -> "mono"; 2 -> "stereo"; 6 -> "5.1"; 8 -> "7.1"; else -> "${f.channelCount} ch" }
     return listOfNotNull(f.label, language?.takeUnless { f.label?.contains(it, ignoreCase = true) == true }, channels).joinToString(" · ")
 }
-
-/** Media3 shortens codes ("ja"), the server keeps three letters ("jpn"). */
-/** The audio stream of [source] in language [lang], for a transcode, which carries one audio track. */
-fun audioIndex(source: MediaSourceInfo, lang: String) =
-    source.mediaStreams?.firstOrNull { it.type == MediaStreamType.AUDIO && sameLanguage(it.language, lang) }?.index
-
-private fun sameLanguage(a: String?, b: String?) = a != null && b != null &&
-    runCatching { Locale.forLanguageTag(a).isO3Language == Locale.forLanguageTag(b).isO3Language }.getOrDefault(a == b)
 
 /** Language of the selected track, "" when that type is off, null when unknown. */
 private fun selectedLanguage(player: ExoPlayer, type: Int): String? {

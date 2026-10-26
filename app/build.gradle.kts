@@ -48,7 +48,7 @@ android {
 }
 
 dependencies {
-    implementation(project(":core"))
+    implementation(project(":shared"))
 
     implementation("androidx.activity:activity-compose:1.13.0")
     implementation("androidx.compose.ui:ui:1.12.1")
@@ -67,7 +67,6 @@ dependencies {
     implementation("io.github.peerless2012:ass-media:0.5.1")
 
     implementation("org.jellyfin.sdk:jellyfin-core:1.9.3")
-    implementation("org.slf4j:slf4j-api:2.0.20") // the SDK logs through it; without a binding it is a no-op
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")
     implementation("io.coil-kt.coil3:coil-compose:3.6.3")
     implementation("io.coil-kt.coil3:coil-network-okhttp:3.6.3")

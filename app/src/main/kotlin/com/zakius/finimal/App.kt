@@ -2,13 +2,11 @@ package com.zakius.finimal
 
 import android.app.Application
 import android.content.Context
-import android.content.SharedPreferences
 import android.app.UiModeManager
+import android.content.res.Configuration.UI_MODE_TYPE_TELEVISION
 import android.content.pm.PackageManager
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.setValue
-import androidx.core.content.edit
+import androidx.lifecycle.ProcessLifecycleOwner
+import androidx.lifecycle.lifecycleScope
 import coil3.ImageLoader
 import coil3.PlatformContext
 import coil3.SingletonImageLoader
@@ -20,11 +18,10 @@ import androidx.media3.exoplayer.mediacodec.MediaCodecUtil
 import java.io.File
 import okhttp3.Dispatcher
 import kotlin.concurrent.thread
-import kotlinx.coroutines.Dispatchers
-import finimal.core.PendingStore
+import org.jellyfin.sdk.JellyfinOptions
 
-/** Process-wide singletons. There is one server and one user, so nothing here needs scoping. */
-class App : Application(), SingletonImageLoader.Factory, Configuration.Provider {
+/** The Android app as the shared code's [Platform]; the shared singletons are in [App]. */
+class AndroidApp : Application(), Platform, SingletonImageLoader.Factory, Configuration.Provider {
     @android.annotation.SuppressLint("MissingSuperCall") // called on the fonts thread
     override fun onCreate() {
         // Android's own Application.onCreate is empty. ASUS's applies its FlipFont theme and rebuilds the system font
@@ -33,13 +30,15 @@ class App : Application(), SingletonImageLoader.Factory, Configuration.Provider 
         // With the ICU warm-up below: main-thread CPU to the first frame 93 → 62 ms, cold start 146 → 138 ms (2026-10-26).
         thread(name = "fonts") { superOnCreate() }
         instance = this
+        appContext = this
+        App.platform = this
         Media.onAppStart(this)
         thread(name = "warm-up") {
             // ICU's locale-key data, which the first line break would load in the first frame (10 ms). Not by laying
             // out text: that would race the font swap above.
             java.util.Locale.forLanguageTag(java.util.Locale.getDefault().toLanguageTag() + "-u-lb-normal").displayName
-            if (prefs.loggedIn) ListSnapshots.prefetchLibraries()
-            server // the first list load needs the API client right after the first frame
+            if (App.prefs.loggedIn) ListSnapshots.prefetchLibraries()
+            App.server // the first list load needs the API client right after the first frame
         }
     }
 
@@ -66,7 +65,7 @@ class App : Application(), SingletonImageLoader.Factory, Configuration.Provider 
     // No ServiceLoader scan of the APK on the first image: the one fetcher used is added here.
     override fun newImageLoader(context: PlatformContext) = ImageLoader.Builder(context)
         .serviceLoaderEnabled(false)
-        .components { add(OkHttpNetworkFetcherFactory(callFactory = { Media.http.newBuilder().dispatcher(Dispatcher()).build() })) }
+        .components { add(OkHttpNetworkFetcherFactory(callFactory = { App.http.newBuilder().dispatcher(Dispatcher()).build() })) }
         .build()
 
     /** The first codec-list query in a process takes up to a few hundred ms; Media3 caches it, so the first play skips that. */
@@ -74,136 +73,30 @@ class App : Application(), SingletonImageLoader.Factory, Configuration.Provider 
     private fun warmDecoders() = listOf(MimeTypes.VIDEO_H264, MimeTypes.VIDEO_H265, MimeTypes.VIDEO_AV1, MimeTypes.AUDIO_AAC)
         .forEach { runCatching { MediaCodecUtil.getDecoderInfos(it, false, false) } }
 
+    override val versionName: String get() = BuildConfig.VERSION_NAME
+    override val appFiles: File get() = filesDir
+    override val appCache: File get() = cacheDir
+    override val android get() = true
+    override val store by lazy { PrefsStore(getSharedPreferences("finimal", Context.MODE_PRIVATE)) }
+    /** Android TV, or a box with no touchscreen (an STB on a plain Android launcher). Some boxes claim one; the setting overrides. */
+    override val autoTv by lazy {
+        getSystemService(UiModeManager::class.java).currentModeType == UI_MODE_TYPE_TELEVISION ||
+            !packageManager.hasSystemFeature(PackageManager.FEATURE_TOUCHSCREEN)
+    }
+    override val scope get() = ProcessLifecycleOwner.get().lifecycleScope
+    override val transcodeHeight get() = HardwareDecoders.h264Height
+    override val downloads: Downloads get() = Media
+    override fun configure(options: JellyfinOptions.Builder) { options.context = this }
+    override fun scheduleHousekeeping() { Housekeeping.enqueue(this) }
+    override fun askNotifications() { activity?.askNotifications() }
+    override fun decoderSummary() = HardwareDecoders.summary()
+    override fun setAudioDelay(ms: Int) = AudioDelay.set(ms)
+
+    /** The activity on screen, for the notification permission prompt. */
+    var activity: MainActivity? = null
+
     companion object {
-        lateinit var instance: App
+        lateinit var instance: AndroidApp
             private set
-
-        val prefs by lazy { Prefs(instance.getSharedPreferences("finimal", Context.MODE_PRIVATE)) }
-        val server by lazy { Server(instance) }
-        /** The remote-first interface: no touch-only controls, D-pad keys in the player, TV-safe margins. */
-        val tv get() = when (prefs.interfaceMode) { 1 -> false; 2 -> true; else -> autoTv }
-        /** Android TV, or a box with no touchscreen (an STB on a plain Android launcher). Some boxes claim one; the setting overrides. */
-        val autoTv by lazy {
-            instance.getSystemService(UiModeManager::class.java).currentModeType == android.content.res.Configuration.UI_MODE_TYPE_TELEVISION ||
-                !instance.packageManager.hasSystemFeature(PackageManager.FEATURE_TOUCHSCREEN)
-        }
-        /** Set when the server rejects the token; the UI returns to login. Unsynced progress is kept and pushed after. Here, not on [Server], so the first frame doesn't build the API client. */
-        var sessionExpired by mutableStateOf(false)
-        /**
-         * Unsynced play states of the logged-in account. Each server and user has its own file, so
-         * progress kept over a logout waits for that account and never reaches another.
-         */
-        val pending: PendingStore get() = synchronized(this) {
-            // Logged out (an expired session): stops still recorded belong to the account that just left.
-            if (prefs.userId == null) pendingStore?.let { return it }
-            val account = prefs.baseUrl to prefs.userId
-            pendingStore?.takeIf { pendingAccount == account } ?: run {
-                val name = java.security.MessageDigest.getInstance("SHA-1").digest("${account.first}\u0000${account.second}".toByteArray())
-                    .take(8).joinToString("") { "%02x".format(it) }
-                val file = File(instance.filesDir, "pending-$name.json")
-                // From before per-account files: it belongs to whoever logs in next, as it always did.
-                val legacy = File(instance.filesDir, "pending.json")
-                if (account.second != null && legacy.exists() && !file.exists()) legacy.renameTo(file)
-                PendingStore(file).also { pendingStore = it; pendingAccount = account }
-            }
-        }
-        private var pendingStore: PendingStore? = null
-        private var pendingAccount: Pair<String?, String?>? = null
-
-        /**
-         * IO one task at a time, in the order submitted. Play-state records and [Server.flush]'s read
-         * share it, so a stop recorded on leaving the player lands before the next list flushes.
-         */
-        val disk = Dispatchers.IO.limitedParallelism(1)
-
-        /** Buffer start and stop, in order, apart from [disk] so cache and download locks never hold up play-state records. */
-        val buffers = Dispatchers.IO.limitedParallelism(1)
-    }
-}
-
-class Prefs(private val p: SharedPreferences) {
-    var baseUrl by string("baseUrl")
-    var token by string("token")
-    var userId by string("userId")
-    /** Server clock minus device clock, from the last response; see [Server.now]. */
-    var clockOffsetMs by long("clockOffsetMs")
-
-    /** In one write, so a kill in between can't leave a token without its user. */
-    fun login(url: String, token: String?, user: String) = p.edit { putString("baseUrl", url); putString("token", token); putString("userId", user) }
-
-    var bufferOnMetered by bool("bufferOnMetered", false)
-    var downloadOnMetered by bool("downloadOnMetered", false)
-    var cacheLimitGb by int("cacheLimitGb", 5)
-    var brightnessOnLeft by bool("brightnessOnLeft", true)
-    var gestureLevels by bool("gestureLevels", true)
-    var gestureSeek by bool("gestureSeek", true)
-    var gestureDoubleTap by bool("gestureDoubleTap", true)
-    var gestureHold by bool("gestureHold", true)
-    var gesturePinch by bool("gesturePinch", true)
-    var gestureFullscreen by bool("gestureFullscreen", true)
-    var doubleTapSeconds by int("doubleTapSeconds", 10)
-    var subtitleScale by int("subtitleScale", 100)
-    /** Applied only while a wireless output is connected; see [AudioDelay]. */
-    var audioDelayMs by int("audioDelayMs", 0)
-    var storageIndex by int("storageIndex", 0)
-    /** 0 picks by device ([App.autoTv]), 1 touch, 2 TV. */
-    var interfaceMode by int("interfaceMode", 0)
-
-    /** Direct play limits; see [finimal.core.playsDirectly]. 0 is Auto. */
-    var maxHeight by int("maxHeight", 0)
-    /** Index into [finimal.core.DirectPlayLimits.Codecs]. */
-    var codecs by int("codecs", 0)
-
-    /** Lowest decoder load, in pixels a second, at which the user chose a transcode for choppy [codec] playback. */
-    fun learnedPixelRate(codec: String): Long? = p.getLong("learnedRate.$codec", 0).takeIf { it > 0 }
-    fun learnChoppy(codec: String, pixelRate: Long) {
-        if (pixelRate < (learnedPixelRate(codec) ?: Long.MAX_VALUE)) p.edit { putLong("learnedRate.$codec", pixelRate) }
-    }
-    fun learnedCodecs() = p.all.keys.filter { it.startsWith("learnedRate.") }.map { it.removePrefix("learnedRate.") }
-    fun forgetLearned() = p.edit { learnedCodecs().forEach { remove("learnedRate.$it") } }
-
-    /** 0 means "keep next N" is off for the series. */
-    fun keepNext(seriesId: String) = p.getInt("keepNext.$seriesId", 0)
-    fun setKeepNext(seriesId: String, n: Int) = p.edit { putInt("keepNext.$seriesId", n) }
-    fun keepNextSeries(): Map<String, Int> =
-        p.all.filterKeys { it.startsWith("keepNext.") }
-            .mapKeys { it.key.removePrefix("keepNext.") }
-            .mapValues { it.value as Int }
-            .filterValues { it > 0 }
-
-    /** Per-series track choice as language codes; "" means subtitles off. */
-    fun audioLang(seriesId: String): String? = p.getString("audio.$seriesId", null)
-    fun subLang(seriesId: String): String? = p.getString("sub.$seriesId", null)
-    fun setTracks(seriesId: String, audio: String?, sub: String?) = p.edit {
-        putString("audio.$seriesId", audio)
-        putString("sub.$seriesId", sub)
-    }
-
-    val loggedIn get() = token != null
-
-    fun logout() = p.edit { remove("token"); remove("userId") }
-
-    private fun string(key: String) = object : kotlin.properties.ReadWriteProperty<Any, String?> {
-        override fun getValue(thisRef: Any, property: kotlin.reflect.KProperty<*>) = p.getString(key, null)
-        override fun setValue(thisRef: Any, property: kotlin.reflect.KProperty<*>, value: String?) =
-            p.edit { putString(key, value) }
-    }
-
-    private fun bool(key: String, default: Boolean) = object : kotlin.properties.ReadWriteProperty<Any, Boolean> {
-        override fun getValue(thisRef: Any, property: kotlin.reflect.KProperty<*>) = p.getBoolean(key, default)
-        override fun setValue(thisRef: Any, property: kotlin.reflect.KProperty<*>, value: Boolean) =
-            p.edit { putBoolean(key, value) }
-    }
-
-    private fun long(key: String) = object : kotlin.properties.ReadWriteProperty<Any, Long> {
-        override fun getValue(thisRef: Any, property: kotlin.reflect.KProperty<*>) = p.getLong(key, 0)
-        override fun setValue(thisRef: Any, property: kotlin.reflect.KProperty<*>, value: Long) =
-            p.edit { putLong(key, value) }
-    }
-
-    private fun int(key: String, default: Int) = object : kotlin.properties.ReadWriteProperty<Any, Int> {
-        override fun getValue(thisRef: Any, property: kotlin.reflect.KProperty<*>) = p.getInt(key, default)
-        override fun setValue(thisRef: Any, property: kotlin.reflect.KProperty<*>, value: Int) =
-            p.edit { putInt(key, value) }
     }
 }

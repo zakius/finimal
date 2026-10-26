@@ -12,7 +12,7 @@
     <uses-feature android:name="android.software.leanback" android:required="false" />
 
     <application
-        android:name=".App"
+        android:name=".AndroidApp"
         android:label="finimal"
         android:icon="@mipmap/ic_launcher"
         android:banner="@drawable/banner"
