@@ -1,6 +1,6 @@
 # finimal
 
-A Jellyfin client for Android and Linux that goes straight to your movie and TV libraries. It prefers a few extra taps over convenience features that break.
+A Jellyfin client for Android, Linux and Windows that goes straight to your movie and TV libraries. It prefers a few extra taps over convenience features that break.
 
 ## Why
 
@@ -53,6 +53,12 @@ The desktop app has the same screens and plays through mpv. [Releases](https://g
 | `finimal-*-x86_64.flatpak` | Any distribution with Flatpak: `flatpak install --user finimal-*-x86_64.flatpak` |
 
 The .deb and .rpm run on your distribution's Java (21 or newer) and libmpv, so their updates come with the system's. The Flatpak carries its own.
+
+### Windows
+
+[Releases](https://github.com/zakius/finimal/releases) has `finimal-*-x64.msi`, an installer for your user that needs no administrator rights, and `finimal-*-windows-x64.zip`, the same app to unpack and run (`finimal.exe`). Both are 64-bit and include mpv. To use a newer mpv than the one included, put its `libmpv-2.dll` in `%APPDATA%\finimal`.
+
+### On the desktop
 
 In the player: Space or K plays and pauses, Left and Right (or J and L) skip, Up, Down and the mouse wheel set the volume, M mutes, F or a double-click toggles fullscreen, N plays the next episode and Esc leaves fullscreen, then the player. Right-click an episode or movie for its menu. There are no downloads on the desktop yet.
 
