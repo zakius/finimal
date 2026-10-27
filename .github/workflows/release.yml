@@ -21,14 +21,10 @@ jobs:
           distribution: temurin
           java-version: 21
       - uses: gradle/actions/setup-gradle@v5
-      # The desktop player tests load the distribution's libmpv. Its packages (about 100 MB) come from the cache;
-      # apt fetches only what changed since.
-      - uses: actions/cache@v5
-        with:
-          path: ~/apt-archives
-          key: apt-libmpv2-ubuntu-24.04
-      - name: Install libmpv
-        timeout-minutes: 15
+      # The desktop player tests load the distribution's libmpv.
+      - name: Update apt
+        id: apt
+        timeout-minutes: 10
         # The runner's Azure mirror of Ubuntu crawled at tens of kB/s, and the install outran its time limit on some
         # runs; Ubuntu's own mirror, which the containers use, was fast. GitHub's images list their mirrors in
         # apt-mirrors.txt (ubuntu.sources points there), Azure first. Output stays on so a slow fetch shows.
@@ -37,9 +33,18 @@ jobs:
           sudo sed -i 's|http://azure.archive.ubuntu.com|http://archive.ubuntu.com|g' /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list 2>/dev/null || true
           sudo systemctl stop unattended-upgrades.service apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
           sudo apt-get -o DPkg::Lock::Timeout=300 update -q
+          echo "debs=$(apt-get install --print-uris -qq libmpv2 | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+      # The packages (about 100 MB), keyed by the exact versions apt would fetch: an update makes a new entry.
+      - uses: actions/cache@v5
+        with:
+          path: ~/apt-archives
+          key: apt-libmpv2-${{ steps.apt.outputs.debs }}
+      - name: Install libmpv
+        timeout-minutes: 15
+        run: |
           mkdir -p ~/apt-archives && sudo cp ~/apt-archives/*.deb /var/cache/apt/archives/ 2>/dev/null || true
           sudo apt-get -o DPkg::Lock::Timeout=300 install -y -q libmpv2
-          cp /var/cache/apt/archives/*.deb ~/apt-archives/
+          cp /var/cache/apt/archives/*.deb ~/apt-archives/ 2>/dev/null || true
       - run: ./gradlew :core:test :desktop:test
 
   debug:
