@@ -37,6 +37,9 @@ import java.io.File
 import kotlinx.coroutines.runBlocking
 import coil3.serviceLoaderEnabled
 import coil3.network.okhttp.OkHttpNetworkFetcherFactory
+import com.sun.jna.Library
+import com.sun.jna.Native
+import com.sun.jna.Pointer
 import com.zakius.finimal.App
 import com.zakius.finimal.Root
 import com.zakius.finimal.Theme
@@ -48,6 +51,7 @@ import kotlin.system.exitProcess
 @OptIn(ExperimentalComposeUiApi::class)
 fun main(args: Array<String>) {
     if ("--check-player" in args) exitProcess(checkPlayer())
+    scaleFromXftDpi()
     App.platform = DesktopPlatform
     SingletonImageLoader.setSafe(::imageLoader)
     application {
@@ -69,6 +73,31 @@ fun main(args: Array<String>) {
             } }
         }
     }
+}
+
+/**
+ * Linux: KDE, and other desktops that leave X11 apps to scale themselves, give the scale only as Xft.dpi, which
+ * OpenJDK never reads (it follows GDK_SCALE and GNOME's setting), so finimal came up at 1x on a 2x screen. Java's
+ * scale from Xft.dpi, then, unless one is set (sun.java2d.uiScale, J2D_UISCALE); before the first window.
+ * Java scales X11 windows by whole numbers only: 1.5 rounds to 2.
+ */
+private fun scaleFromXftDpi() {
+    if (!System.getProperty("os.name").startsWith("Linux") || System.getProperty("sun.java2d.uiScale") != null ||
+        System.getenv("J2D_UISCALE") != null) return
+    val resources = runCatching {
+        val x11 = Native.load("libX11.so.6", X11::class.java)
+        val display = x11.XOpenDisplay(null) ?: return
+        try { x11.XResourceManagerString(display) } finally { x11.XCloseDisplay(display) }
+    }.getOrNull() ?: return
+    val dpi = Regex("""^Xft\.dpi:\s*([\d.]+)""", RegexOption.MULTILINE).find(resources)?.groupValues?.get(1)?.toDoubleOrNull() ?: return
+    System.setProperty("sun.java2d.uiScale", maxOf(1, Math.round(dpi / 96).toInt()).toString())
+}
+
+@Suppress("FunctionName")
+private interface X11 : Library {
+    fun XOpenDisplay(name: String?): Pointer?
+    fun XResourceManagerString(display: Pointer): String?
+    fun XCloseDisplay(display: Pointer): Int
 }
 
 /**
