@@ -22,6 +22,7 @@ import org.jellyfin.sdk.api.client.exception.TimeoutException
 import org.jellyfin.sdk.api.client.extensions.authenticationApi
 import org.jellyfin.sdk.api.client.extensions.imageApi
 import org.jellyfin.sdk.api.client.extensions.libraryApi
+import org.jellyfin.sdk.api.client.extensions.systemApi
 import org.jellyfin.sdk.api.client.extensions.mediaSegmentApi
 import org.jellyfin.sdk.api.client.extensions.sessionApi
 import org.jellyfin.sdk.api.client.extensions.showApi
@@ -196,6 +197,9 @@ class Server {
             seasonId = seasonId?.let(UUID::fromString),
             enableUserData = true,
         ).content.items }
+
+    /** The server answers at all: a failure while it does is the file's, not the network's. */
+    suspend fun reachable(): Boolean = io { runCatching { api.systemApi.getPublicSystemInfo() }.exceptionOrNull()?.let { !transient(it) } ?: true }
 
     /** Intro, recap and credits, where a server plugin has detected them. */
     suspend fun segments(id: String): List<MediaSegmentDto> = io {

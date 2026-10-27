@@ -262,8 +262,10 @@ class Mpv(options: Map<String, String>) {
         command("loadfile", url, "replace")
     }
 
-    fun play() = set("pause", "no")
-    fun pause() = set("pause", "yes")
+    /** The user's pause. mpv also pauses on its own at the end of a file (keep-open), which leaves this false. */
+    var pauseWanted = false; private set
+    fun play() { pauseWanted = false; set("pause", "no") }
+    fun pause() { pauseWanted = true; set("pause", "yes") }
     fun seek(seconds: Double, exact: Boolean = true) = command("seek", "$seconds", if (exact) "absolute+exact" else "absolute+keyframes")
 
     /** Reads a property; for the event thread and menus, never the UI thread's frame path. */
