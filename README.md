@@ -18,6 +18,7 @@ On Android and the desktop:
 - Playback rides out network drops: it reconnects and continues from the same spot.
 - Audio and subtitle choices are remembered per series.
 - "Skip intro" and "Skip recap" buttons from the server's media segments, and "Play next" during the credits. Nothing skips on its own.
+- Chapters on the seek bar and in the player menu.
 - An audio delay setting, and speed from 0.5× to 2×.
 - A login that tries https before http and never falls back to http after a certificate error.
 
@@ -80,7 +81,7 @@ To use a newer mpv, put its `libmpv-2.dll` in `%APPDATA%\finimal`.
 
 ### On the desktop
 
-In the player: Space or K plays and pauses, Left and Right (or J and L) skip, Up, Down and the mouse wheel set the volume, M mutes, F or a double-click toggles fullscreen, N plays the next episode and Esc leaves fullscreen, then the player. Media keys work too. A click plays and pauses, and the mouse's back button acts as Esc. Right-click an episode or movie for its menu.
+In the player: Space or K plays and pauses, Left and Right (or J and L) skip, Up, Down and the mouse wheel set the volume, M mutes, F or a double-click toggles fullscreen, N plays the next episode, Page Down and Page Up go to the next and previous chapter, and Esc leaves fullscreen, then the player. Media keys work too. A click plays and pauses, and the mouse's back button acts as Esc. Right-click an episode or movie for its menu.
 
 ## Build
 

@@ -965,3 +965,16 @@ private fun Stepper(label: String, value: Int, options: List<Int>, show: (Int) -
         Text(show(options[i]))
         TextButton(onClick = { set(options[i + 1]) }, enabled = i < options.lastIndex) { Text("+", Modifier.semantics { contentDescription = "Increase $label, now ${show(options[i])}" }) }
     }
+
+/** Chapter starts as marks across a seek bar laid over them; the bar's ends sit [inset] in from its sides. */
+@Composable
+fun ChapterMarks(chapters: List<Chapter>, durationMs: Long, modifier: Modifier, inset: androidx.compose.ui.unit.Dp = 10.dp) =
+    androidx.compose.foundation.Canvas(modifier) {
+        if (durationMs <= 0) return@Canvas
+        val left = inset.toPx()
+        val half = 5.dp.toPx()
+        chapters.filter { it.startMs in 1 until durationMs }.forEach {
+            val x = left + (size.width - 2 * left) * it.startMs / durationMs
+            drawLine(Color.White, androidx.compose.ui.geometry.Offset(x, center.y - half), androidx.compose.ui.geometry.Offset(x, center.y + half), 2.dp.toPx())
+        }
+    }

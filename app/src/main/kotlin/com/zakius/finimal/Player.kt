@@ -2,6 +2,7 @@
 
 package com.zakius.finimal
 
+import finimal.core.chapterAt
 import finimal.core.reconnectDelayMs
 import android.os.Looper
 import android.os.Handler
@@ -255,6 +256,7 @@ private fun Playback(
     val seriesKey = item.seriesId?.toString() ?: id
     val serverPlayed = item.userData?.played ?: false
     val next = nextEpisode(item, siblings)
+    val chapters = remember(item) { chapters(item) }
 
     val videoStream = remember(source) { videoInfo(source) }
     val download = remember(id) { Media.download(id) }
@@ -498,6 +500,7 @@ private fun Playback(
         VideoSurface(
             mod, player, playerView, fullscreen, transcoding, cacheKey.takeUnless { transcoding || localPlaylist != null }, segments, ended, next, playerError, failedSince != null,
             title = if (item.type == BaseItemKind.EPISODE) "${item.seriesName.orEmpty()} · ${episodeLabel(item)}" else item.name.orEmpty(),
+            chapters = chapters,
             resumedAt = resumedAt,
             onResumeNoteGone = { resumedAt = null },
             onTranscode = if (choppy && !transcoding) ({
@@ -596,6 +599,7 @@ private fun VideoSurface(
     playerError: PlaybackException?,
     reconnecting: Boolean,
     title: String,
+    chapters: List<Chapter>,
     resumedAt: Long?,
     onResumeNoteGone: () -> Unit,
     onTranscode: (() -> Unit)?,
@@ -855,6 +859,7 @@ private fun VideoSurface(
                 onBack, onToggleFullscreen, onRotationLock, onTracksChosen, ::seekBy, next?.let { { onPlay(it.id.toString()) } }, skip,
                 onInteraction = { lastInteraction = System.currentTimeMillis() },
                 subtitleView = playerView.subtitleView,
+                chapters = chapters,
             )
         }
     }
@@ -880,6 +885,7 @@ private fun Controls(
     skip: Skip?,
     onInteraction: () -> Unit,
     subtitleView: SubtitleView,
+    chapters: List<Chapter>,
 ) {
     var menu by remember { mutableStateOf(false) }
     var sub by remember { mutableStateOf<String?>(null) }
@@ -906,7 +912,16 @@ private fun Controls(
                             DropdownMenuItem({ Text("Subtitles") }, { sub = "text" })
                             DropdownMenuItem({ Text("Subtitle size: ${App.prefs.subtitleScale}%") }, { sub = "size" })
                             DropdownMenuItem({ Text("Wireless audio delay: ${App.prefs.audioDelayMs} ms") }, { sub = "delay" })
+                            if (chapters.isNotEmpty()) DropdownMenuItem({ Text("Chapters") }, { sub = "chapters" })
                             if (!App.tv) DropdownMenuItem({ Text(if (rotationLocked) "Unlock rotation" else "Lock rotation") }, { onRotationLock(); menu = false })
+                        }
+                        "chapters" -> {
+                            val current = chapterAt(chapters.map { it.startMs }, position)
+                            chapters.forEachIndexed { i, c ->
+                                Choice("${formatMs(c.startMs)}  ${c.name.ifEmpty { "Chapter ${i + 1}" }}", i == current) {
+                                    player.seekTo(c.startMs); menu = false; sub = null
+                                }
+                            }
                         }
                         "speed" -> listOf(0.5f, 0.75f, 1f, 1.25f, 1.5f, 2f).forEach { s ->
                             Choice(speedLabel(s), player.playbackParameters.speed == s) { sessionSpeed = s; player.setPlaybackSpeed(s); menu = false; sub = null }
@@ -976,14 +991,17 @@ private fun Controls(
             val shown = if (dragging >= 0) dragging.toLong() else position
             Text("${formatMs(shown)} / ${formatMs(duration)}  (buffered ${formatMs(buffered)})", color = Color.White, style = MaterialTheme.typography.labelSmall)
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Slider(
-                    value = shown.toFloat().coerceIn(0f, duration.toFloat().coerceAtLeast(1f)),
-                    valueRange = 0f..duration.toFloat().coerceAtLeast(1f),
-                    onValueChange = { dragging = it; onInteraction() },
-                    // D-pad steps can report finished without a change in between.
-                    onValueChangeFinished = { if (dragging >= 0) player.seekToNearestKeyframe(dragging.toLong()); dragging = -1f },
-                    modifier = Modifier.weight(1f),
-                )
+                Box(Modifier.weight(1f)) {
+                    Slider(
+                        value = shown.toFloat().coerceIn(0f, duration.toFloat().coerceAtLeast(1f)),
+                        valueRange = 0f..duration.toFloat().coerceAtLeast(1f),
+                        onValueChange = { dragging = it; onInteraction() },
+                        // D-pad steps can report finished without a change in between.
+                        onValueChangeFinished = { if (dragging >= 0) player.seekToNearestKeyframe(dragging.toLong()); dragging = -1f },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    ChapterMarks(chapters, duration, Modifier.matchParentSize())
+                }
                 if (skip != null) SkipButton(skip, Modifier.padding(start = 8.dp))
             }
         }
