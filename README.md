@@ -2,6 +2,8 @@
 
 A Jellyfin client for Android, Linux and Windows that goes straight to your movie and TV libraries. It prefers a few extra taps over convenience features that break.
 
+Tiny and fast: the whole Android app is a 4.5 MB download. Lists open from a saved copy instead of a spinner. Install it and tap around; that shows the speed better than a benchmark.
+
 ## Why
 
 Other clients sometimes restart a series from episode 1. The cause is the server's Next Up and Resume logic, combined with stop reports that carry no position. finimal never reads Next Up or Resume. It keeps play state locally, pushes it before every list load, and the newer change wins. [docs/design.md](docs/design.md#sync) has the full rules.
