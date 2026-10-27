@@ -33,6 +33,11 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import finimal.core.RECONNECT_WINDOW_MS
+import finimal.core.reconnectDelayMs
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeoutOrNull
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -88,6 +93,10 @@ import org.jellyfin.sdk.model.api.MediaSegmentType
 
 private const val REPORT_INTERVAL_MS = 10_000L
 private const val RESUME_REWIND_MS = 5_000L
+/** An end this far before the duration is a dropped connection, not the end of the file. */
+private const val EARLY_END_MS = 10_000L
+/** Buffering this long, with the server not answering, is a dropped connection. */
+private const val STALL_MS = 10_000L
 
 /** Chosen speed and volume, kept for the session so "Play next" does not reset them. */
 private var sessionSpeed = 1.0
@@ -182,12 +191,23 @@ private fun Playback(item: BaseItemDto, siblings: List<BaseItemDto>, onBack: () 
     var creditsDone by remember { mutableStateOf(false) }
     var ended by remember { mutableStateOf(false) }
     var lastPositionMs by remember { mutableLongStateOf(0L) }
+    // Set while a dropped connection is retried; see reconnectDelayMs.
+    var failedSince by remember { mutableStateOf<Long?>(null) }
+    var attempt by remember { mutableIntStateOf(0) }
+    var gaveUp by remember { mutableStateOf(false) }
+    var reloadAtMs by remember { mutableLongStateOf(0L) }
+    // A transcode's stream never fails: mpv retries it under the spinner for as long as the server is gone.
+    var stalled by remember { mutableStateOf(false) }
 
     fun positionMs() = (mpv.position * 1000).toLong()
     fun runtimeTicks() = item.runTimeTicks ?: source.runTimeTicks ?: (mpv.duration * 1000).toLong().takeIf { it > 0 }?.times(TICKS_PER_MS)
     fun positionTicks() = ResumeGuard.position(startTicks, positionMs() * TICKS_PER_MS, runtimeTicks(), System.currentTimeMillis() - startedAt, seeked)
     fun report() = scope.launch { App.server.reportProgress(id, sourceId, positionTicks(), mpv.paused, transcoding, serverPlayed, playSession) }
     fun seekTo(ms: Long, exact: Boolean = true) { seeked = true; mpv.seek(ms / 1000.0, exact); scope.launch { delay(500); report() } }
+    // Once mpv's own reconnects give up, a dropped connection ends the file early, or fails its load. An end hit while
+    // seeking, past what is on disk, never sets eof-reached: mpv just pauses, unasked.
+    fun endedEarly() = (mpv.eof || mpv.paused && !mpv.pauseWanted) &&
+        ((mpv.duration * 1000).toLong().takeIf { it > 0 } ?: runtimeTicks()?.div(TICKS_PER_MS))?.let { lastPositionMs < it - EARLY_END_MS } == true
     fun url() = if (transcoding) App.server.transcodeUrl(id, sourceId, prefs.audioLang(seriesKey)?.let { com.zakius.finimal.audioIndex(source, it) },
             burnInIndex(source, prefs.subLang(seriesKey)), playSession)
         else DesktopMedia.streamUrl(item)
@@ -246,7 +266,7 @@ private fun Playback(item: BaseItemDto, siblings: List<BaseItemDto>, onBack: () 
     }
     LaunchedEffect(mpv) {
         snapshotFlow { mpv.eof }.collect { eof ->
-            if (eof && !ended) {
+            if (eof && !ended && !endedEarly()) {
                 ended = true
                 val runtime = runtimeTicks()
                 App.server.reportStop(id, sourceId, runtime ?: positionTicks(), runtime, serverPlayed, playSession)
@@ -254,6 +274,49 @@ private fun Playback(item: BaseItemDto, siblings: List<BaseItemDto>, onBack: () 
             // Seeking back from the end screen plays on.
             if (!eof) ended = false
         }
+    }
+    // A dropped connection loads the file again at the same spot, on a backoff; after a minute the error shows.
+    LaunchedEffect(mpv) {
+        // mpv pauses itself at the early end; the reload plays on unless the user had paused.
+        var playOn = false
+        while (true) {
+            snapshotFlow { mpv.error != null || endedEarly() || stalled }.first { it }
+            if (failedSince == null) {
+                // A load error while the server answers is the file's: it shows at once, and Retry loads again.
+                if (mpv.error != null && App.server.reachable()) { snapshotFlow { mpv.error == null }.first { it }; continue }
+                playOn = !mpv.pauseWanted
+                reloadAtMs = lastPositionMs
+            }
+            val now = System.currentTimeMillis()
+            val since = failedSince ?: now
+            failedSince = since
+            // mpv's own reconnects make a load slow to fail, so the minute is kept whatever the attempts take.
+            val outcome = reconnectDelayMs(attempt, since, now)?.let { wait ->
+                delay(wait)
+                attempt++
+                if (playOn) mpv.play()
+                reloadAtMs = lastPositionMs
+                mpv.load(url(), lastPositionMs / 1000.0)
+                // Until it plays on, or fails again: the failed file's state stays until the new one is loaded.
+                withTimeoutOrNull(RECONNECT_WINDOW_MS - (System.currentTimeMillis() - since)) {
+                    snapshotFlow { failedSince == null || mpv.error != null || mpv.loaded && endedEarly() || stalled }.first { it }
+                }
+            }
+            if (outcome == null) {
+                mpv.command("stop")
+                failedSince = null; attempt = 0; gaveUp = true
+                snapshotFlow { gaveUp }.first { !it }
+                // Retry's load replaces the stopped file's state.
+                snapshotFlow { mpv.loaded || mpv.error != null }.first { it }
+            }
+        }
+    }
+    LaunchedEffect(mpv) {
+        snapshotFlow { mpv.loaded && mpv.buffering }.collectLatest { stalled = it && run { delay(STALL_MS); !App.server.reachable() } }
+    }
+    // Reconnected once playback moves on from where it was loaded again.
+    LaunchedEffect(mpv) {
+        snapshotFlow { lastPositionMs }.collect { if (failedSince != null && it > reloadAtMs + 1_000) { failedSince = null; attempt = 0 } }
     }
     LaunchedEffect(resumedAt) { if (resumedAt != null) { delay(5_000); resumedAt = null } }
     LaunchedEffect(mpv) { snapshotFlow { mpv.volume }.collect { if (mpv.loaded) sessionVolume = it } }
@@ -267,14 +330,15 @@ private fun Playback(item: BaseItemDto, siblings: List<BaseItemDto>, onBack: () 
     }
     LaunchedEffect(mpv) { snapshotFlow { mpv.position }.collect { if (mpv.loaded && it > 0) lastPositionMs = (it * 1000).toLong() } }
 
-    VideoSurface(mpv, item, transcoding, segments, ended, next, resumedAt,
+    VideoSurface(mpv, item, transcoding, segments, ended, next, resumedAt, reconnecting = failedSince != null,
+        failure = if (gaveUp) "Can't reach the server." else mpv.error,
         title = playerTitle(item),
         onResumeNoteGone = { resumedAt = null },
         onSeek = ::seekTo,
         onBack = onBack,
         onPlay = onPlay,
         onCreditsNext = { creditsDone = true; onPlay(it) },
-        onRetry = { mpv.load(url(), lastPositionMs / 1000.0) },
+        onRetry = { gaveUp = false; mpv.play(); mpv.load(url(), lastPositionMs / 1000.0) },
         onTracksChosen = { audio, sub -> prefs.setTracks(seriesKey, audio, sub) },
     )
 }
@@ -294,6 +358,8 @@ private fun VideoSurface(
     ended: Boolean,
     next: BaseItemDto?,
     resumedAt: Long?,
+    reconnecting: Boolean,
+    failure: String?,
     title: String,
     onResumeNoteGone: () -> Unit,
     onSeek: (Long, Boolean) -> Unit,
@@ -387,8 +453,12 @@ private fun VideoSurface(
             Text(it, color = Color.White, style = MaterialTheme.typography.titleLarge,
                 modifier = Modifier.align(Alignment.Center).background(Color(0x99000000), MaterialTheme.shapes.small).padding(12.dp))
         }
-        val error = mpv.error
-        if (mpv.buffering && error == null && !ended) CircularProgressIndicator(Modifier.align(Alignment.Center), color = Color.White)
+        // While reconnecting, the last frame stays up under a note instead of the error or the end screen.
+        val error = failure.takeUnless { reconnecting }
+        val ended = ended && !reconnecting
+        if (reconnecting) Text("Reconnecting…", Modifier.align(Alignment.Center).background(Color(0x99000000), MaterialTheme.shapes.small).padding(12.dp),
+            color = Color.White, style = MaterialTheme.typography.labelLarge)
+        else if (mpv.buffering && error == null && !ended) CircularProgressIndicator(Modifier.align(Alignment.Center), color = Color.White)
 
         if (skip != null && !controls) FilledTonalButton(skip.onClick, Modifier.align(Alignment.BottomEnd).padding(32.dp)) { Text(skip.label) }
 
