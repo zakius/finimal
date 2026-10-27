@@ -102,7 +102,8 @@ fun Root(openDownloads: Boolean, openedDownloads: () -> Unit, player: @Composabl
 
     @OptIn(ExperimentalComposeUiApi::class) BackHandler(stack.size > 1) { pop() }
     LaunchedEffect(openDownloads) {
-        if (openDownloads && App.prefs.loggedIn && stack.last() != Screen.Downloads) push(Screen.Downloads)
+        // Not over "Who's watching?": the account still loaded there may have a PIN.
+        if (openDownloads && App.prefs.loggedIn && stack.first() != Screen.Accounts && stack.last() != Screen.Downloads) push(Screen.Downloads)
         openedDownloads()
     }
     LaunchedEffect(App.sessionExpired) { if (App.sessionExpired) reset(Screen.Login) }
@@ -200,6 +201,8 @@ fun sideloadedSubs(item: BaseItemDto, transcode: Boolean): List<MediaStream> =
 
 /** For a transcode: a picture subtitle (PGS, VobSub) in [lang] to burn into the video, when no text one is in that language. */
 fun burnInIndex(source: MediaSourceInfo, lang: String?): Int? {
+    // "" is subtitles off, which "und" would otherwise match.
+    if (lang.isNullOrEmpty()) return null
     val subs = source.mediaStreams.orEmpty().filter { it.type == MediaStreamType.SUBTITLE && sameLanguage(it.language, lang) }
     return subs.firstOrNull()?.takeIf { subs.none { s -> s.isTextSubtitleStream } }?.index
 }

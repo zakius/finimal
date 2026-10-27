@@ -163,6 +163,8 @@ class Mpv(options: Map<String, String>) {
                 EVENT_SHUTDOWN -> return
                 EVENT_FILE_LOADED -> { onLoaded(); loaded = true; tracksChanged++ }
                 EVENT_END_FILE -> e.getPointer(16)?.let { d ->
+                    // Stopped or failed: no position left to report.
+                    loaded = false
                     if (d.getInt(0) == END_FILE_REASON_ERROR) error = "Playback failed (mpv error ${d.getInt(4)})."
                 }
                 EVENT_PROPERTY_CHANGE -> e.getPointer(16)?.let { p ->

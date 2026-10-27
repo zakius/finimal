@@ -133,16 +133,17 @@ class Server {
         App.sessionExpired = false
     }
 
-    fun logout() {
+    /** Removes the current account; [keepAccount] only ends its session, keeping its name and PIN for the next login. */
+    fun logout(keepAccount: Boolean = false) {
         recorded.clear()
         ListSnapshots.clear() // another account's lists must not show, even briefly
-        prefs.logout()
+        if (keepAccount) prefs.endSession() else prefs.logout()
         api.update(accessToken = null)
         App.downloads?.accountChanged()
     }
 
     fun expire() {
-        logout()
+        logout(keepAccount = true)
         App.sessionExpired = true
     }
 

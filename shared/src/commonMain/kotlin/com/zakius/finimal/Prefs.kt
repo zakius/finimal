@@ -91,6 +91,9 @@ class Prefs(private val p: KeyValueStore) {
     /** Removes the current account; its unsynced progress and settings stay for when it logs in again. */
     fun logout() = p.edit { put("accounts", json.encodeToString(accounts().filter { it.userId != userId })); put("token", null); put("userId", null) }
 
+    /** The server ended the session: logged out, the account and its PIN kept for logging in again. */
+    fun endSession() = p.edit { put("token", null); put("userId", null) }
+
     /** Settings that follow the account rather than the device: under "<userId>/". */
     private fun u(key: String) = "$userId/$key"
 

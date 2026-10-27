@@ -54,6 +54,17 @@ class AccountsTest {
         assertTrue(p.pinMatches(p.accounts().single(), "1234"), "logging in again keeps the PIN")
     }
 
+    @Test fun anEndedSessionKeepsTheAccountAndItsPin() {
+        val p = Prefs(Store())
+        p.login("https://s", "ta", "a", "Ann")
+        p.setPin("a", "1234")
+        p.endSession()
+        assertFalse(p.loggedIn)
+        p.login("https://s", "ta2", "a", "Ann")
+        assertTrue(p.pinMatches(p.accounts().single(), "1234"))
+        assertFalse(p.pinMatches(p.accounts().single(), "0000"))
+    }
+
     @Test fun anotherServerStartsOverAndLogoutRemovesOnlyTheCurrent() {
         val p = Prefs(Store())
         p.login("https://s", "ta", "a", "Ann")
