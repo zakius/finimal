@@ -50,6 +50,7 @@ mkdir -p "$(dirname "$small")" dist
 cp -r desktop/build/compose/binaries/main-release/app/finimal "$small"
 rm -rf "$small/runtime"
 find "$small" -name libmpv-2.dll -delete
+rm -f "$small/finimal.exe" # jpackage's launcher, read-only
 cp "$tmp/finimal.exe" "$small/finimal.exe"
 (cd "$(dirname "$small")" && 7z a -tzip -mx=9 "$OLDPWD/dist/finimal-$version-windows-x64.zip" finimal > /dev/null)
 
