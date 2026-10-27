@@ -21,6 +21,7 @@ On Android and the desktop:
 - Chapters on the seek bar and in the player menu.
 - An audio delay setting, and speed from 0.5× to 2×.
 - A login that tries https before http and never falls back to http after a certificate error.
+- Several users of one server on one device, each with their own progress, downloads and settings, an optional PIN, and "Who's watching?" at start.
 
 On Android:
 
@@ -38,7 +39,7 @@ On the desktop:
 - Keyboard and mouse control, see [On the desktop](#on-the-desktop). The window remembers its size and place, and the screen stays on while playing.
 - No downloads yet.
 
-Not included: music, books and other library types, more than one server, background audio, picture-in-picture, Quick Connect, and home rows.
+Not included: music, books and other library types, more than one server at a time, background audio, picture-in-picture, Quick Connect, and home rows.
 
 ## Install
 

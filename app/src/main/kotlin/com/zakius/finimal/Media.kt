@@ -114,6 +114,10 @@ object Media : Downloads {
 
     fun onAppStart(context: Context) {
         ctx = context
+        // Records from before accounts belong to the account that was logged in.
+        recordsRoot.listFiles { f -> f.isFile }?.takeIf { it.isNotEmpty() }?.let { files ->
+            App.prefs.userId?.let { files.forEach { f -> f.renameTo(File(downloadsDir, f.name)) } }
+        }
         storageMissing = App.prefs.storageIndex >= storageRoots().size
         scratch = openScratch()
     }
@@ -148,7 +152,8 @@ object Media : Downloads {
     override fun switchStorage(index: Int) {
         WorkManager.getInstance(ctx).cancelUniqueWork("downloads")
         stopBuffer(null)
-        downloads().forEach { val id = it.item.id.toString(); metaFile(id).delete(); subsDir(id).deleteRecursively() }
+        pinnedIds().forEach { subsDir(it).deleteRecursively() }
+        recordsRoot.deleteRecursively()
         File(storageRoot(), "transcodes").deleteRecursively()
         memo = null
         changes++
@@ -185,8 +190,13 @@ object Media : Downloads {
     // --- downloads -------------------------------------------------------------------------------
 
 
-    private val downloadsDir get() = File(ctx.filesDir, "downloads").apply { mkdirs() }
+    /** A folder of records per account: an account sees, queues and deletes only its own. */
+    private val recordsRoot get() = File(ctx.filesDir, "downloads")
+    private val downloadsDir get() = File(recordsRoot, App.prefs.userId ?: "none").apply { mkdirs() }
     private fun metaFile(id: String) = File(downloadsDir, "$id.json")
+    /** Another account's record of [id], decodable or not: its bytes and subtitles stay. */
+    private fun ownedElsewhere(id: String) = recordsRoot.listFiles().orEmpty()
+        .any { it.isDirectory && it != downloadsDir && it.list().orEmpty().any { n -> n.substringBefore('.') == id } }
     private fun write(d: Download) {
         metaFile(d.item.id.toString()).writeAtomically(json.encodeToString(d))
         // Patched rather than cleared: progress reports write every 10 s, and a re-read decodes every file.
@@ -214,10 +224,25 @@ object Media : Downloads {
         .also { memo = it }
 
     /**
-     * IDs with a meta file, decodable or not, so an unreadable record never turns a download into
+     * IDs with a meta file of any account, decodable or not, so an unreadable record never turns a download into
      * evictable buffer. A cache key starts with its item ID.
      */
-    private fun pinnedIds() = downloadsDir.list().orEmpty().map { it.substringBefore('.') }.toSet()
+    private fun pinnedIds() = recordsRoot.listFiles().orEmpty().filter { it.isDirectory }.flatMap { it.list().orEmpty().toList() }
+        .map { it.substringBefore('.') }.toSet()
+
+    @Synchronized
+    override fun accountChanged() {
+        memo = null
+        changes++
+        kickDownloads(restart = true)
+    }
+
+    override fun otherAccountsBytes(): Long {
+        val own = downloads().map { it.item.id.toString() }.toSet()
+        val others = pinnedIds() - own
+        return scratch.keys().filter { k -> others.any { k.startsWith("$it-") } }.sumOf { scratch.entry(it).bytes() } +
+            others.sumOf { transcodeDir(it).walk().filter(File::isFile).sumOf(File::length) }
+    }
     private fun isPinned(key: String, ids: Set<String>) = ids.any { key.startsWith("$it-") }
 
     override fun download(id: String): Download? = downloads().firstOrNull { it.item.id.toString() == id }
@@ -262,7 +287,7 @@ object Media : Downloads {
         if (existing != null && isDone(existing)) return
         // An unfinished download takes the fresh item, so a file changed on the server restarts cleanly.
         val same = existing != null && key(existing.item) == key(item)
-        if (existing != null && !same) removeDownloadBytes(existing)
+        if (existing != null && !same && !ownedElsewhere(id)) removeDownloadBytes(existing)
         write(Download(item, existing?.auto ?: auto, existing?.queuedAt ?: System.currentTimeMillis(), paused = false,
             transcoded = if (same) existing!!.transcoded else !playsDirectly(item)))
         kickDownloads(restart = false)
@@ -291,6 +316,7 @@ object Media : Downloads {
             if (downloading == id) kickDownloads(restart = true)
             d
         }
+        if (ownedElsewhere(id)) return
         subsDir(id).deleteRecursively()
         if (d != null && playing != key(d.item)) removeDownloadBytes(d)
     }
@@ -468,7 +494,7 @@ object Media : Downloads {
 
     /** Subtitles fetched for items that were only streamed; downloads and the playing item keep theirs. */
     fun dropStreamedSubtitles() {
-        val keep = downloads().map { it.item.id.toString() }.toSet()
+        val keep = pinnedIds()
         val playing = playing
         File(ctx.filesDir, "subs").listFiles().orEmpty()
             .filter { it.name !in keep && playing?.startsWith(it.name) != true }

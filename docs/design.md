@@ -5,7 +5,12 @@ A Jellyfin client for Android, Linux and Windows that goes straight to the libra
 ## Scope
 
 - Android phone and tablet, portrait and landscape, and Android TV and TV boxes. Minimum API 26. No Google Play Services: it must run on EMUI.
-- One server, one user. Username/password login; the token is stored.
+- One server, several users. Username/password login; each account's token is stored.
+  - Accounts: the avatar at the top right of Libraries opens the list, to switch or "Add account" (a login for the same server, whose fields are locked). At a cold start with two or more accounts, "Who's watching?" comes first; with one, it opens. Logged out with accounts left, the picker shows, never an account picked for the user.
+  - An account may have a PIN of 4 to 8 digits, asked when switching to it, also from the picker after a restart. Jellyfin has no login PIN, so it is ours: a salted SHA-256 beside the token, a household lock rather than security. Only the account itself sets, changes or removes it.
+  - Per account: play state, the unsynced queue, lists, downloads and their queue, "keep next N", the per-series tracks, "Direct play up to", subtitle size and skip step. Per device: everything describing the hardware or the network (decoders, learned codecs, audio delay, gestures, interface, buffer, storage, metered).
+  - Logging in to another server replaces every account. A failed "Add account" leaves the current one logged in.
+  - Settings from before accounts move to the account that was logged in, once; its downloads too.
   - The form has the server and, beside it, the port, prefilled with Jellyfin's 8096 (`serverCandidates` in `core`). Without a scheme it tries https, then http, on that port; with 8096 left as it is, https on 443 last, for a server behind a reverse proxy. A port in the server field wins; an empty port means the scheme's default; a written scheme is tried as written. A certificate problem (untrusted, expired, wrong name) never falls back: the password would go out in clear text. It says "The server's certificate isn't trusted". Logging in again shows the saved address split back into the two fields.
   - Login stores URL, token and user in one write. The password field has Show/Hide; editing a field clears the old error.
   - Login errors say "Wrong username or password" (HTTP 401). Anything else gets the same sentence as a list that fails to load (can't reach the server, a server error with its status, or a generic message), with the raw error in small text. Can't reach the server also names the addresses tried.
@@ -94,7 +99,7 @@ Libraries → poster grid → series → seasons → episodes. A series with one
 ## Settings
 
 - A whole row toggles its switch. A setting that depends on a gesture turned off is greyed out.
-- Log out asks first. When progress is not synced yet, the dialog says how many items, and that they are sent after logging back in to the same server.
+- Log out removes the current account from the device and asks first. When progress is not synced yet, the dialog says how many items, and that they are sent after logging back in to the same server.
 - The app version shows at the bottom.
 
 ## Buffering and downloads
@@ -105,6 +110,7 @@ There is one persistent on-disk store, the scratch (`core`'s `Scratch`), shared 
 - One filler thread per entry is the only writer. It fetches what the open demands ask for, with HTTP ranges from chunk boundaries, nearest need first: the newest reader (64 MB ahead of what it has sent), then buffer-to-end, then a download from byte 0. A seek elsewhere drops the fetch nobody wants any more. Chunks already on disk are never fetched again.
 - The player reads through a loopback HTTP server (`ScratchServer`, `127.0.0.1` with a random token in the path, since other apps can reach loopback ports). Readers never fetch: they wait for the filler and read the chunk being written as its bytes land. When the filler's last try failed (no network, server down), a reader fails at once so the player shows "Reconnecting…"; the player's retry is a new request, which wakes the filler.
 - Buffering is a buffer-to-end demand while the player is open.
+- Each account has its own download records (`downloads/<userId>/`), so it sees, queues and deletes only its own; the queue runs for the current account, and its notification names only that account's items. The bytes are shared: an item another account also downloaded is stored once, pinned by any account's record, and deleted with the last one. The Downloads screen counts the other accounts' bytes as one total, without titles.
 - A download is a whole-file demand on the same entry, marked pinned. Downloads run one at a time in the order requested. Pause and delete act on one episode; the rest of the queue carries on. So does a file the server refuses (HTTP 4xx, e.g. deleted there): that download shows "failed", and Resume tries it again. A finished file whose length differs from the size the server lists (a captive portal or proxy page) is removed and fails the same way. When a chunk can't be written, the buffer is evicted and the write tried again; if that doesn't help, buffering and downloading stop for that entry (the reader still gets chunks while there is room), and the download pauses as "storage full" and the queue stops until Resume or the next start.
 - A queued download fetches its item again when it starts, so a file replaced on the server since queuing downloads under its new key.
 - Playing an unfinished download needs nothing special: the reader's demand comes first, so the part being watched lands first, and the download takes the rest. What was buffered while watching counts towards the download, and an item fully buffered becomes a finished download at once.

@@ -74,4 +74,8 @@ interface Downloads {
     fun storageRoots(): List<File>
     /** Moves storage to root [index], deleting every download and the buffer. */
     fun switchStorage(index: Int)
+    /** Each account has its own downloads and queue; the bytes of an item are shared. Re-reads for the current account. */
+    fun accountChanged()
+    /** Bytes downloaded only by other accounts on this device; their titles stay theirs. */
+    fun otherAccountsBytes(): Long
 }

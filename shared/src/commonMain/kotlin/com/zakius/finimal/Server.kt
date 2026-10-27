@@ -23,6 +23,7 @@ import org.jellyfin.sdk.api.client.extensions.authenticationApi
 import org.jellyfin.sdk.api.client.extensions.imageApi
 import org.jellyfin.sdk.api.client.extensions.libraryApi
 import org.jellyfin.sdk.api.client.extensions.systemApi
+import org.jellyfin.sdk.api.client.extensions.userApi
 import org.jellyfin.sdk.api.client.extensions.mediaSegmentApi
 import org.jellyfin.sdk.api.client.extensions.sessionApi
 import org.jellyfin.sdk.api.client.extensions.showApi
@@ -113,9 +114,22 @@ class Server {
 
     private suspend fun login(base: String, credentials: AuthenticateUserByName) {
         api.update(baseUrl = base, accessToken = null)
-        val auth = io { api.authenticationApi.authenticateUserByName(credentials).content }
-        prefs.login(base, auth.accessToken, auth.user!!.id.toString())
+        // Adding an account that fails leaves the current one working.
+        val auth = try { io { api.authenticationApi.authenticateUserByName(credentials).content } }
+            catch (e: Exception) { api.update(baseUrl = prefs.baseUrl, accessToken = prefs.token); throw e }
+        recorded.clear()
+        prefs.login(base, auth.accessToken!!, auth.user!!.id.toString(), auth.user!!.name.orEmpty())
         api.update(baseUrl = base, accessToken = auth.accessToken)
+        App.downloads?.accountChanged()
+        App.sessionExpired = false
+    }
+
+    /** Another saved account takes over; its lists, downloads and unsynced progress are its own. */
+    fun switchTo(a: Account) {
+        recorded.clear()
+        prefs.switchTo(a)
+        api.update(accessToken = a.token)
+        App.downloads?.accountChanged()
         App.sessionExpired = false
     }
 
@@ -124,12 +138,15 @@ class Server {
         ListSnapshots.clear() // another account's lists must not show, even briefly
         prefs.logout()
         api.update(accessToken = null)
+        App.downloads?.accountChanged()
     }
 
     fun expire() {
         logout()
         App.sessionExpired = true
     }
+
+    suspend fun userName(): String = io { api.userApi.getCurrentUser().content.name.orEmpty() }
 
     suspend fun libraries(): List<BaseItemDto> =
         io { api.userViewApi.getUserViews(userId).content.items }
