@@ -200,6 +200,8 @@ private fun Playback(item: BaseItemDto, siblings: List<BaseItemDto>, onBack: () 
     var attempt by remember { mutableIntStateOf(0) }
     var gaveUp by remember { mutableStateOf(false) }
     var reloadAtMs by remember { mutableLongStateOf(0L) }
+    // The file really ends early: it did again after a reload, with the server answering.
+    var trustEnd by remember { mutableStateOf(false) }
     // A transcode's stream never fails: mpv retries it under the spinner for as long as the server is gone.
     var stalled by remember { mutableStateOf(false) }
 
@@ -210,7 +212,7 @@ private fun Playback(item: BaseItemDto, siblings: List<BaseItemDto>, onBack: () 
     fun seekTo(ms: Long, exact: Boolean = true) { seeked = true; mpv.seek(ms / 1000.0, exact); scope.launch { delay(500); report() } }
     // Once mpv's own reconnects give up, a dropped connection ends the file early, or fails its load. An end hit while
     // seeking, past what is on disk, never sets eof-reached: mpv just pauses, unasked.
-    fun endedEarly() = (mpv.eof || mpv.paused && !mpv.pauseWanted) &&
+    fun endedEarly() = !trustEnd && (mpv.eof || mpv.paused && !mpv.pauseWanted) &&
         ((mpv.duration * 1000).toLong().takeIf { it > 0 } ?: runtimeTicks()?.div(TICKS_PER_MS))?.let { lastPositionMs < it - EARLY_END_MS } == true
     fun url() = if (transcoding) App.server.transcodeUrl(id, sourceId, prefs.audioLang(seriesKey)?.let { com.zakius.finimal.audioIndex(source, it) },
             burnInIndex(source, prefs.subLang(seriesKey)), playSession)
@@ -269,8 +271,8 @@ private fun Playback(item: BaseItemDto, siblings: List<BaseItemDto>, onBack: () 
         while (true) { delay(REPORT_INTERVAL_MS); if (!mpv.paused && mpv.loaded && !ended) report() }
     }
     LaunchedEffect(mpv) {
-        snapshotFlow { mpv.eof }.collect { eof ->
-            if (eof && !ended && !endedEarly()) {
+        snapshotFlow { mpv.eof to endedEarly() }.collect { (eof, early) ->
+            if (eof && !ended && !early) {
                 ended = true
                 val runtime = runtimeTicks()
                 App.server.reportStop(id, sourceId, runtime ?: positionTicks(), runtime, serverPlayed, playSession)
@@ -283,13 +285,17 @@ private fun Playback(item: BaseItemDto, siblings: List<BaseItemDto>, onBack: () 
     LaunchedEffect(mpv) {
         // mpv pauses itself at the early end; the reload plays on unless the user had paused.
         var playOn = false
+        // Where the last reload started, until playback moves on from there.
+        var reloadedAtMs: Long? = null
         while (true) {
             snapshotFlow { mpv.error != null || endedEarly() || stalled }.first { it }
+            if (reloadedAtMs?.let { lastPositionMs > it + 1_000 } == true) reloadedAtMs = null
+            // Ended early again right where it was loaded, with the server answering: the file really ends there.
+            if (mpv.eof && reloadedAtMs != null && App.server.reachable()) { trustEnd = true; failedSince = null; attempt = 0; continue }
             if (failedSince == null) {
                 // A load error while the server answers is the file's: it shows at once, and Retry loads again.
                 if (mpv.error != null && App.server.reachable()) { snapshotFlow { mpv.error == null }.first { it }; continue }
                 playOn = !mpv.pauseWanted
-                reloadAtMs = lastPositionMs
             }
             val now = System.currentTimeMillis()
             val since = failedSince ?: now
@@ -299,28 +305,34 @@ private fun Playback(item: BaseItemDto, siblings: List<BaseItemDto>, onBack: () 
                 delay(wait)
                 attempt++
                 if (playOn) mpv.play()
+                reloadedAtMs = lastPositionMs
                 reloadAtMs = lastPositionMs
                 mpv.load(url(), lastPositionMs / 1000.0)
-                // Until it plays on, or fails again: the failed file's state stays until the new one is loaded.
                 withTimeoutOrNull(RECONNECT_WINDOW_MS - (System.currentTimeMillis() - since)) {
-                    snapshotFlow { failedSince == null || mpv.error != null || mpv.loaded && endedEarly() || stalled }.first { it }
+                    snapshotFlow { mpv.loaded || mpv.error != null }.first { it }
                 }
             }
-            if (outcome == null) {
-                mpv.command("stop")
-                failedSince = null; attempt = 0; gaveUp = true
-                snapshotFlow { gaveUp }.first { !it }
-                // Retry's load replaces the stopped file's state.
-                snapshotFlow { mpv.loaded || mpv.error != null }.first { it }
+            when {
+                outcome == null -> {
+                    mpv.command("stop")
+                    failedSince = null; attempt = 0; gaveUp = true
+                    snapshotFlow { gaveUp }.first { !it }
+                    // Retry's load replaces the stopped file's state.
+                    snapshotFlow { mpv.loaded || mpv.error != null }.first { it }
+                }
+                // Loaded, and the server answers: the connection is back, and a slow one just buffers. A load can
+                // succeed without it, from what is on disk; that one fails again where the disk ends.
+                mpv.error == null && App.server.reachable() -> { failedSince = null; attempt = 0 }
             }
         }
     }
     LaunchedEffect(mpv) {
         snapshotFlow { mpv.loaded && mpv.buffering }.collectLatest { stalled = it && run { delay(STALL_MS); !App.server.reachable() } }
     }
-    // Reconnected once playback moves on from where it was loaded again.
+    // Reconnected once playback moves on from where it was loaded again, or, paused by the user, once it is loaded.
     LaunchedEffect(mpv) {
-        snapshotFlow { lastPositionMs }.collect { if (failedSince != null && it > reloadAtMs + 1_000) { failedSince = null; attempt = 0 } }
+        snapshotFlow { lastPositionMs > reloadAtMs + 1_000 || mpv.pauseWanted && mpv.loaded && !mpv.buffering && !mpv.eof && mpv.error == null }
+            .collect { if (it && failedSince != null) { failedSince = null; attempt = 0 } }
     }
     LaunchedEffect(resumedAt) { if (resumedAt != null) { delay(5_000); resumedAt = null } }
     LaunchedEffect(mpv) { snapshotFlow { mpv.volume }.collect { if (mpv.loaded) sessionVolume = it } }

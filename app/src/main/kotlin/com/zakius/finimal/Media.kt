@@ -114,10 +114,7 @@ object Media : Downloads {
 
     fun onAppStart(context: Context) {
         ctx = context
-        // Records from before accounts belong to the account that was logged in.
-        recordsRoot.listFiles { f -> f.isFile }?.takeIf { it.isNotEmpty() }?.let { files ->
-            App.prefs.userId?.let { files.forEach { f -> f.renameTo(File(downloadsDir, f.name)) } }
-        }
+        adoptLooseRecords()
         storageMissing = App.prefs.storageIndex >= storageRoots().size
         scratch = openScratch()
     }
@@ -194,9 +191,25 @@ object Media : Downloads {
     private val recordsRoot get() = File(ctx.filesDir, "downloads")
     private val downloadsDir get() = File(recordsRoot, App.prefs.userId ?: "none").apply { mkdirs() }
     private fun metaFile(id: String) = File(downloadsDir, "$id.json")
-    /** Another account's record of [id], decodable or not: its bytes and subtitles stay. */
-    private fun ownedElsewhere(id: String) = recordsRoot.listFiles().orEmpty()
-        .any { it.isDirectory && it != downloadsDir && it.list().orEmpty().any { n -> n.substringBefore('.') == id } }
+    private fun otherRecordDirs() = recordsRoot.listFiles().orEmpty().filter { it.isDirectory && it != downloadsDir }
+    /** Another account has [id] downloaded, decodable or not: the subtitles stay. */
+    private fun recordedElsewhere(id: String) = otherRecordDirs().any { it.list().orEmpty().any { n -> n.substringBefore('.') == id } }
+    /** Another account's record needs [d]'s bytes: the same kind of file, direct or transcoded. Undecodable counts. */
+    private fun ownedElsewhere(d: Download) = otherRecordDirs().any { dir ->
+        val id = d.item.id.toString()
+        val f = File(dir, "$id.json")
+        if (f.exists()) runCatching { json.decodeFromString<Download>(f.readText()).transcoded == d.transcoded }.getOrDefault(true)
+        else dir.list().orEmpty().any { it.substringBefore('.') == id }
+    }
+
+    /**
+     * Records from before accounts lie loose in the folder; they belong to whoever is logged in, now or at the next
+     * login. Until then [pinnedIds] counts them.
+     */
+    private fun adoptLooseRecords() {
+        if (App.prefs.userId == null) return
+        recordsRoot.listFiles { f -> f.isFile }?.forEach { it.renameTo(File(downloadsDir, it.name)) }
+    }
     private fun write(d: Download) {
         metaFile(d.item.id.toString()).writeAtomically(json.encodeToString(d))
         // Patched rather than cleared: progress reports write every 10 s, and a re-read decodes every file.
@@ -227,11 +240,12 @@ object Media : Downloads {
      * IDs with a meta file of any account, decodable or not, so an unreadable record never turns a download into
      * evictable buffer. A cache key starts with its item ID.
      */
-    private fun pinnedIds() = recordsRoot.listFiles().orEmpty().filter { it.isDirectory }.flatMap { it.list().orEmpty().toList() }
+    private fun pinnedIds() = recordsRoot.listFiles().orEmpty().flatMap { if (it.isDirectory) it.list().orEmpty().toList() else listOf(it.name) }
         .map { it.substringBefore('.') }.toSet()
 
     @Synchronized
     override fun accountChanged() {
+        adoptLooseRecords()
         memo = null
         changes++
         kickDownloads(restart = true)
@@ -287,7 +301,7 @@ object Media : Downloads {
         if (existing != null && isDone(existing)) return
         // An unfinished download takes the fresh item, so a file changed on the server restarts cleanly.
         val same = existing != null && key(existing.item) == key(item)
-        if (existing != null && !same && !ownedElsewhere(id)) removeDownloadBytes(existing)
+        if (existing != null && !same && !ownedElsewhere(existing)) removeDownloadBytes(existing)
         write(Download(item, existing?.auto ?: auto, existing?.queuedAt ?: System.currentTimeMillis(), paused = false,
             transcoded = if (same) existing!!.transcoded else !playsDirectly(item)))
         kickDownloads(restart = false)
@@ -316,9 +330,8 @@ object Media : Downloads {
             if (downloading == id) kickDownloads(restart = true)
             d
         }
-        if (ownedElsewhere(id)) return
-        subsDir(id).deleteRecursively()
-        if (d != null && playing != key(d.item)) removeDownloadBytes(d)
+        if (!recordedElsewhere(id)) subsDir(id).deleteRecursively()
+        if (d != null && playing != key(d.item) && !ownedElsewhere(d)) removeDownloadBytes(d)
     }
 
     /** A direct download open in the player stays, now as buffer, for eviction to take later. */
@@ -529,15 +542,19 @@ object Media : Downloads {
 class DownloadWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
     override suspend fun doWork(): Result {
         if (Media.storageMissing) return Result.success() // the next app start kicks the queue again
+        // An account switch starts a new worker for the new account's queue; this one must not write into it.
+        val user = App.prefs.userId
         var current: String? = null
         try {
             while (true) {
+                if (App.prefs.userId != user) return Result.success()
                 var d = Media.nextDownload() ?: return Result.success()
                 val id = d.item.id.toString()
                 current = id
                 Media.downloading = id
                 // A file replaced on the server since queuing starts over under its new key.
                 val fresh = try { App.server.item(id) } catch (e: CancellationException) { throw e } catch (e: Exception) { null }
+                if (App.prefs.userId != user) return Result.success()
                 if (fresh != null && Media.key(fresh) != Media.key(d.item)) {
                     Media.startDownload(fresh, d.auto)
                     d = Media.download(id) ?: continue
@@ -616,6 +633,9 @@ class Housekeeping(context: Context, params: WorkerParameters) : CoroutineWorker
     override suspend fun doWork(): Result {
         val server = App.server
         if (!server.loggedIn) return Result.success()
+        // Everything below reads and writes the current account's downloads; a switch midway leaves the rest to the next run.
+        val user = App.prefs.userId
+        fun switched() = App.prefs.userId != user
         val unsynced = server.flush()
         if (!server.loggedIn) return Result.success() // the token was rejected; logging in pushes again
         if (unsynced != null && transient(unsynced)) return Result.retry()
@@ -624,18 +644,19 @@ class Housekeeping(context: Context, params: WorkerParameters) : CoroutineWorker
             val ids = Media.downloads().map { it.item.id }
             // An item still pending has newer local state than the server; the push that failed will retry.
             if (ids.isNotEmpty()) server.userData(ids).forEach { (id, data) ->
-                if (App.pending.get(id.toString()) == null) Media.rememberState(id.toString(), data.toPlayState())
+                if (App.pending.get(id.toString()) == null && !switched()) Media.rememberState(id.toString(), data.toPlayState())
             }
         }
         var retry = false
         for ((seriesId, n) in App.prefs.keepNextSeries()) runCatching {
+            if (switched()) return Result.success()
             val episodes = server.episodes(seriesId).filter { it.parentIndexNumber != 0 }
             val refs = episodes.map { EpisodeRef(it.id.toString(), it.localState().first) }
             val window = keepNextWindow(refs, n)
             val have = Media.downloads().associateBy { it.item.id.toString() }
-            window.filter { it !in have }.forEach { Media.startDownload(server.item(it), auto = true) }
+            window.filter { it !in have }.forEach { server.item(it).let { item -> if (!switched()) Media.startDownload(item, auto = true) } }
             val auto = have.filterValues { it.auto }.keys
-            keepNextDeletions(auto, refs, window).forEach(Media::deleteDownload)
+            keepNextDeletions(auto, refs, window).forEach { if (!switched()) Media.deleteDownload(it) }
         }.onFailure { if (transient(it)) retry = true } // a series gone from the server would fail every retry
         Media.evict()
         Media.dropStreamedSubtitles()

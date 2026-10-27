@@ -37,6 +37,7 @@ class SubtitlesTest {
         assertEquals(3, burnInIndex(source, "ja"))
         assertNull(burnInIndex(source, "en"))
         assertNull(burnInIndex(source, ""))
+        assertNull(burnInIndex(source.copy(mediaStreams = listOf(sub(5, "und", text = false))), ""), "off never burns in")
         assertNull(burnInIndex(source, null))
     }
 }
