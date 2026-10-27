@@ -221,6 +221,19 @@ class ScratchTest {
         get().use { r -> assertContentEquals(content, r.body.bytes()) }
     }
 
+    @Test fun serverIgnoringRangeServesASeekWithOneRequest() {
+        honorRange = false
+        val e = entry()
+        val from = 10 * chunk
+        val got = java.io.ByteArrayOutputStream()
+        e.demand(from.toLong(), Long.MAX_VALUE, Scratch.Priority.BUFFER).use {
+            val buf = ByteArray(8192)
+            while (true) { val n = e.read((from + got.size()).toLong(), buf, 0, buf.size, 5_000); if (n < 0) break; got.write(buf, 0, n) }
+        }
+        assertContentEquals(slice(from), got.toByteArray())
+        assertEquals(1, starts.size)
+    }
+
     @Test fun hangingOriginTimesOutTheReader() {
         hang = true
         server.close()

@@ -125,6 +125,7 @@ class Server {
     suspend fun login(server: String, port: String, username: String, password: String) {
         val credentials = AuthenticateUserByName(username, password)
         val tries = serverCandidates(server, port)
+        require(tries.isNotEmpty()) { "No server address" }
         for ((i, base) in tries.withIndex()) {
             try { return login(base, credentials) }
             // A certificate problem is not a server without https: falling back would send the password in clear text.

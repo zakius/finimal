@@ -31,16 +31,22 @@ import java.io.IOException
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import okhttp3.Call
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.Response
 import org.jellyfin.sdk.model.api.BaseItemDto
 import org.jellyfin.sdk.model.api.BaseItemKind
 import org.jellyfin.sdk.model.api.MediaStream
@@ -406,7 +412,7 @@ object Media : Downloads {
             if (file.exists()) return@forEachIndexed
             // The kept URLs carry the token of their day.
             val url = base + uri.replace(Regex("ApiKey=[^&]*"), "ApiKey=${App.prefs.token}")
-            transcodeHttp.newCall(Request.Builder().url(url).build()).execute().use { r ->
+            transcodeHttp.newCall(Request.Builder().url(url).build()).cancellable { r ->
                 if (!r.isSuccessful) throw HttpStatus(r.code)
                 val tmp = File(dir, "$n.tmp")
                 tmp.outputStream().use { (r.body ?: throw IOException("empty body")).byteStream().copyTo(it) }
@@ -418,9 +424,17 @@ object Media : Downloads {
         File(dir, PLAYLIST).writeAtomically(lines.joinToString("\n") { if (isSegment(it)) "${n++}.ts" else it })
     }
 
-    private fun fetchText(url: String) = transcodeHttp.newCall(Request.Builder().url(url).build()).execute().use { r ->
+    private suspend fun fetchText(url: String) = transcodeHttp.newCall(Request.Builder().url(url).build()).cancellable { r ->
         if (!r.isSuccessful) throw HttpStatus(r.code)
         r.body?.string() ?: throw IOException("empty body")
+    }
+
+    /** A blocking call that a stopped worker (paused, network now metered) cancels, rather than fetching on unseen. */
+    private suspend fun <T> Call.cancellable(block: (Response) -> T): T = coroutineScope {
+        // Undispatched: a watcher cancelled before it ran would never cancel the call.
+        val watcher = launch(start = CoroutineStart.UNDISPATCHED) { try { awaitCancellation() } finally { this@cancellable.cancel() } }
+        // Cancelled, the call fails with an IOException: a stop, not a network or storage failure.
+        try { execute().use(block) } catch (e: IOException) { ensureActive(); throw e } finally { watcher.cancel() }
     }
 
     /** The server holds a segment request open until its encoder has written it. */

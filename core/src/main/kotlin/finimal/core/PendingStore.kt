@@ -3,6 +3,9 @@ package finimal.core
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption.ATOMIC_MOVE
+import java.nio.file.StandardCopyOption.REPLACE_EXISTING
 import kotlinx.serialization.json.Json
 
 /**
@@ -40,9 +43,12 @@ class PendingStore(private val file: File) {
     private fun save() = try { file.writeAtomically(json.encodeToString(states.toMap())) } catch (e: IOException) {}
 }
 
-/** Through a synced temp file and a rename, so a crash or power loss leaves the old or the new file, never half of one. */
+/**
+ * Through a synced temp file and a rename, so a crash or power loss leaves the old or the new file, never half of one.
+ * Not [File.renameTo]: on Windows it refuses to replace an existing file.
+ */
 fun File.writeAtomically(text: String) {
     val tmp = File("$path.tmp")
     FileOutputStream(tmp).use { it.write(text.toByteArray()); it.fd.sync() }
-    if (!tmp.renameTo(this)) error("cannot replace $this")
+    Files.move(tmp.toPath(), toPath(), REPLACE_EXISTING, ATOMIC_MOVE)
 }

@@ -2,11 +2,13 @@ package finimal.core
 
 import java.io.Closeable
 import java.io.File
-import java.io.FileNotFoundException
 import java.io.FileOutputStream
 import java.io.IOException
 import java.io.InterruptedIOException
-import java.io.RandomAccessFile
+import java.nio.ByteBuffer
+import java.nio.channels.FileChannel
+import java.nio.file.AccessDeniedException
+import java.nio.file.NoSuchFileException
 import java.util.BitSet
 import kotlin.concurrent.thread
 import okhttp3.Call
@@ -51,8 +53,8 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
     fun delete(key: String): Boolean {
         val e = synchronized(this) { entries[key] }
         if (e != null && !e.release()) return false
-        synchronized(this) { entries.remove(key) }
-        File(dir, key).deleteRecursively()
+        // Under the lock: an entry() for the key in between would count the chunks being deleted as present.
+        synchronized(this) { entries.remove(key); File(dir, key).deleteRecursively() }
         return true
     }
 
@@ -244,9 +246,14 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
                     @Suppress("UNREACHABLE_CODE") error("unreachable")
                 }
                 // The part can be renamed to its chunk, or dropped and begun again, between the check and the open.
+                // A FileChannel, not a RandomAccessFile: on Windows only it lets the filler rename the part while open.
                 val n = try {
-                    RandomAccessFile(file, "r").use { f -> f.seek(inChunk); f.read(buf, off, minOf(len.toLong(), available).toInt()) }
-                } catch (e: FileNotFoundException) { continue }
+                    FileChannel.open(file.toPath()).use { it.read(ByteBuffer.wrap(buf, off, minOf(len.toLong(), available).toInt()), inChunk) }
+                } catch (e: IOException) {
+                    // AccessDenied: on Windows, a part being deleted. Retried, though not past the deadline.
+                    if (e !is NoSuchFileException && e !is AccessDeniedException || System.currentTimeMillis() > deadline) throw e
+                    continue
+                }
                 if (n <= 0) continue
                 touch()
                 return n
@@ -348,7 +355,8 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
                 } finally {
                     synchronized(this) {
                         call = null
-                        if (writing >= 0) { partFile(writing).delete(); writing = -1; written = 0 }
+                        // Once gone, the folder may be a new entry's: the next one's init drops a leftover part.
+                        if (writing >= 0) { if (!gone) partFile(writing).delete(); writing = -1; written = 0 }
                     }
                 }
             }
@@ -396,11 +404,13 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
                         when {
                             present[i] -> true
                             target() == i -> { writing = i; written = 0; false }
+                            // A server ignoring the range sends from byte 0: skip to the wanted chunk, not ask again at once.
+                            !ranged && target().let { it != null && i < it } -> true
                             else -> return stored
                         }
                     }
                     if (have) {
-                        // Only a server ignoring the range sends a chunk already here; later ones may be missing.
+                        // Only a server ignoring the range sends a chunk already here or not wanted; later ones may be.
                         if (ranged) return stored
                         while (pos < end) pos += input.read(buf, 0, minOf(buf.size.toLong(), end - pos).toInt()).also { if (it < 0) throw IOException("ended at $pos") }
                         continue
@@ -421,8 +431,10 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
                         }
                         try { out.fd.sync() } catch (e: IOException) { throw StorageError(e) }
                     }
-                    if (!partFile(i).renameTo(chunkFile(i))) throw StorageError(IOException("rename failed"))
                     synchronized(this) {
+                        // Once gone, the folder may be a new entry's, and the part its filler's.
+                        if (gone) return stored
+                        if (!partFile(i).renameTo(chunkFile(i))) throw StorageError(IOException("rename failed"))
                         present.set(i)
                         writing = -1
                         written = 0

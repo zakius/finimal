@@ -103,7 +103,11 @@ fun Root(openDownloads: Boolean, openedDownloads: () -> Unit, player: @Composabl
     @OptIn(ExperimentalComposeUiApi::class) BackHandler(stack.size > 1) { pop() }
     LaunchedEffect(openDownloads) {
         // Not over "Who's watching?": the account still loaded there may have a PIN.
-        if (openDownloads && App.prefs.loggedIn && stack.first() != Screen.Accounts && stack.last() != Screen.Downloads) push(Screen.Downloads)
+        if (openDownloads && App.prefs.loggedIn && stack.first() != Screen.Accounts && stack.last() != Screen.Downloads) {
+            // A covered player would play on unseen, and a download opened from the list would start a second one.
+            if (stack.last() is Screen.Play) pop()
+            push(Screen.Downloads)
+        }
         openedDownloads()
     }
     LaunchedEffect(App.sessionExpired) { if (App.sessionExpired) reset(Screen.Login) }

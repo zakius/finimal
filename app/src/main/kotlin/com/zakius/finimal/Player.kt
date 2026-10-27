@@ -378,7 +378,7 @@ private fun Playback(
                 if (state == Player.STATE_READY) { failedSince = null; attempt = 0 }
                 // Seeking back from the end screen plays on.
                 if (state == Player.STATE_READY || state == Player.STATE_BUFFERING) ended = false
-                if (state == Player.STATE_READY && !transcoding) {
+                if (state == Player.STATE_READY && !transcoding && localPlaylist == null) {
                     val fraction = player.currentPosition.toDouble() / player.duration.coerceAtLeast(1)
                     // On App.buffers, so a start never lands after the stop on leaving.
                     scope.launch(App.buffers) {

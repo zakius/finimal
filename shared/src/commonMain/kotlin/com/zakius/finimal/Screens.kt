@@ -404,8 +404,9 @@ fun LoginScreen(modifier: Modifier, onBack: (() -> Unit)? = null, onDone: () -> 
     var showPass by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val portOk = isValidPort(port.trim())
+    val canSubmit = portOk && url.isNotBlank()
     fun submit() {
-        if (busy || !portOk) return
+        if (busy || !canSubmit) return
         busy = true
         scope.launch {
             runCatching { App.server.login(url, port, user, pass) }
@@ -446,7 +447,7 @@ fun LoginScreen(modifier: Modifier, onBack: (() -> Unit)? = null, onDone: () -> 
             if (e is InvalidStatusException && e.status == 401) Text("Wrong username or password", color = MaterialTheme.colorScheme.error)
             else ErrorText(loadError(e) + if (unreachable(e)) " at ${serverCandidates(url, port).joinToString(" or ")}" else "", e.message ?: e.javaClass.simpleName, MaterialTheme.colorScheme.error)
         }
-        Button(enabled = !busy && portOk, onClick = ::submit) {
+        Button(enabled = !busy && canSubmit, onClick = ::submit) {
             if (busy) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp) else Text("Log in")
         }
     }
