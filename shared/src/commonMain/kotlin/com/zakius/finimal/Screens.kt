@@ -391,7 +391,9 @@ private fun Empty(text: String) = Box(Modifier.fillMaxSize().padding(24.dp), con
 // --- login --------------------------------------------------------------------------------------
 
 @Composable
-fun LoginScreen(modifier: Modifier, onDone: () -> Unit) {
+fun LoginScreen(modifier: Modifier, onBack: (() -> Unit)? = null, onDone: () -> Unit) {
+    // Adding an account: another user of the same server, which stays as it is.
+    val adding = onBack != null
     val saved = remember { splitServerAddress(App.prefs.baseUrl) }
     var url by rememberSaveable { mutableStateOf(saved.first) }
     var port by rememberSaveable { mutableStateOf(saved.second) }
@@ -416,13 +418,16 @@ fun LoginScreen(modifier: Modifier, onDone: () -> Unit) {
     // A phone-wide form on tablets and desktop windows: full-width fields there are hard to read.
     Box(modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
     Column(Modifier.widthIn(max = 560.dp).fillMaxHeight().verticalScroll(rememberScrollState()).padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Text("finimal", style = MaterialTheme.typography.headlineMedium)
-        if (App.sessionExpired) Text("The server ended this session. Log in again; unsynced progress is kept.")
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            onBack?.let { IconButton(onClick = it) { Icon(LocalIcons.current.back, "Back") } }
+            Text(if (adding) "Add account" else "finimal", style = MaterialTheme.typography.headlineMedium)
+        }
+        if (App.sessionExpired && !adding) Text("The server ended this session. Log in again; unsynced progress is kept.")
         // The port apart, prefilled with Jellyfin's; one written into the server field wins (see serverCandidates).
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            OutlinedTextField(url, { url = it; error = null }, label = { Text("Server") }, placeholder = { Text("jellyfin.example.com") }, singleLine = true, enabled = !busy,
+            OutlinedTextField(url, { url = it; error = null }, label = { Text("Server") }, placeholder = { Text("jellyfin.example.com") }, singleLine = true, enabled = !busy && !adding,
                 modifier = Modifier.weight(1f), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Next))
-            OutlinedTextField(port, { port = it.filter(Char::isDigit).take(5); error = null }, label = { Text("Port") }, singleLine = true, enabled = !busy,
+            OutlinedTextField(port, { port = it.filter(Char::isDigit).take(5); error = null }, label = { Text("Port") }, singleLine = true, enabled = !busy && !adding,
                 isError = !portOk, modifier = Modifier.width(112.dp),
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Next))
         }
@@ -454,11 +459,18 @@ fun LoginScreen(modifier: Modifier, onDone: () -> Unit) {
 fun LibrariesScreen(modifier: Modifier, push: (Screen) -> Unit) {
     var refresh by remember { mutableIntStateOf(0) }
     val libs = loadFresh(refresh = refresh) { App.server.libraries() }
+    var me by remember { mutableStateOf(App.prefs.accounts().firstOrNull { it.userId == App.prefs.userId }) }
+    // Accounts from before names were kept: the name comes from the server once.
+    LaunchedEffect(Unit) {
+        val m = me?.takeIf { it.name.isEmpty() } ?: return@LaunchedEffect
+        runCatching { App.server.userName() }.getOrNull()?.takeIf { it.isNotEmpty() }?.let { App.prefs.setName(m.userId, it); me = m.copy(name = it) }
+    }
     Column(modifier.fillMaxSize()) {
         Bar("finimal", null) {
             TextButton(onClick = { push(Screen.Library(null, "Search")) }) { Text("Search") }
             if (App.downloads != null) TextButton(onClick = { push(Screen.Downloads) }) { Text("Downloads") }
             IconButton(onClick = { push(Screen.Settings) }) { Icon(LocalIcons.current.settings, "Settings") }
+            IconButton(onClick = { push(Screen.Accounts) }) { Avatar(me?.name.orEmpty(), Modifier.semantics { contentDescription = "Accounts" }) }
         }
         Loaded(libs, { refresh++ }, { push(Screen.Downloads) }) { list ->
             if (list.isEmpty()) Empty("No movie or TV libraries on this server")
@@ -787,8 +799,10 @@ fun DownloadsScreen(modifier: Modifier, push: (Screen) -> Unit, pop: () -> Unit)
                 .map { s -> s.download.item.seriesId?.let { Triple("h-$it", s.download.item.seriesName.orEmpty(), s) } ?: Triple("h-movies", "Movies", s) }
     }
     val storage by produceState("", statuses) {
-        val (buffered, free) = withContext(Dispatchers.IO) { media.bufferedBytes() to media.freeBytes() }
-        value = "Downloads ${formatBytes(statuses.orEmpty().values.sumOf { it.bytes })} · buffer ${formatBytes(buffered)} of ${App.prefs.cacheLimitGb} GB · ${formatBytes(free)} free"
+        val (buffered, free, others) = withContext(Dispatchers.IO) { Triple(media.bufferedBytes(), media.freeBytes(), media.otherAccountsBytes()) }
+        value = "Downloads ${formatBytes(statuses.orEmpty().values.sumOf { it.bytes })}" +
+            (if (others > 0) " · other accounts ${formatBytes(others)}" else "") +
+            " · buffer ${formatBytes(buffered)} of ${App.prefs.cacheLimitGb} GB · ${formatBytes(free)} free"
     }
     val scope = rememberCoroutineScope()
     var deleting by remember { mutableStateOf<BaseItemDto?>(null) }
@@ -843,7 +857,7 @@ fun DownloadsScreen(modifier: Modifier, push: (Screen) -> Unit, pop: () -> Unit)
 // --- settings -------------------------------------------------------------------------------------
 
 @Composable
-fun SettingsScreen(modifier: Modifier, pop: () -> Unit, onLoggedOut: () -> Unit) {
+fun SettingsScreen(modifier: Modifier, pop: () -> Unit, onAccounts: () -> Unit, onLoggedOut: () -> Unit) {
     val p = App.prefs
     var refresh by remember { mutableIntStateOf(0) } // bumps to redraw after a pref changes
     @Composable
@@ -936,8 +950,12 @@ fun SettingsScreen(modifier: Modifier, pop: () -> Unit, onLoggedOut: () -> Unit)
                 }
 
                 Text("Account", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(16.dp))
-                Text(p.baseUrl.orEmpty(), Modifier.padding(horizontal = 16.dp))
-                TextButton(onClick = { confirmLogout = true }, Modifier.padding(horizontal = 8.dp)) { Text("Log out") }
+                val me = p.accounts().firstOrNull { it.userId == p.userId }
+                Text(listOfNotNull(me?.name?.ifEmpty { null }, p.baseUrl).joinToString(" · "), Modifier.padding(horizontal = 16.dp))
+                Row(Modifier.padding(horizontal = 8.dp)) {
+                    TextButton(onClick = onAccounts) { Text("Accounts and PIN") }
+                    TextButton(onClick = { confirmLogout = true }) { Text("Log out") }
+                }
                 Text("finimal ${App.platform.versionName}", Modifier.padding(16.dp), style = MaterialTheme.typography.labelSmall)
                 Spacer(Modifier.padding(24.dp))
             }
@@ -978,3 +996,81 @@ fun ChapterMarks(chapters: List<Chapter>, durationMs: Long, modifier: Modifier, 
             drawLine(Color.White, androidx.compose.ui.geometry.Offset(x, center.y - half), androidx.compose.ui.geometry.Offset(x, center.y + half), 2.dp.toPx())
         }
     }
+
+// --- accounts -------------------------------------------------------------------------------------
+
+/** The account's initial in a circle. */
+@Composable
+private fun Avatar(name: String, modifier: Modifier = Modifier) =
+    Box(modifier.size(32.dp).background(MaterialTheme.colorScheme.primaryContainer, androidx.compose.foundation.shape.CircleShape), contentAlignment = Alignment.Center) {
+        Text(name.firstOrNull()?.uppercase() ?: "?", color = MaterialTheme.colorScheme.onPrimaryContainer, style = MaterialTheme.typography.titleSmall)
+    }
+
+/**
+ * The accounts saved on this device, all on one server. Picking one switches to it, after its PIN when it has one. As
+ * the first screen ([pop] null) it is "Who's watching?". The current account sets or removes its own PIN here.
+ */
+@Composable
+fun AccountsScreen(modifier: Modifier, pop: (() -> Unit)?, onSwitched: () -> Unit, onAdd: () -> Unit) {
+    val p = App.prefs
+    var refresh by remember { mutableIntStateOf(0) }
+    val accounts = remember(refresh) { p.accounts() }
+    var asking by remember { mutableStateOf<Account?>(null) }
+    var settingPin by remember { mutableStateOf(false) }
+    val picking = pop == null
+    fun open(a: Account) {
+        if (a.userId != p.userId) App.server.switchTo(a)
+        onSwitched()
+    }
+    asking?.let { a ->
+        PinDialog("PIN for ${a.name.ifEmpty { "this account" }}", { asking = null }) { pin -> p.pinMatches(a, pin).also { if (it) { asking = null; open(a) } } }
+    }
+    if (settingPin) PinDialog("New PIN", { settingPin = false }) { pin -> p.setPin(p.userId!!, pin); settingPin = false; refresh++; true }
+    Column(modifier.fillMaxSize()) {
+        Bar(if (picking) "Who's watching?" else "Accounts", pop)
+        Column(Modifier.widthIn(max = 720.dp).verticalScroll(rememberScrollState())) {
+            accounts.forEach { a ->
+                val current = a.userId == p.userId && !picking
+                Row(Modifier.fillMaxWidth().focusMemory(a.userId).clickable { if (a.pin != null && !current) asking = a else open(a) }.padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                    Avatar(a.name)
+                    Text(a.name.ifEmpty { "Account" } + if (current) " (current)" else "", Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
+                    if (a.pin != null) Text("PIN", style = MaterialTheme.typography.labelSmall)
+                }
+            }
+            TextButton(onClick = onAdd, Modifier.padding(horizontal = 8.dp)) { Text("Add account") }
+            if (!picking) {
+                val me = accounts.firstOrNull { it.userId == p.userId }
+                HorizontalDivider()
+                Text("Your PIN is asked when switching to your account. It keeps your titles and history from others on this device.",
+                    Modifier.padding(16.dp), style = MaterialTheme.typography.bodySmall)
+                Row(Modifier.padding(horizontal = 8.dp)) {
+                    TextButton(onClick = { settingPin = true }) { Text(if (me?.pin == null) "Set PIN" else "Change PIN") }
+                    if (me?.pin != null) TextButton(onClick = { p.setPin(me.userId, null); refresh++ }) { Text("Remove PIN") }
+                }
+            }
+        }
+    }
+}
+
+/** Asks for a PIN of 4 to 8 digits; [onPin] answers whether it was accepted. */
+@Composable
+private fun PinDialog(title: String, onDismiss: () -> Unit, onPin: (String) -> Boolean) {
+    var pin by remember { mutableStateOf("") }
+    var wrong by remember { mutableStateOf(false) }
+    val ok = pin.length in 4..8
+    // Typing goes straight in, from a keyboard or a TV remote's number keys.
+    val focus = remember { FocusRequester() }
+    LaunchedEffect(Unit) { focus.requestFocus() }
+    AlertDialog(onDismiss,
+        title = { Text(title) },
+        text = {
+            OutlinedTextField(pin, { pin = it.filter(Char::isDigit).take(8); wrong = false }, singleLine = true, isError = wrong,
+                label = { Text("PIN") }, supportingText = { if (wrong) Text("Wrong PIN") }, modifier = Modifier.focusRequester(focus),
+                visualTransformation = PasswordVisualTransformation(),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword, imeAction = ImeAction.Done),
+                keyboardActions = KeyboardActions(onDone = { if (ok) wrong = !onPin(pin) }))
+        },
+        confirmButton = { TextButton(onClick = { wrong = !onPin(pin) }, enabled = ok) { Text("OK") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
+}

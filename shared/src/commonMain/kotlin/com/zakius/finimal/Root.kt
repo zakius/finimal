@@ -27,6 +27,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.runtime.toMutableStateList
@@ -52,6 +55,10 @@ import org.jellyfin.sdk.model.api.MediaStreamType
 @Serializable
 sealed interface Screen {
     @Serializable data object Login : Screen
+    /** Logs another user of the same server in. */
+    @Serializable data object AddAccount : Screen
+    /** Switching accounts; as the first screen, "Who's watching?". */
+    @Serializable data object Accounts : Screen
     @Serializable data object Libraries : Screen
     @Serializable data object Downloads : Screen
     @Serializable data object Settings : Screen
@@ -82,14 +89,16 @@ fun Root(openDownloads: Boolean, openedDownloads: () -> Unit, player: @Composabl
             save = { list -> list.map { Json.encodeToString(Screen.serializer(), it) } },
             restore = { saved -> saved.map { Json.decodeFromString(Screen.serializer(), it) }.toMutableStateList() },
         )
-    ) { listOf(if (App.prefs.loggedIn) Screen.Libraries else Screen.Login).toMutableStateList() }
+    ) { listOf(startScreen()).toMutableStateList() }
 
     // Each stack entry keeps its UI state (scroll, sort, search) while covered; leaving the stack drops it.
     val saved = rememberSaveableStateHolder()
-    fun keyOf(i: Int) = "$i:${stack[i]}"
+    // Bumped by reset: a fresh Libraries after switching accounts must not be the old one's composition.
+    var epoch by rememberSaveable { mutableIntStateOf(0) }
+    fun keyOf(i: Int) = "$epoch:$i:${stack[i]}"
     fun push(s: Screen) = stack.add(s)
     fun pop() { if (stack.size > 1) { saved.removeState(keyOf(stack.lastIndex)); stack.removeAt(stack.lastIndex) } }
-    fun reset(s: Screen) { stack.indices.forEach { saved.removeState(keyOf(it)) }; stack.clear(); stack.add(s) }
+    fun reset(s: Screen) { stack.indices.forEach { saved.removeState(keyOf(it)) }; epoch++; stack.clear(); stack.add(s) }
 
     @OptIn(ExperimentalComposeUiApi::class) BackHandler(stack.size > 1) { pop() }
     LaunchedEffect(openDownloads) {
@@ -118,9 +127,11 @@ fun Root(openDownloads: Boolean, openedDownloads: () -> Unit, player: @Composabl
         Box(if (shown) Modifier.fillMaxSize() else Modifier.hidden(), propagateMinConstraints = true) {
             CompositionLocalProvider(LocalShown provides shownState) { saved.SaveableStateProvider(keyOf(i)) { FocusMemory { when (screen) {
                 Screen.Login -> LoginScreen(padded) { reset(Screen.Libraries) }
+                Screen.AddAccount -> LoginScreen(padded, onBack = ::pop) { reset(Screen.Libraries) }
+                Screen.Accounts -> AccountsScreen(padded, if (i == 0) null else ::pop, { reset(Screen.Libraries) }) { push(Screen.AddAccount) }
                 Screen.Libraries -> LibrariesScreen(padded, ::push)
                 Screen.Downloads -> DownloadsScreen(padded, ::push, ::pop)
-                Screen.Settings -> SettingsScreen(padded, ::pop) { reset(Screen.Login) }
+                Screen.Settings -> SettingsScreen(padded, ::pop, { push(Screen.Accounts) }) { reset(startScreen()) }
                 is Screen.Library -> LibraryScreen(padded, screen, ::push, ::pop)
                 is Screen.Series -> SeriesScreen(padded, screen, ::push, ::pop)
                 is Screen.Season -> SeasonScreen(padded, screen, ::push, ::pop)
@@ -129,6 +140,16 @@ fun Root(openDownloads: Boolean, openedDownloads: () -> Unit, player: @Composabl
             } } } }
         }
     } } }
+}
+
+/**
+ * At a cold start with several accounts, who is watching; the only one opens at once. Logged out with accounts left,
+ * the picker too: one of them may have a PIN.
+ */
+private fun startScreen() = when {
+    App.prefs.accounts().size > 1 || !App.prefs.loggedIn && App.prefs.accounts().isNotEmpty() -> Screen.Accounts
+    App.prefs.loggedIn -> Screen.Libraries
+    else -> Screen.Login
 }
 
 /**
