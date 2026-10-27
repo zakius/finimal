@@ -1,6 +1,7 @@
 package com.zakius.finimal
 
 import androidx.compose.foundation.isSystemInDarkTheme
+import finimal.core.TICKS_PER_MS
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -181,6 +182,12 @@ fun burnInIndex(source: MediaSourceInfo, lang: String?): Int? {
     val subs = source.mediaStreams.orEmpty().filter { it.type == MediaStreamType.SUBTITLE && sameLanguage(it.language, lang) }
     return subs.firstOrNull()?.takeIf { subs.none { s -> s.isTextSubtitleStream } }?.index
 }
+
+class Chapter(val name: String, val startMs: Long)
+
+/** The file's chapters, from the server; a lone chapter is no chapters at all. */
+fun chapters(item: BaseItemDto): List<Chapter> =
+    item.chapters.orEmpty().map { Chapter(it.name.orEmpty(), it.startPositionTicks / TICKS_PER_MS) }.takeIf { it.size > 1 }.orEmpty()
 
 /** Choices for the wireless audio delay; negative values are for audio that arrives early. */
 val AUDIO_DELAYS_MS = (-200..500 step 50).toList()

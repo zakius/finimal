@@ -69,6 +69,10 @@ import com.zakius.finimal.AUDIO_DELAYS_MS
 import com.zakius.finimal.ErrorText
 import com.zakius.finimal.episodeLabel
 import com.zakius.finimal.burnInIndex
+import finimal.core.chapterSeek
+import finimal.core.chapterAt
+import com.zakius.finimal.ChapterMarks
+import com.zakius.finimal.chapters
 import com.zakius.finimal.sideloadedSubs
 import com.zakius.finimal.formatMs
 import com.zakius.finimal.loadError
@@ -346,7 +350,7 @@ private fun Playback(item: BaseItemDto, siblings: List<BaseItemDto>, onBack: () 
 private class Skip(val label: String, val onClick: () -> Unit)
 
 private val playerKeys = setOf(Key.Spacebar, Key.K, Key.MediaPlayPause, Key.DirectionLeft, Key.J, Key.DirectionRight, Key.L,
-    Key.DirectionUp, Key.DirectionDown, Key.M, Key.F, Key.N, Key.MediaNext, Key.Escape)
+    Key.DirectionUp, Key.DirectionDown, Key.M, Key.F, Key.N, Key.MediaNext, Key.PageUp, Key.PageDown, Key.Escape)
 
 @OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
 @Composable
@@ -379,6 +383,7 @@ private fun VideoSurface(
     val positionMs = (mpv.position * 1000).toLong()
     val durationMs = (mpv.duration * 1000).toLong()
     val step = prefs.doubleTapSeconds * 1000L
+    val chapters = remember(item) { chapters(item) }
     fun clamp(ms: Long) = if (durationMs > 0) ms.coerceIn(0, durationMs) else ms.coerceAtLeast(0)
     fun seekBy(ms: Long) { onSeek(clamp(positionMs + ms), true); overlay = (if (ms > 0) "+" else "−") + "${kotlin.math.abs(ms) / 1000}s" }
     fun togglePlay() = if (mpv.paused) mpv.play() else mpv.pause()
@@ -424,6 +429,12 @@ private fun VideoSurface(
                 Key.M -> { mpv.command("cycle", "mute"); true }
                 Key.F -> { toggleFullscreen(); true }
                 Key.N, Key.MediaNext -> { next?.let { onPlay(it.id.toString()) }; true }
+                Key.PageUp, Key.PageDown -> {
+                    chapterSeek(chapters.map { it.startMs }, positionMs, forward = e.key == Key.PageDown)?.let { ms ->
+                        onSeek(ms, true); overlay = chapters.first { it.startMs == ms }.name.ifEmpty { formatMs(ms) }
+                    }
+                    true
+                }
                 Key.Escape -> { if (fullscreen) toggleFullscreen() else onBack(); true }
                 else -> false
             }
@@ -512,6 +523,7 @@ private fun Controls(
     var sub by remember { mutableStateOf<String?>(null) }
     var tracks by remember { mutableStateOf<List<Mpv.Track>>(emptyList()) }
     var dragging by remember { mutableFloatStateOf(-1f) }
+    val chapters = remember(item) { chapters(item) }
     LaunchedEffect(menu) { while (menu) { onInteraction(); delay(1_000) } }
     LaunchedEffect(sub, mpv.tracksChanged) { if (sub == "audio" || sub == "text") tracks = withContext(Dispatchers.IO) { mpv.tracks() } }
     fun close() { menu = false; sub = null }
@@ -532,6 +544,13 @@ private fun Controls(
                             DropdownMenuItem({ Text("Subtitles") }, { sub = "text" })
                             DropdownMenuItem({ Text("Subtitle size: ${App.prefs.subtitleScale}%") }, { sub = "size" })
                             DropdownMenuItem({ Text("Audio delay: ${App.prefs.audioDelayMs} ms") }, { sub = "delay" })
+                            if (chapters.isNotEmpty()) DropdownMenuItem({ Text("Chapters") }, { sub = "chapters" })
+                        }
+                        "chapters" -> {
+                            val current = chapterAt(chapters.map { it.startMs }, positionMs)
+                            chapters.forEachIndexed { i, c ->
+                                Choice("${formatMs(c.startMs)}  ${c.name.ifEmpty { "Chapter ${i + 1}" }}", i == current) { onSeek(c.startMs, true); close() }
+                            }
                         }
                         "speed" -> listOf(0.5, 0.75, 1.0, 1.25, 1.5, 2.0).forEach { s ->
                             Choice(speedLabel(s), mpv.speed == s) { sessionSpeed = s; mpv.set("speed", "$s"); close() }
@@ -576,13 +595,16 @@ private fun Controls(
                 Text("${formatMs(shown)} / ${formatMs(durationMs)}  (buffered ${formatMs(cached)})", color = Color.White, style = MaterialTheme.typography.labelMedium)
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Slider(
-                    value = shown.toFloat().coerceIn(0f, durationMs.toFloat().coerceAtLeast(1f)),
-                    valueRange = 0f..durationMs.toFloat().coerceAtLeast(1f),
-                    onValueChange = { dragging = it; onInteraction() },
-                    onValueChangeFinished = { if (dragging >= 0) onSeek(dragging.toLong(), false); dragging = -1f },
-                    modifier = Modifier.weight(1f),
-                )
+                Box(Modifier.weight(1f)) {
+                    Slider(
+                        value = shown.toFloat().coerceIn(0f, durationMs.toFloat().coerceAtLeast(1f)),
+                        valueRange = 0f..durationMs.toFloat().coerceAtLeast(1f),
+                        onValueChange = { dragging = it; onInteraction() },
+                        onValueChangeFinished = { if (dragging >= 0) onSeek(dragging.toLong(), false); dragging = -1f },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    ChapterMarks(chapters, durationMs, Modifier.matchParentSize())
+                }
                 if (skip != null) FilledTonalButton(skip.onClick, Modifier.padding(start = 8.dp)) { Text(skip.label) }
             }
         }
