@@ -4,9 +4,19 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 
 class ServerAddressTest {
-    @Test fun hostWithDefaultPortTriesHttpsHttpThenProxyHttps() = assertEquals(
-        listOf("https://jf.example.com:8096", "http://jf.example.com:8096", "https://jf.example.com"),
-        serverCandidates("jf.example.com", "8096"))
+    @Test fun hostTriesHttpsThenHttpOnThePort() = assertEquals(
+        listOf("https://jf.example.com:8096", "http://jf.example.com:8096"), serverCandidates("jf.example.com", "8096"))
+
+    @Test fun port443IsHttpsAlone() = assertEquals(listOf("https://jf.example.com"), serverCandidates("jf.example.com", "443"))
+
+    @Test fun prefilledPortFollowsTheHost() {
+        for (local in listOf("localhost", "nas", "NAS.local", "box.lan", "jf.home.arpa", "192.168.1.5", "10.0.0.2/jf", "fd00::5", "[fd00::5]", "http://nas"))
+            assertEquals(DEFAULT_JELLYFIN_PORT, defaultPortFor(local), local)
+        for (public in listOf("jf.example.com", "https://example.com/jellyfin", "media.duckdns.org"))
+            assertEquals("443", defaultPortFor(public), public)
+        for (withPort in listOf("nas:8097", "jf.example.com:8920", "[fd00::5]:8920", "https://x.org:443/jf"))
+            assertEquals(null, defaultPortFor(withPort), withPort)
+    }
 
     @Test fun otherPortTriesHttpsThenHttpOnIt() = assertEquals(
         listOf("https://192.168.1.5:8920", "http://192.168.1.5:8920"), serverCandidates("192.168.1.5", "8920"))
@@ -24,13 +34,13 @@ class ServerAddressTest {
     }
 
     @Test fun pathStaysAfterThePort() = assertEquals(
-        listOf("https://example.com:8096/jellyfin", "http://example.com:8096/jellyfin", "https://example.com/jellyfin"),
+        listOf("https://example.com:8096/jellyfin", "http://example.com:8096/jellyfin"),
         serverCandidates(" example.com/jellyfin/ ", "8096"))
 
     @Test fun ipv6Literals() {
-        assertEquals(listOf("https://[fd00::5]:8096", "http://[fd00::5]:8096", "https://[fd00::5]"), serverCandidates("[fd00::5]", "8096"))
+        assertEquals(listOf("https://[fd00::5]:8096", "http://[fd00::5]:8096"), serverCandidates("[fd00::5]", "8096"))
         assertEquals(listOf("https://[fd00::5]:8920", "http://[fd00::5]:8920"), serverCandidates("[fd00::5]:8920", "8096"))
-        assertEquals(listOf("https://[fd00::5]:8096", "http://[fd00::5]:8096", "https://[fd00::5]"), serverCandidates("fd00::5", "8096"))
+        assertEquals(listOf("https://[fd00::5]:8096", "http://[fd00::5]:8096"), serverCandidates("fd00::5", "8096"))
     }
 
     @Test fun savedAddressSplitsBackIntoFields() {

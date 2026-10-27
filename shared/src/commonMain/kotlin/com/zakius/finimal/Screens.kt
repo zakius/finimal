@@ -9,6 +9,7 @@ import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.foundation.background
+import finimal.core.defaultPortFor
 import finimal.core.isValidPort
 import finimal.core.splitServerAddress
 import finimal.core.serverCandidates
@@ -397,6 +398,8 @@ fun LoginScreen(modifier: Modifier, onBack: (() -> Unit)? = null, onDone: () -> 
     val saved = remember { splitServerAddress(App.prefs.baseUrl) }
     var url by rememberSaveable { mutableStateOf(saved.first) }
     var port by rememberSaveable { mutableStateOf(saved.second) }
+    // Typing the server refills the port with defaultPortFor's guess until the user writes their own.
+    var portEdited by rememberSaveable { mutableStateOf(false) }
     var user by rememberSaveable { mutableStateOf("") }
     var pass by remember { mutableStateOf("") }
     var error by remember { mutableStateOf<Throwable?>(null) }
@@ -424,11 +427,11 @@ fun LoginScreen(modifier: Modifier, onBack: (() -> Unit)? = null, onDone: () -> 
             Text(if (adding) "Add account" else "finimal", style = MaterialTheme.typography.headlineMedium)
         }
         if (App.sessionExpired && !adding) Text("The server ended this session. Log in again; unsynced progress is kept.")
-        // The port apart, prefilled with Jellyfin's; one written into the server field wins (see serverCandidates).
+        // The port apart, prefilled from the host; one written into the server field wins (see serverCandidates).
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            OutlinedTextField(url, { url = it; error = null }, label = { Text("Server") }, placeholder = { Text("jellyfin.example.com") }, singleLine = true, enabled = !busy && !adding,
+            OutlinedTextField(url, { url = it; error = null; if (!portEdited) defaultPortFor(it)?.let { p -> port = p } }, label = { Text("Server") }, placeholder = { Text("jellyfin.example.com") }, singleLine = true, enabled = !busy && !adding,
                 modifier = Modifier.weight(1f), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Next))
-            OutlinedTextField(port, { port = it.filter(Char::isDigit).take(5); error = null }, label = { Text("Port") }, singleLine = true, enabled = !busy && !adding,
+            OutlinedTextField(port, { port = it.filter(Char::isDigit).take(5); portEdited = true; error = null }, label = { Text("Port") }, singleLine = true, enabled = !busy && !adding,
                 isError = !portOk, modifier = Modifier.width(112.dp),
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Next))
         }
