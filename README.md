@@ -56,7 +56,11 @@ The .deb and .rpm run on your distribution's Java (21 or newer) and libmpv, so t
 
 ### Windows
 
-[Releases](https://github.com/zakius/finimal/releases) has `finimal-*-x64.msi`, an installer for your user that needs no administrator rights, and `finimal-*-windows-x64.zip`, the same app to unpack and run (`finimal.exe`). Both are 64-bit and include mpv. To use a newer mpv than the one included, put its `libmpv-2.dll` in `%APPDATA%\finimal`.
+[Releases](https://github.com/zakius/finimal/releases) has `finimal-*-x64.msi`, an installer for your user that needs no administrator rights, and `finimal-*-windows-x64.zip`, the same app to unpack and run (`finimal.exe`). Both are 64-bit.
+
+These two are small: finimal runs on your Java 21 or newer and on the `libmpv-2.dll` in `%APPDATA%\finimal`. Whatever is missing, the first start downloads, about 80 MB: [Eclipse Temurin](https://adoptium.net)'s Java to `%LOCALAPPDATA%\finimal` and mpv to `%APPDATA%\finimal`. For a computer without internet access, `finimal-*-x64-full.msi` and `finimal-*-windows-x64-full.zip` include both.
+
+To use a newer mpv, put its `libmpv-2.dll` in `%APPDATA%\finimal`.
 
 ### On the desktop
 

@@ -184,10 +184,13 @@ jobs:
             dist/finimal_*_amd64.deb
             dist/finimal-*.rpm
 
-  # The Windows app: an MSI and a portable zip, carrying libmpv-2.dll (Windows has no system libmpv).
+  # The Windows app, each as an MSI and a portable zip: the full build carries its Java runtime and libmpv-2.dll
+  # (Windows has no system libmpv); the small one finds or downloads both (tools/windows-small.sh).
   windows:
     runs-on: windows-latest
     timeout-minutes: 40
+    permissions:
+      contents: write # the small build's libmpv download, published once per libmpv build
     defaults:
       run:
         shell: bash
@@ -232,19 +235,35 @@ jobs:
           [System.Drawing.Graphics]::FromImage($bmp).CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
           $bmp.Save("$PWD/windows-screen.png")
           Stop-Process $app
-      - name: Package
+      - name: Package the full build
         run: |
           version=$(sed -n 's/^finimal.versionName=//p' gradle.properties)
           mkdir -p dist
-          cp desktop/build/compose/binaries/main-release/msi/*.msi "dist/finimal-$version-x64.msi"
-          (cd desktop/build/compose/binaries/main-release/app && 7z a -tzip -mx=9 "$OLDPWD/dist/finimal-$version-windows-x64.zip" finimal > /dev/null)
+          cp desktop/build/compose/binaries/main-release/msi/*.msi "dist/finimal-$version-x64-full.msi"
+          (cd desktop/build/compose/binaries/main-release/app && 7z a -tzip -mx=9 "$OLDPWD/dist/finimal-$version-windows-x64-full.zip" finimal > /dev/null)
           ls -l dist
+      - name: Package the small build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: tools/windows-small.sh
+      # No Java on the PATH or in JAVA_HOME, no libmpv: the small build downloads them. One the runner registers (it
+      # may have its own Java installs) is used instead, which the warning tells.
+      - name: Check the small build
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
+          $env:JAVA_HOME = $null
+          $env:PATH = "C:\Windows\System32;C:\Windows"
+          $p = Start-Process desktop/build/windows-small/finimal/finimal.exe -ArgumentList --check-player -Wait -PassThru -RedirectStandardOutput check.txt -RedirectStandardError check-err.txt
+          Get-Content check.txt, check-err.txt
+          if ($p.ExitCode -ne 0) { throw "--check-player exited $($p.ExitCode)" }
+          if (-not (Select-String -Quiet -SimpleMatch "$env:LOCALAPPDATA\finimal\runtime" check.txt)) { Write-Warning "The small build ran on an installed Java, not the download" }
       - uses: actions/upload-artifact@v4
         with:
           name: windows
           path: |
             dist/finimal-*.msi
-            dist/finimal-*-windows-x64.zip
+            dist/finimal-*-windows-x64*.zip
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -288,4 +307,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           git log -1 --format=%b --fixed-strings --grep "Release ${GITHUB_REF_NAME#v}" | grep -v '^Co-Authored-By' > "$RUNNER_TEMP/notes.md"
-          gh release create "$GITHUB_REF_NAME" dist/finimal-*.apk dist/finimal-*.flatpak dist/finimal_*.deb dist/finimal-*.rpm dist/finimal-*.msi dist/finimal-*-windows-x64.zip dist/finimal-*-desktop-mapping.txt --notes-file "$RUNNER_TEMP/notes.md" --generate-notes
+          gh release create "$GITHUB_REF_NAME" dist/finimal-*.apk dist/finimal-*.flatpak dist/finimal_*.deb dist/finimal-*.rpm dist/finimal-*.msi dist/finimal-*-windows-x64*.zip dist/finimal-*-desktop-mapping.txt --notes-file "$RUNNER_TEMP/notes.md" --generate-notes
