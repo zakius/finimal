@@ -12,16 +12,21 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: 21
-      - uses: gradle/actions/setup-gradle@v4
-      # The desktop player tests load the distribution's libmpv.
+      - uses: gradle/actions/setup-gradle@v5
+      # The desktop player tests load the distribution's libmpv. Its packages (about 100 MB) come from the cache;
+      # apt fetches only what changed since.
+      - uses: actions/cache@v5
+        with:
+          path: ~/apt-archives
+          key: apt-libmpv2-ubuntu-24.04
       - name: Install libmpv
         timeout-minutes: 15
         # The runner's Azure mirror of Ubuntu crawled at tens of kB/s, and the install outran its time limit on some
@@ -32,52 +37,54 @@ jobs:
           sudo sed -i 's|http://azure.archive.ubuntu.com|http://archive.ubuntu.com|g' /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list 2>/dev/null || true
           sudo systemctl stop unattended-upgrades.service apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
           sudo apt-get -o DPkg::Lock::Timeout=300 update -q
+          mkdir -p ~/apt-archives && sudo cp ~/apt-archives/*.deb /var/cache/apt/archives/ 2>/dev/null || true
           sudo apt-get -o DPkg::Lock::Timeout=300 install -y -q libmpv2
+          cp /var/cache/apt/archives/*.deb ~/apt-archives/
       - run: ./gradlew :core:test :desktop:test
 
   debug:
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: 21
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v5
       - run: ./gradlew assembleDebug
 
   # setup-gradle saves its cache only on the default branch, and a tag's run can't read another tag's cache, so
   # without this every release built from nothing (about 4.5 min).
   warm:
     if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
       GRADLE_BUILD_ACTION_CACHE_KEY_JOB: release # the cache is keyed by job; app reads this one
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: 21
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v5
       - run: ./gradlew :app:assembleRelease
 
   app:
     if: startsWith(github.ref, 'refs/tags/')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
       GRADLE_BUILD_ACTION_CACHE_KEY_JOB: release
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: 21
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v5
       - name: Build and sign
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
@@ -88,7 +95,7 @@ jobs:
           echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
           printf 'storeFile=%s\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n' "$RUNNER_TEMP/release.jks" "$KEYSTORE_PASSWORD" "$KEY_ALIAS" "$KEY_PASSWORD" > "$RUNNER_TEMP/keystore.properties"
           KEYSTORE_PROPERTIES="$RUNNER_TEMP/keystore.properties" tools/release.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: apks
           path: dist/finimal-*.apk
@@ -96,22 +103,22 @@ jobs:
   # The jpackage app image (Java runtime included), tarred: artifacts drop the executable bit.
   desktop-image:
     if: github.event_name == 'push'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: 21
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v5
       - run: ./gradlew :desktop:createReleaseDistributable && tar -C desktop/build/compose/binaries/main-release -cf desktop-image.tar app
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: desktop-image
           path: desktop-image.tar
       # ProGuard renames the desktop classes; the release keeps the mapping that reads their stack traces (retrace).
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: desktop-mapping
           path: desktop/build/proguard-mapping.txt
@@ -119,14 +126,14 @@ jobs:
   # libmpv and FFmpeg build here; flatpak-builder's cache keeps them while the manifest's modules are unchanged.
   flatpak:
     needs: desktop-image
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     container:
       image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-25.08
       options: --privileged
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           name: desktop-image
       - run: mkdir -p desktop/build/compose/binaries/main-release && tar -C desktop/build/compose/binaries/main-release -xf desktop-image.tar
@@ -138,7 +145,7 @@ jobs:
           upload-artifact: false
       - name: Player check inside the Flatpak
         run: flatpak build flatpak_app /app/bin/finimal --check-player
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: flatpak
           path: finimal-x86_64.flatpak
@@ -146,14 +153,14 @@ jobs:
   # .deb and .rpm on the distributions' Java and libmpv, each installed and checked before it can be published.
   linux-packages:
     needs: desktop-image
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
     env:
       DEBIAN_FRONTEND: noninteractive
       NEEDRESTART_MODE: a
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           name: desktop-image
       - run: mkdir -p desktop/build/compose/binaries/main-release && tar -C desktop/build/compose/binaries/main-release -xf desktop-image.tar
@@ -177,7 +184,7 @@ jobs:
       - name: Check the player from the .rpm
         timeout-minutes: 3
         run: docker exec fedora timeout 120 finimal --check-player
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: linux-packages
           path: |
@@ -195,13 +202,19 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: 21
-      - uses: gradle/actions/setup-gradle@v4
-      - run: tools/fetch-libmpv-windows.sh
+      - uses: gradle/actions/setup-gradle@v5
+      - id: libmpv
+        uses: actions/cache@v5
+        with:
+          path: desktop/resources/windows/libmpv-2.dll
+          key: libmpv-windows-${{ hashFiles('tools/fetch-libmpv-windows.sh') }}
+      - if: steps.libmpv.outputs.cache-hit != 'true'
+        run: tools/fetch-libmpv-windows.sh
       - run: ./gradlew :desktop:packageReleaseMsi :desktop:createReleaseDistributable
       # The launcher is a windowed program: run from bash it neither waited for the app nor passed on its result. Start-
       # Process waits for it and keeps its output and exit code.
@@ -258,13 +271,13 @@ jobs:
           Get-Content check.txt, check-err.txt
           if ($p.ExitCode -ne 0) { throw "--check-player exited $($p.ExitCode)" }
           if (-not (Select-String -Quiet -SimpleMatch "$env:LOCALAPPDATA\finimal\java" check.txt)) { Write-Warning "The small build ran on an installed Java, not the download" }
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: windows
           path: |
             dist/finimal-*.msi
             dist/finimal-*-windows-x64*.zip
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: windows-screen
@@ -272,31 +285,31 @@ jobs:
 
   publish:
     needs: [app, test, flatpak, linux-packages, windows]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0 # the notes come from the release commit, which needn't be the tagged one
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: apks
           path: dist
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: flatpak
           path: dist
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: linux-packages
           path: dist
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: windows
           path: dist
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: desktop-mapping
           path: dist
