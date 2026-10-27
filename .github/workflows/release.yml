@@ -257,7 +257,7 @@ jobs:
           $p = Start-Process desktop/build/windows-small/finimal/finimal.exe -ArgumentList --check-player -Wait -PassThru -RedirectStandardOutput check.txt -RedirectStandardError check-err.txt
           Get-Content check.txt, check-err.txt
           if ($p.ExitCode -ne 0) { throw "--check-player exited $($p.ExitCode)" }
-          if (-not (Select-String -Quiet -SimpleMatch "$env:LOCALAPPDATA\finimal\runtime" check.txt)) { Write-Warning "The small build ran on an installed Java, not the download" }
+          if (-not (Select-String -Quiet -SimpleMatch "$env:LOCALAPPDATA\finimal\java" check.txt)) { Write-Warning "The small build ran on an installed Java, not the download" }
       - uses: actions/upload-artifact@v4
         with:
           name: windows

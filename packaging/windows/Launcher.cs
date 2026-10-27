@@ -1,7 +1,8 @@
 // finimal.exe of the small Windows build, which carries neither a Java runtime nor libmpv. It starts the app on the
 // newest installed Java 21 or later, with libmpv-2.dll from %APPDATA%\finimal or the PATH. Whatever is missing it
-// downloads once: Eclipse Temurin's JRE to %LOCALAPPDATA%\finimal\runtime, and the libmpv the full build carries to
-// %APPDATA%\finimal, each checked against the SHA-256 pinned at build time (Pins.cs, from tools/windows-small.sh).
+// downloads once: Eclipse Temurin's JRE to %LOCALAPPDATA%\finimal\java (not runtime: the full build installs its own
+// there), and the libmpv the full build carries to %APPDATA%\finimal, each checked against the SHA-256 pinned at
+// build time (Pins.cs, from tools/windows-small.sh).
 // The Java options come from app\finimal.cfg, which jpackage writes for the full build's own launcher.
 // C# 5: the compiler that comes with .NET Framework 4, which every Windows 10 and 11 has, builds it.
 using System;
@@ -53,7 +54,7 @@ static class Launcher
     static string FindJava()
     {
         var homes = new List<string>();
-        homes.Add(Path.Combine(Local, "runtime", Pins.JreDir));
+        homes.Add(Path.Combine(Local, "java", Pins.JreDir));
         homes.Add(Environment.GetEnvironmentVariable("JAVA_HOME"));
         foreach (string dir in (Environment.GetEnvironmentVariable("PATH") ?? "").Split(';'))
             if (dir.Trim().Length > 0) homes.Add(Path.Combine(dir.Trim(), ".."));
@@ -148,7 +149,7 @@ static class Launcher
             {
                 if (java)
                 {
-                    string dir = Path.Combine(Local, "runtime");
+                    string dir = Path.Combine(Local, "java");
                     Fetch(Pins.JreUrl, Pins.JreSha256, dir, "Downloading Java (first start only)", show);
                 }
                 if (mpv) Fetch(Pins.MpvUrl, Pins.MpvSha256, Roaming, "Downloading mpv (first start only)", show);
@@ -159,6 +160,8 @@ static class Launcher
         if (form != null) form.Shown += delegate { work.Start(); };
         else work.Start();
         if (form != null) Application.Run(form);
+        // Closed before the downloads finished: the user doesn't want them. The next start begins again.
+        if (form != null && work.IsAlive) Environment.Exit(0);
         work.Join();
         if (failure != null) throw failure;
     }
