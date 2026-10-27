@@ -1,6 +1,6 @@
 # finimal design
 
-A Jellyfin client for Android that goes straight to the library. It prefers a few extra taps over convenience features that break.
+A Jellyfin client for Android, Linux and Windows that goes straight to the library. It prefers a few extra taps over convenience features that break.
 
 ## Scope
 
@@ -11,7 +11,7 @@ A Jellyfin client for Android that goes straight to the library. It prefers a fe
   - Login errors say "Wrong username or password" (HTTP 401). Anything else gets the same sentence as a list that fails to load (can't reach the server, a server error with its status, or a generic message), with the raw error in small text. Can't reach the server also names the addresses tried.
 - Movies and TV shows only. Other library types are hidden.
 - Out of scope: background audio, picture-in-picture, Quick Connect, home rows, Next Up, Continue Watching.
-- Desktop: Linux (Flatpak) now, Windows later. See [Desktop](#desktop).
+- Desktop: Linux and Windows. See [Desktop](#desktop).
 
 ## TV
 
@@ -26,18 +26,22 @@ A Jellyfin client for Android that goes straight to the library. It prefers a fe
 - Kotlin, Jetpack Compose, Media3 with the Jellyfin FFmpeg audio decoder, libass-android for ASS/SSA subtitles, jellyfin-sdk-kotlin, WorkManager.
 - License GPL-3.0. Findroid (GPL-3.0) code may be copied. jellyfin-android is GPL-2.0 without "or later", so it is a reference only.
 - Distribution: GitHub Actions builds one signed APK per ABI (arm64-v8a, armeabi-v7a, x86_64, x86) on each tag and attaches them to a release. Updates come through Obtainium.
-- Desktop: Compose for Desktop, libmpv through JNA, jpackage. CI builds the Linux Flatpak on each tag and attaches it to the release.
+- Desktop: Compose for Desktop, libmpv through JNA, jpackage. On each tag CI builds and checks the Linux Flatpak, .deb (Ubuntu 24.04, Debian 13) and .rpm (Fedora), and the Windows .msi and .zip in a full and a small flavour, and attaches them to the release.
 
 ## Desktop
 
-- One UI for both: the screens, `Server`, `Prefs` and navigation are in the `shared` Kotlin Multiplatform module (Android and desktop JVM). Each app supplies a `Platform`: storage folders, settings store (SharedPreferences, or a JSON file under `$XDG_CONFIG_HOME`/`%APPDATA%`), the Jellyfin device identity, downloads, background housekeeping. Android-only settings rows (interface mode, touch gestures, metered networks, decoder limits) hide on the desktop.
+- One UI for both: the screens, `Server`, `Prefs` and navigation are in the `shared` Kotlin Multiplatform module (Android and desktop JVM). Each app supplies a `Platform`: storage folders, settings store (SharedPreferences, or a JSON file under `$XDG_CONFIG_HOME`/`%APPDATA%`), the Jellyfin device identity, downloads, background housekeeping. Android-only settings rows (interface mode, touch gestures, metered networks, SD card, direct play codecs and learned codecs) hide on the desktop; it shows the buffer cache limit, audio delay, skip step, "Direct play up to" and the account.
 - Each app has its own player. The desktop one embeds libmpv (JNA) and renders through mpv's software renderer into Skia bitmaps, so our Compose controls draw over the video. libmpv is never called on the UI thread: commands are async, properties arrive as observed events, frames render on their own thread. If the software renderer turns out too slow for 4K, the next step is mpv's OpenGL render API.
 - mpv decodes everything, so the desktop only transcodes when "Direct play up to" caps the height (for bandwidth).
 - Streams go through the same scratch and loopback proxy as on Android, buffering to the end. No downloads on the desktop yet.
-- Keyboard: Space/K play-pause, Left/Right (J/L) skip by the skip step, Up/Down volume, M mute, F or double-click fullscreen, N next episode, Esc leaves fullscreen, then the player. Mouse movement shows the controls; they and the cursor hide after 3 s of playing.
-- Linux ships as a Flatpak: libmpv 0.41 with FFmpeg, libass and libplacebo built in the manifest (after Celluloid's), on the freedesktop runtime, around the jpackage app image. Library bumps come as manifest updates through x-checker-data. AWT is X11 only on Java 21, so it runs on XWayland under Wayland.
-- Windows will ship libmpv-2.dll (shinchiro's builds, which mpv.io links) inside the app; a newer DLL in `%APPDATA%\finimal` takes precedence, so mpv can be updated without a new finimal.
-- `finimal --check-player` plays a generated clip headless and exits 0 when libmpv works: the packaging check in CI.
+- Keyboard: Space/K play-pause, Left/Right (J/L) skip by the skip step, Up/Down volume by 5, M mute, F or double-click fullscreen, N next episode, Esc leaves fullscreen, then the player. The media play/pause and next keys work too. A click plays or pauses, the wheel sets the volume, and the mouse's back button is Esc. Mouse movement shows the controls; they and the cursor hide after 3 s of playing. Volume, like speed, carries over to the next episode until the app is closed.
+- The window opens at 1280×800, centred, the first time. Its size and place, or that it was maximized, are saved 500 ms after it settles, never fullscreen; a saved place on a monitor that is gone opens centred again. Leaving fullscreen returns to maximized when it was maximized before.
+- The screen stays on while playing: the portal's Inhibit on Linux, with org.freedesktop.ScreenSaver as the fallback, and SetThreadExecutionState on Windows.
+- On Linux the window scale is Xft.dpi / 96, rounded to a whole number, unless `sun.java2d.uiScale` or `J2D_UISCALE` is set.
+- The Jellyfin device name is the computer's name (COMPUTERNAME, or the hostname), else "Desktop". Settings live in a JSON file under `$XDG_CONFIG_HOME` or `%APPDATA%`; data and cache under the XDG folders or `%LOCALAPPDATA%\finimal`. There is no background housekeeping: unsynced progress is pushed while the app runs.
+- Linux ships as a .deb and an .rpm that run on the distribution's Java 21 or newer and libmpv, and as a Flatpak: libmpv 0.41 with FFmpeg, libass and libplacebo built in the manifest (after Celluloid's), on the freedesktop runtime, around the jpackage app image. Library bumps come as manifest updates through x-checker-data. AWT is X11 only on Java 21, so it runs on XWayland under Wayland.
+- Windows: the full build carries libmpv-2.dll (shinchiro's builds, which mpv.io links) and its Java. The small build has neither: its launcher (`packaging/windows/Launcher.cs`) finds Java 21+ and libmpv on the machine, or downloads Temurin to `%LOCALAPPDATA%\finimal\java` and libmpv to `%APPDATA%\finimal`, each checked against a pinned SHA-256; closing its progress window cancels. A libmpv-2.dll in `%APPDATA%\finimal` takes precedence, so mpv can be updated without a new finimal.
+- `finimal --check-player` plays a generated clip headless and exits 0 when libmpv works: the packaging check in CI, which also proves it fails without libmpv.
 
 ## Navigation
 
@@ -58,11 +62,11 @@ Libraries → poster grid → series → seasons → episodes. A series with one
 
 ## Playback
 
-- Direct play by default. Transcode only when the device cannot decode the file: a decoder error, a decode failure mid-stream, or a video track no decoder supports (Media3 would play the audio over black). The transcode asks for the series' remembered audio language. Each player has its own play session ID, sent with every report, so leaving ends the server's transcode at once.
-- When direct play drops frames (two batches of 50 within 30 s at normal speed), a "Choppy? Transcode" button shows for 15 s. It never switches on its own.
+- Direct play by default. A file starts as a transcode when it is taller than "Direct play up to" (Auto, 4K, 1080p, 720p), when "Direct play codecs" rules its codec out (Auto checks the device's hardware decoders, including 10-bit; "H.264 only"; "All" trusts the file), or when its codec was learned as choppy at that pixel rate or above. A direct play switches to a transcode when the device cannot decode the file: a decoder error, a decode failure mid-stream, or a video track no decoder supports (Media3 would play the audio over black). Desktop: mpv decodes everything, so only "Direct play up to" applies. The transcode asks for the series' remembered audio language. Each player has its own play session ID, sent with every report, so leaving ends the server's transcode at once.
+- When direct play drops frames (two batches of 50 within 30 s at normal speed), a "Choppy? Transcode" button shows for 15 s. It never switches on its own. Pressing it records the codec's pixel rate (width × height × frame rate); later files of that codec at that rate or above start as a transcode. Settings lists the learned codecs with "Forget", and shows the device's hardware decoders ("H.264 1080p, HEVC 10-bit 4K").
 - The player takes audio focus: it pauses for calls and other players and ducks under navigation prompts.
 - The screen stays on only while playing; paused, ended or failed, it times out.
-- On resuming, "Resumed at 23:10 · Start over" shows for 5 s. Buffering to the end is best-effort during a transcode, and the UI says so.
+- On resuming, "Resumed at 23:10 · Start over" shows for 5 s. Buffering to the end is best-effort during a transcode, and the UI says so. Desktop: the note says the transcode is for "Direct play up to".
 - Portrait: the video sits on top with episode info below. Swipe up or rotate to enter fullscreen.
 - Fullscreen gestures, each one can be turned off:
   - Vertical swipe on the side zones: brightness and volume. Which side controls which is a setting.
@@ -75,14 +79,14 @@ Libraries → poster grid → series → seasons → episodes. A series with one
 - Media segments show a button, never acting on their own: "Skip intro", "Skip recap", and during the credits "Play next" when there is a next episode.
 - "Play next" keeps forced fullscreen and the rotation lock, and leaving through "Play next" in the credits reports the episode watched to the end.
 - On-screen controls: back, title (fullscreen only), menu, fullscreen; rewind and forward by the double-tap step, play/pause, and next episode when there is one.
-- Player menu: speed, tracks, subtitle size, wireless audio delay, rotation lock. The current choice is ticked. Speed carries over to the next episode until the app is closed; it is not saved. Subtitle delay is not built yet: Media3 has no subtitle offset, so it needs its own cue timing. Subtitle size applies to text subtitles; ASS keeps its authored size.
+- Player menu: speed, tracks, subtitle size, wireless audio delay, rotation lock (not on TV). Desktop: speed, audio, subtitles, subtitle size, audio delay. The current choice is ticked. Speed carries over to the next episode until the app is closed; it is not saved. Subtitle delay is not built yet: Media3 has no subtitle offset, so it needs its own cue timing. Subtitle size applies to text subtitles; ASS keeps its authored size.
 - Text subtitles (SRT, VTT, embedded text tracks) are white with a black outline and no background box. The system caption style is ignored. ASS keeps its authored style.
 - A white spinner shows while the item loads and while the player buffers. It does not block taps or gestures.
 - An item that fails to load and is not downloaded says why like a list does, with Retry and Back.
 - A finished download waits at most 2 s for the server before it plays offline.
 - A lost connection doesn't stop playback at once: it plays out the buffer, then shows "Reconnecting…" over the last frame and reloads the item at the same position, on a backoff (1, 2, 4, 8, then every 10 s) and at once when a network comes up. Server errors (5xx) count; 4xx do not. After 60 s it gives up and shows the error.
 - A playback error shows a short sentence for common causes (network, timeout, HTTP status, missing file, unsupported format) with Retry and Back, in place of the play buttons. Other errors show a generic sentence with the Media3 error code in small text.
-- Wireless audio delay (−200 to 500 ms, also in Settings) holds video back to match Bluetooth headphones and speakers. It applies only while a wireless output is connected, so the speaker and wired outputs stay in sync. It works by reporting the audio clock that much behind, which the video follows. Headphones connected mid-play apply it at once (a seek in place).
+- Wireless audio delay (−200 to 500 ms, also in Settings) holds video back to match Bluetooth headphones and speakers. On Android it applies only while a wireless output is connected, so the speaker and wired outputs stay in sync. It works by reporting the audio clock that much behind, which the video follows. Headphones connected mid-play apply it at once (a seek in place). Desktop: "Audio delay", always applied (mpv's audio-delay).
 - Theme follows the system and uses Material You colors.
 
 ## Settings

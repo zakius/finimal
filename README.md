@@ -8,20 +8,36 @@ Other clients sometimes restart a series from episode 1. The cause is the server
 
 ## Features
 
+On Android and the desktop:
+
 - Libraries → poster grid → series → seasons → episodes, with sort, search and an unplayed-only filter.
 - A Continue button on each series, from this device's play state, never the server's Next Up.
-- Direct play through Media3, with an FFmpeg audio decoder and libass for ASS/SSA subtitles. The app transcodes only when the device can't decode the file.
+- Direct play. The app transcodes only when it has to: the device can't decode the file, or the file is above "Direct play up to" (4K, 1080p or 720p, for bandwidth).
 - Buffers to the end of the episode on disk, so a weak connection doesn't stall playback.
-- Downloads with a queue, pause and resume, SD card storage, and "keep next N episodes downloaded" per series.
-- Offline playback and progress sync once the server is reachable again. Lists open instantly from a saved copy, even offline.
+- Lists open instantly from a saved copy, even offline, and progress syncs once the server is reachable again.
 - Playback rides out network drops: it reconnects and continues from the same spot.
-- A wireless audio delay setting to match Bluetooth headphones and speakers.
-- Fullscreen gestures for brightness, volume, seek, double-tap skip and pinch to crop. Each one can be turned off.
-- A "Skip intro" button from the server's media segments. It never skips on its own.
+- Audio and subtitle choices are remembered per series.
+- "Skip intro" and "Skip recap" buttons from the server's media segments, and "Play next" during the credits. Nothing skips on its own.
+- An audio delay setting, and speed from 0.5× to 2×.
+- A login that tries https before http and never falls back to http after a certificate error.
+
+On Android:
+
+- Media3 with an FFmpeg audio decoder and libass for ASS/SSA subtitles.
+- When playback drops frames, a "Choppy? Transcode" button offers a transcode. After you press it, files of that codec at that size or larger start as a transcode, until Settings → "Forget". "Direct play codecs" can also limit direct play to H.264 for weak devices.
+- Downloads with a queue, pause and resume, SD card storage, and "keep next N episodes downloaded" per series. Downloads play offline.
+- The audio delay applies only to Bluetooth and other wireless outputs, to match headphones and speakers.
+- Fullscreen gestures for brightness, volume, seek, double-tap skip, hold for 2× and pinch to crop. Each one can be turned off.
 - Android TV and TV boxes: the remote drives everything, and the player takes D-pad and media keys. Picked on its own on Android TV and on boxes without a touchscreen; Settings can override it.
 - No Google Play Services, so it runs on Huawei/EMUI devices.
 
-Not included: background audio, picture-in-picture, Quick Connect, and home rows.
+On the desktop:
+
+- Plays through mpv, which decodes everything.
+- Keyboard and mouse control, see [On the desktop](#on-the-desktop). The window remembers its size and place, and the screen stays on while playing.
+- No downloads yet.
+
+Not included: music, books and other library types, more than one server, background audio, picture-in-picture, Quick Connect, and home rows.
 
 ## Install
 
@@ -64,7 +80,7 @@ To use a newer mpv, put its `libmpv-2.dll` in `%APPDATA%\finimal`.
 
 ### On the desktop
 
-In the player: Space or K plays and pauses, Left and Right (or J and L) skip, Up, Down and the mouse wheel set the volume, M mutes, F or a double-click toggles fullscreen, N plays the next episode and Esc leaves fullscreen, then the player. Right-click an episode or movie for its menu. There are no downloads on the desktop yet.
+In the player: Space or K plays and pauses, Left and Right (or J and L) skip, Up, Down and the mouse wheel set the volume, M mutes, F or a double-click toggles fullscreen, N plays the next episode and Esc leaves fullscreen, then the player. Media keys work too. A click plays and pauses, and the mouse's back button acts as Esc. Right-click an episode or movie for its menu.
 
 ## Build
 
@@ -76,12 +92,13 @@ You need JDK 21 and the Android SDK.
 
 Debug APKs go to `app/build/outputs/apk/debug/`, one per ABI. `tools/release.sh` builds the signed release APKs into `dist/`, with the baseline profile embedded so Android 15+ compiles the app at install; it reads the key from `keystore.properties`. CI runs it when a `v*` tag is pushed.
 
-The desktop app (Linux now, Windows later) shares the Android app's screens and plays through libmpv:
+The desktop app (Linux and Windows) shares the Android app's screens and plays through libmpv:
 
 ```sh
 ./gradlew :desktop:run          # needs libmpv installed (libmpv2 on Debian and Ubuntu)
 ./gradlew :desktop:test         # player tests against the installed libmpv
 tools/flatpak.sh                # the Linux Flatpak into dist/, built in Docker; libmpv is built inside
+tools/linux-packages.sh         # the .deb and .rpm into dist/
 ```
 
 ## License
