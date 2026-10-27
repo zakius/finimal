@@ -63,7 +63,8 @@ import com.zakius.finimal.App
 import com.zakius.finimal.AUDIO_DELAYS_MS
 import com.zakius.finimal.ErrorText
 import com.zakius.finimal.episodeLabel
-import com.zakius.finimal.externalSubs
+import com.zakius.finimal.burnInIndex
+import com.zakius.finimal.sideloadedSubs
 import com.zakius.finimal.formatMs
 import com.zakius.finimal.loadError
 import com.zakius.finimal.localState
@@ -187,11 +188,12 @@ private fun Playback(item: BaseItemDto, siblings: List<BaseItemDto>, onBack: () 
     fun positionTicks() = ResumeGuard.position(startTicks, positionMs() * TICKS_PER_MS, runtimeTicks(), System.currentTimeMillis() - startedAt, seeked)
     fun report() = scope.launch { App.server.reportProgress(id, sourceId, positionTicks(), mpv.paused, transcoding, serverPlayed, playSession) }
     fun seekTo(ms: Long, exact: Boolean = true) { seeked = true; mpv.seek(ms / 1000.0, exact); scope.launch { delay(500); report() } }
-    fun url() = if (transcoding) App.server.transcodeUrl(id, sourceId, prefs.audioLang(seriesKey)?.let { com.zakius.finimal.audioIndex(source, it) }, playSession)
+    fun url() = if (transcoding) App.server.transcodeUrl(id, sourceId, prefs.audioLang(seriesKey)?.let { com.zakius.finimal.audioIndex(source, it) },
+            burnInIndex(source, prefs.subLang(seriesKey)), playSession)
         else DesktopMedia.streamUrl(item)
 
     mpv.onLoaded = {
-        externalSubs(item).forEach { stream ->
+        sideloadedSubs(item, transcoding).forEach { stream ->
             mpv.command("sub-add", App.server.subtitleUrl(id, sourceId, stream), "auto", stream.displayTitle ?: stream.language ?: "", stream.language ?: "")
         }
         val tracks = mpv.tracks()

@@ -80,6 +80,7 @@ Libraries → poster grid → series → seasons → episodes. A series with one
 - "Play next" keeps forced fullscreen and the rotation lock, and leaving through "Play next" in the credits reports the episode watched to the end.
 - On-screen controls: back, title (fullscreen only), menu, fullscreen; rewind and forward by the double-tap step, play/pause, and next episode when there is one.
 - Player menu: speed, tracks, subtitle size, wireless audio delay, rotation lock (not on TV). Desktop: speed, audio, subtitles, subtitle size, audio delay. The current choice is ticked. Speed carries over to the next episode until the app is closed; it is not saved. Subtitle delay is not built yet: Media3 has no subtitle offset, so it needs its own cue timing. Subtitle size applies to text subtitles; ASS keeps its authored size.
+- A transcode carries no subtitles (the server drops embedded ones). Embedded text subtitles come as files instead, like external ones, extracted by the server with their styling; a transcoded download fetches them too. A picture subtitle (PGS, VobSub) in the series' remembered language, with no text one in that language, is burned into the video.
 - Text subtitles (SRT, VTT, embedded text tracks) are white with a black outline and no background box. The system caption style is ignored. ASS keeps its authored style.
 - A white spinner shows while the item loads and while the player buffers. It does not block taps or gestures.
 - An item that fails to load and is not downloaded says why like a list does, with Retry and Back.

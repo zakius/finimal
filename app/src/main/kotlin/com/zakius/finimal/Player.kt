@@ -299,11 +299,13 @@ private fun Playback(
         // Set first: eviction and subtitle cleanup leave the playing item alone.
         Media.playing = cacheKey
         // A slow server doesn't hold up the start; the fetch finishes on its own and the files are there next time.
-        val fetch = ProcessLifecycleOwner.get().lifecycleScope.async { Media.fetchSubtitles(item) }
+        // A transcode, live or downloaded, has no embedded subtitles: those come as files too.
+        val sideload = transcoding || localPlaylist != null
+        val fetch = ProcessLifecycleOwner.get().lifecycleScope.async { Media.fetchSubtitles(item, sideload) }
         val subs = withTimeoutOrNull(3_000) { fetch.await() } ?: emptyMap()
-        val streams = externalSubs(item).associateBy { it.index }
+        val streams = sideloadedSubs(item, sideload).associateBy { it.index }
         val audioIndex = prefs.audioLang(seriesKey)?.let { audioIndex(source, it) }
-        val url = if (transcoding) App.server.transcodeUrl(id, sourceId, audioIndex, playSession)
+        val url = if (transcoding) App.server.transcodeUrl(id, sourceId, audioIndex, burnInIndex(source, prefs.subLang(seriesKey)), playSession)
             else localPlaylist?.let { Uri.fromFile(it).toString() } ?: Media.streamUrl(item)
         val mediaItem = MediaItem.Builder()
             .setUri(url)

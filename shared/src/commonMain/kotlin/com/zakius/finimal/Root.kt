@@ -168,9 +168,19 @@ fun audioIndex(source: MediaSourceInfo, lang: String) =
 fun sameLanguage(a: String?, b: String?) = a != null && b != null &&
     runCatching { Locale.forLanguageTag(a).isO3Language == Locale.forLanguageTag(b).isO3Language }.getOrDefault(a == b)
 
-/** Subtitle streams the server keeps as separate files: players add them by URL or from a fetched copy. */
-fun externalSubs(item: BaseItemDto): List<MediaStream> =
-    item.mediaSources?.firstOrNull()?.mediaStreams.orEmpty().filter { it.type == MediaStreamType.SUBTITLE && it.isExternal }
+/**
+ * Subtitle streams players add by URL or from a fetched copy: the server's separate files and, for a [transcode],
+ * the embedded text ones, which the server extracts with their styling. A transcode drops embedded subtitles.
+ */
+fun sideloadedSubs(item: BaseItemDto, transcode: Boolean): List<MediaStream> =
+    item.mediaSources?.firstOrNull()?.mediaStreams.orEmpty()
+        .filter { it.type == MediaStreamType.SUBTITLE && (it.isExternal || transcode && it.isTextSubtitleStream) }
+
+/** For a transcode: a picture subtitle (PGS, VobSub) in [lang] to burn into the video, when no text one is in that language. */
+fun burnInIndex(source: MediaSourceInfo, lang: String?): Int? {
+    val subs = source.mediaStreams.orEmpty().filter { it.type == MediaStreamType.SUBTITLE && sameLanguage(it.language, lang) }
+    return subs.firstOrNull()?.takeIf { subs.none { s -> s.isTextSubtitleStream } }?.index
+}
 
 /** Choices for the wireless audio delay; negative values are for audio that arrives early. */
 val AUDIO_DELAYS_MS = (-200..500 step 50).toList()

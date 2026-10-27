@@ -354,8 +354,10 @@ object Media : Downloads {
         val base = "${App.prefs.baseUrl}/Videos/$id/"
         val remote = File(dir, "remote.m3u8")
         if (!remote.exists()) {
-            val audio = App.prefs.audioLang(d.item.seriesId?.toString() ?: id)?.let { audioIndex(d.item.mediaSources!!.first(), it) }
-            val master = fetchText(App.server.transcodeUrl(id, sourceId, audio, UUID.randomUUID().toString()))
+            val seriesKey = d.item.seriesId?.toString() ?: id
+            val source = d.item.mediaSources!!.first()
+            val audio = App.prefs.audioLang(seriesKey)?.let { audioIndex(source, it) }
+            val master = fetchText(App.server.transcodeUrl(id, sourceId, audio, burnInIndex(source, App.prefs.subLang(seriesKey)), UUID.randomUUID().toString()))
             remote.writeAtomically(fetchText(base + master.lines().first(::isSegment)))
         }
         val lines = remote.readLines()
@@ -473,12 +475,12 @@ object Media : Downloads {
             .forEach { it.deleteRecursively() }
     }
 
-    /** External subtitle streams are separate files; fetch them once so playback works offline too. */
-    suspend fun fetchSubtitles(item: BaseItemDto): Map<Int, File> = coroutineScope {
+    /** [sideloadedSubs] as files, fetched once so playback works offline too. */
+    suspend fun fetchSubtitles(item: BaseItemDto, transcode: Boolean): Map<Int, File> = coroutineScope {
         val id = item.id.toString()
         val source = item.mediaSources?.firstOrNull() ?: return@coroutineScope emptyMap()
         val dir = subsDir(id).apply { mkdirs() }
-        externalSubs(item).map { stream -> async(Dispatchers.IO) {
+        sideloadedSubs(item, transcode).map { stream -> async(Dispatchers.IO) {
             val file = File(dir, "${stream.index}.${subtitleExt(stream)}")
             if (!file.exists()) runCatching {
                 http.newCall(Request.Builder().url(App.server.subtitleUrl(id, source.id!!, stream)).build()).execute().use { r ->
@@ -517,7 +519,7 @@ class DownloadWorker(context: Context, params: WorkerParameters) : CoroutineWork
                 val source = d.item.mediaSources?.firstOrNull()
                 if (source == null) { Media.failDownload(id); continue }
                 runCatching { setForeground(foregroundInfo(d, null)) }
-                withContext(Dispatchers.IO) { Media.fetchSubtitles(d.item) }
+                withContext(Dispatchers.IO) { Media.fetchSubtitles(d.item, d.transcoded) }
                 var lastUpdate = 0L
                 var lastPercent = -1
                 fun report(percent: Int) {

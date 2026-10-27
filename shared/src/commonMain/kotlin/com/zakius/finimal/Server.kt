@@ -211,12 +211,14 @@ class Server {
     fun streamUrl(id: String, mediaSourceId: String) =
         "${prefs.baseUrl}/Videos/$id/stream?static=true&mediaSourceId=$mediaSourceId&ApiKey=${prefs.token}"
 
-    // ponytail: fixed h264/aac at 8 Mbps, no taller than direct play allows; embedded subtitles are lost here, external ones still load.
+    // ponytail: fixed h264/aac at 8 Mbps, no taller than direct play allows. The server drops embedded subtitles: players
+    // load the text ones separately ([sideloadedSubs]), and a picture one ([burnInIndex]) is burned in.
     // [playSession] goes in the stop report too, so leaving ends the server's ffmpeg job at once.
-    fun transcodeUrl(id: String, mediaSourceId: String, audioIndex: Int?, playSession: String) =
+    fun transcodeUrl(id: String, mediaSourceId: String, audioIndex: Int?, burnInIndex: Int?, playSession: String) =
         "${prefs.baseUrl}/Videos/$id/master.m3u8?mediaSourceId=$mediaSourceId&videoCodec=h264&audioCodec=aac" +
             "&maxAudioChannels=2&maxHeight=${prefs.maxHeight.takeIf { it > 0 } ?: App.platform.transcodeHeight}&videoBitrate=8000000&audioBitrate=192000&playSessionId=$playSession" +
-            (audioIndex?.let { "&audioStreamIndex=$it" } ?: "") + "&ApiKey=${prefs.token}"
+            (audioIndex?.let { "&audioStreamIndex=$it" } ?: "") +
+            (burnInIndex?.let { "&subtitleStreamIndex=$it&subtitleMethod=Encode" } ?: "") + "&ApiKey=${prefs.token}"
 
     fun subtitleUrl(id: String, mediaSourceId: String, stream: MediaStream) =
         "${prefs.baseUrl}/Videos/$id/$mediaSourceId/Subtitles/${stream.index}/0/Stream.${subtitleExt(stream)}?ApiKey=${prefs.token}"
