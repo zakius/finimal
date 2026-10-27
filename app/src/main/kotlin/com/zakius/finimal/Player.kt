@@ -114,6 +114,8 @@ import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.TrackSelectionOverride
+import androidx.media3.common.VideoSize
+import androidx.media3.common.text.CueGroup
 import androidx.media3.datasource.HttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
@@ -121,7 +123,6 @@ import androidx.media3.exoplayer.SeekParameters
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.CaptionStyleCompat
-import androidx.media3.ui.PlayerView
 import androidx.media3.ui.SubtitleView
 import io.github.peerless2012.ass.media.kt.buildWithAssSupport
 import io.github.peerless2012.ass.media.type.AssRenderType
@@ -280,12 +281,10 @@ private fun Playback(
     val scope = rememberCoroutineScope()
 
     val playerView = remember {
-        (android.view.LayoutInflater.from(context).inflate(R.layout.player_view, null) as PlayerView).apply {
-            setShutterBackgroundColor(android.graphics.Color.BLACK)
-            setKeepContentOnPlayerReset(true) // a reconnect reloads the item; the last frame stays up meanwhile
-            subtitleView?.setFractionalTextSize(SubtitleView.DEFAULT_TEXT_SIZE_FRACTION * prefs.subtitleScale / 100f)
+        VideoView(context).apply {
+            subtitleView.setFractionalTextSize(SubtitleView.DEFAULT_TEXT_SIZE_FRACTION * prefs.subtitleScale / 100f)
             // Text subtitles: white with a black outline, no box. Embedded styles (italics, cue colours) stay on.
-            subtitleView?.setStyle(CaptionStyleCompat(
+            subtitleView.setStyle(CaptionStyleCompat(
                 android.graphics.Color.WHITE, android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT,
                 CaptionStyleCompat.EDGE_TYPE_OUTLINE, android.graphics.Color.BLACK, null,
             ))
@@ -549,7 +548,7 @@ private fun Playback(
     }
 }
 
-private fun buildPlayer(context: Context, view: PlayerView): ExoPlayer {
+private fun buildPlayer(context: Context, view: VideoView): ExoPlayer {
     AudioDelay.watch(context)
     val renderers = AudioDelay.renderers(context).setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
         .setEnableDecoderFallback(true) // another device decoder before giving up and transcoding
@@ -585,7 +584,7 @@ private fun systemBars(activity: Activity, hidden: Boolean) {
 private fun VideoSurface(
     modifier: Modifier,
     player: ExoPlayer,
-    playerView: PlayerView,
+    playerView: VideoView,
     fullscreen: Boolean,
     transcoding: Boolean,
     cacheKey: String?,
@@ -878,7 +877,7 @@ private fun Controls(
     onNext: (() -> Unit)?,
     skip: Skip?,
     onInteraction: () -> Unit,
-    subtitleView: SubtitleView?,
+    subtitleView: SubtitleView,
 ) {
     var menu by remember { mutableStateOf(false) }
     var sub by remember { mutableStateOf<String?>(null) }
@@ -913,7 +912,7 @@ private fun Controls(
                         "size" -> listOf(50, 75, 100, 125, 150, 200).forEach { s ->
                             Choice("$s%", App.prefs.subtitleScale == s) {
                                 App.prefs.subtitleScale = s
-                                subtitleView?.setFractionalTextSize(SubtitleView.DEFAULT_TEXT_SIZE_FRACTION * s / 100f)
+                                subtitleView.setFractionalTextSize(SubtitleView.DEFAULT_TEXT_SIZE_FRACTION * s / 100f)
                                 menu = false; sub = null
                             }
                         }
@@ -1001,6 +1000,32 @@ private fun SkipButton(skip: Skip, modifier: Modifier) =
     FilledTonalButton(skip.onClick, modifier) { Text(skip.label, maxLines = 1, overflow = TextOverflow.Ellipsis) }
 
 private class Skip(val label: String, val onClick: () -> Unit)
+
+/**
+ * The surface, shutter and subtitles of media3's PlayerView, wired the same way. PlayerView itself always links its
+ * controller, and with it RecyclerView: 130 KB of every APK.
+ * The shutter goes at the first frame and stays gone: a reconnect reloads the item, and the last frame stays up meanwhile.
+ */
+private class VideoView(context: Context) : android.widget.FrameLayout(context), Player.Listener {
+    init { inflate(context, R.layout.player_surface, this) }
+    private val frame: AspectRatioFrameLayout = findViewById(androidx.media3.ui.R.id.exo_content_frame)
+    private val shutter: android.view.View = findViewById(androidx.media3.ui.R.id.exo_shutter)
+    val subtitleView: SubtitleView = findViewById(androidx.media3.ui.R.id.exo_subtitles)
+    private val surface = android.view.SurfaceView(context).also { frame.addView(it, 0, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT)) }
+    var resizeMode by frame::resizeMode
+    var player: Player? = null
+        set(value) {
+            field?.run { removeListener(this@VideoView); clearVideoSurfaceView(surface) }
+            field = value
+            value?.run { setVideoSurfaceView(surface); addListener(this@VideoView); subtitleView.setCues(currentCues.cues) }
+        }
+
+    override fun onVideoSizeChanged(videoSize: VideoSize) {
+        if (videoSize.height > 0) frame.setAspectRatio(videoSize.width * videoSize.pixelWidthHeightRatio / videoSize.height)
+    }
+    override fun onRenderedFirstFrame() { shutter.visibility = INVISIBLE }
+    override fun onCues(cueGroup: CueGroup) = subtitleView.setCues(cueGroup.cues)
+}
 
 /** A menu entry ticked when it is the current choice. */
 @Composable

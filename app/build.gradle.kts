@@ -24,6 +24,9 @@ android {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            // The SDK keeps every one of its ~1,300 API models whole, used or not. kotlinx.serialization needs none of
+            // that: its own rules keep the serializers of the models the app reaches.
+            optimization { keepRules { ignoreFrom("org.jellyfin.sdk:jellyfin-core-android") } }
         }
     }
 
@@ -35,8 +38,13 @@ android {
         isUniversalApk = false
     }
     packaging.jniLibs.useLegacyPackaging = true
+    // ass-kt ships libc++_shared, yet neither libass nor libasskt links it (they import only libc), so it never loads.
+    packaging.jniLibs.excludes += "**/libc++_shared.so"
+    // Read only by kotlin-reflect (not a dependency) and the coroutines debug agent.
+    packaging.resources.excludes += listOf("kotlin/**", "DebugProbesKt.bin")
     // The UI is English only; library translations for ~80 locales would just ship unused.
-    androidResources { localeFilters += "en" }
+    // OkHttp reads its public suffix list only to parse cookies, and no client here has a cookie jar.
+    androidResources { localeFilters += "en"; ignoreAssetsPatterns += "PublicSuffixDatabase.list" }
     // Sideloaded through GitHub, so no Play-only dependency metadata blob.
     dependenciesInfo { includeInApk = false; includeInBundle = false }
 

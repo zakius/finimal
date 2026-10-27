@@ -1,7 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Media3's exo_player_view without the views finimal never shows. Without exo_controller_placeholder, PlayerView
-     doesn't build its PlayerControlView (half of its 6 ms construction on the phone), which useController = false
-     doesn't prevent. -->
+<!-- Media3's exo_player_view without the views finimal never shows, for Player.kt's VideoView. -->
 <merge xmlns:android="http://schemas.android.com/apk/res/android">
 
   <androidx.media3.ui.AspectRatioFrameLayout android:id="@id/exo_content_frame"
