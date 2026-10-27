@@ -32,7 +32,7 @@ A Jellyfin client for Android, Linux and Windows that goes straight to the libra
 - Kotlin, Jetpack Compose, Media3 with the Jellyfin FFmpeg audio decoder, libass-android for ASS/SSA subtitles, jellyfin-sdk-kotlin, WorkManager.
 - License GPL-3.0. Findroid (GPL-3.0) code may be copied. jellyfin-android is GPL-2.0 without "or later", so it is a reference only.
 - Distribution: GitHub Actions builds one signed APK per ABI (arm64-v8a, armeabi-v7a, x86_64, x86) on each tag and attaches them to a release. Updates come through Obtainium.
-- Desktop: Compose for Desktop, libmpv through JNA, jpackage. On each tag CI builds and checks the Linux Flatpak, .deb (Ubuntu 24.04, Debian 13) and .rpm (Fedora), and the Windows .msi and .zip in a full and a small flavour, and attaches them to the release.
+- Desktop: Compose for Desktop, libmpv through JNA, jpackage. On each tag CI builds and checks the Linux Flatpak, .deb (Ubuntu 26.04, Debian 13) and .rpm (Fedora), and the Windows .msi and .zip in a full and a small flavour, and attaches them to the release.
 
 ## Desktop
 
