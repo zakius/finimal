@@ -33,15 +33,16 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.runtime.toMutableStateList
-import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.backhandler.BackHandler
 import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.graphics.vector.rememberVectorPainter
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.unit.dp
+import androidx.navigationevent.NavigationEventInfo
+import androidx.navigationevent.compose.NavigationBackHandler
+import androidx.navigationevent.compose.rememberNavigationEventState
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import java.util.Locale
@@ -100,7 +101,7 @@ fun Root(openDownloads: Boolean, openedDownloads: () -> Unit, player: @Composabl
     fun pop() { if (stack.size > 1) { saved.removeState(keyOf(stack.lastIndex)); stack.removeAt(stack.lastIndex) } }
     fun reset(s: Screen) { stack.indices.forEach { saved.removeState(keyOf(it)) }; epoch++; stack.clear(); stack.add(s) }
 
-    @OptIn(ExperimentalComposeUiApi::class) BackHandler(stack.size > 1) { pop() }
+    NavigationBackHandler(rememberNavigationEventState(NavigationEventInfo.None), isBackEnabled = stack.size > 1, onBackCompleted = ::pop)
     LaunchedEffect(openDownloads) {
         // Not over "Who's watching?": the account still loaded there may have a PIN.
         if (openDownloads && App.prefs.loggedIn && stack.first() != Screen.Accounts && stack.last() != Screen.Downloads) {

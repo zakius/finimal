@@ -16,7 +16,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.graphics.painter.BitmapPainter
+import androidx.compose.ui.graphics.toComposeImageBitmap
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import androidx.compose.runtime.snapshotFlow
@@ -35,6 +36,7 @@ import coil3.request.ImageRequest
 import coil3.request.SuccessResult
 import java.io.File
 import kotlinx.coroutines.runBlocking
+import org.jetbrains.skia.Image
 import coil3.serviceLoaderEnabled
 import coil3.network.okhttp.OkHttpNetworkFetcherFactory
 import com.sun.jna.Library
@@ -60,7 +62,7 @@ fun main(args: Array<String>) {
             // Saved a moment after it settles, not on every pixel of a drag.
             snapshotFlow { Triple(control.state.placement, control.state.position, control.state.size) }.collectLatest { delay(500); control.save() }
         }
-        Window(::exitApplication, control.state, title = control.title, icon = painterResource("finimal.png"),
+        Window(::exitApplication, control.state, title = control.title, icon = remember { appIcon() },
             onPreviewKeyEvent = { control.keys?.invoke(it) ?: false }) {
             Theme { CompositionLocalProvider(LocalWindow provides control) {
                 Box(Modifier.fillMaxSize().onPointerEvent(PointerEventType.Press) { e ->
@@ -157,3 +159,7 @@ private fun checkPlayer(): Int = try {
     println("player failed: $e")
     1
 }
+
+private fun appIcon() = BitmapPainter(
+    Image.makeFromEncoded(Thread.currentThread().contextClassLoader.getResourceAsStream("finimal.png")!!.use { it.readAllBytes() })
+        .toComposeImageBitmap())

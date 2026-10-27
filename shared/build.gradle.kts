@@ -24,7 +24,7 @@ kotlin {
             api("org.jetbrains.compose.runtime:runtime:1.12.2")
             api("org.jetbrains.compose.foundation:foundation:1.12.2")
             api("org.jetbrains.compose.ui:ui:1.12.2")
-            api("org.jetbrains.compose.ui:ui-backhandler:1.12.2")
+            api("org.jetbrains.androidx.navigationevent:navigationevent-compose:1.1.0")
             api("org.jetbrains.compose.material3:material3:1.9.0")
             api("org.jetbrains.compose.material:material-icons-core:1.7.3")
             api("org.jellyfin.sdk:jellyfin-core:1.9.3")

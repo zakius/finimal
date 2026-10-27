@@ -16,7 +16,7 @@ java {
 kotlin { compilerOptions { jvmTarget = JvmTarget.JVM_21 } }
 
 // JNA's jar carries its native part for ~30 platforms; the app is built for Linux and Windows on x86-64 only.
-val jna by configurations.creating
+val jna = configurations.create("jna")
 val jnaTrimmed = tasks.register<Jar>("jnaTrimmed") {
     archiveFileName = "jna.jar"
     destinationDirectory = layout.buildDirectory.dir("jna")
