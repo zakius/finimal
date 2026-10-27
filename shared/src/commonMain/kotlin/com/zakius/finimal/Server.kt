@@ -17,6 +17,7 @@ import java.time.Instant
 import java.time.LocalDateTime
 import java.time.ZoneId
 import java.util.UUID
+import org.jellyfin.sdk.api.client.ApiClient
 import org.jellyfin.sdk.api.client.exception.InvalidStatusException
 import org.jellyfin.sdk.api.client.exception.TimeoutException
 import org.jellyfin.sdk.api.client.extensions.authenticationApi
@@ -52,6 +53,7 @@ import org.jellyfin.sdk.model.api.RepeatMode
 import org.jellyfin.sdk.model.api.SortOrder
 import org.jellyfin.sdk.model.api.UpdateUserItemDataDto
 import org.jellyfin.sdk.model.api.UserItemDataDto
+import finimal.core.PendingStore
 import finimal.core.PlayState
 import finimal.core.ResumeRules
 import finimal.core.shouldPush
@@ -69,14 +71,32 @@ enum class Sort(val label: String, val by: ItemSortBy, val order: SortOrder) {
  */
 class Server {
     private val prefs = App.prefs
-    val api = createJellyfin {
+    private val jellyfin = createJellyfin {
         clientInfo = ClientInfo("finimal", App.platform.versionName)
         App.platform.configure(this)
         // One connection pool for API, images and streams. API answers also set the server clock.
         apiClientFactory = OkHttpFactory(App.http.newBuilder().addNetworkInterceptor { chain ->
             chain.proceed(chain.request()).also { r -> r.headers.getDate("Date")?.let { setClock(it.time) } }
         }.build())
-    }.createApi(prefs.baseUrl, prefs.token)
+    }
+    val api = jellyfin.createApi(prefs.baseUrl, prefs.token)
+
+    /**
+     * The account a play state was recorded for. Its reports, flush and confirm use this account's
+     * own client, user and pending file, so a switch while they are in flight can't send its
+     * progress as another user or confirm it in another account's file.
+     */
+    private class Owner(val userId: UUID, val api: ApiClient, val pending: PendingStore)
+
+    private val playApis = java.util.concurrent.ConcurrentHashMap<Pair<String, String>, ApiClient>()
+
+    /** The current account, read under the lock [switchTo], [login] and [logout] change it under; null when logged out. */
+    private fun owner(): Owner? = synchronized(App) {
+        val base = prefs.baseUrl ?: return null
+        val token = prefs.token ?: return null
+        val user = prefs.userId ?: return null
+        Owner(UUID.fromString(user), playApis.getOrPut(base to token) { jellyfin.createApi(base, token) }, App.pending)
+    }
 
     @Volatile private var clockOffsetMs = prefs.clockOffsetMs
 
@@ -118,7 +138,7 @@ class Server {
         val auth = try { io { api.authenticationApi.authenticateUserByName(credentials).content } }
             catch (e: Exception) { api.update(baseUrl = prefs.baseUrl, accessToken = prefs.token); throw e }
         recorded.clear()
-        prefs.login(base, auth.accessToken!!, auth.user!!.id.toString(), auth.user!!.name.orEmpty())
+        synchronized(App) { prefs.login(base, auth.accessToken!!, auth.user!!.id.toString(), auth.user!!.name.orEmpty()) }
         api.update(baseUrl = base, accessToken = auth.accessToken)
         App.downloads?.accountChanged()
         App.sessionExpired = false
@@ -127,7 +147,7 @@ class Server {
     /** Another saved account takes over; its lists, downloads and unsynced progress are its own. */
     fun switchTo(a: Account) {
         recorded.clear()
-        prefs.switchTo(a)
+        synchronized(App) { prefs.switchTo(a) }
         api.update(accessToken = a.token)
         App.downloads?.accountChanged()
         App.sessionExpired = false
@@ -137,7 +157,7 @@ class Server {
     fun logout(keepAccount: Boolean = false) {
         recorded.clear()
         ListSnapshots.clear() // another account's lists must not show, even briefly
-        if (keepAccount) prefs.endSession() else prefs.logout()
+        synchronized(App) { if (keepAccount) prefs.endSession() else prefs.logout() }
         api.update(accessToken = null)
         App.downloads?.accountChanged()
     }
@@ -197,7 +217,9 @@ class Server {
     private suspend fun userData(id: UUID) = userData(listOf(id))[id]
 
     /** In chunks: every ID goes in the query string, and servers and proxies cap its length around 8 KB. */
-    suspend fun userData(ids: List<UUID>): Map<UUID, UserItemDataDto?> = io {
+    suspend fun userData(ids: List<UUID>): Map<UUID, UserItemDataDto?> = userData(api, userId, ids)
+
+    private suspend fun userData(api: ApiClient, userId: UUID, ids: List<UUID>): Map<UUID, UserItemDataDto?> = io {
         ids.chunked(100).flatMap { chunk ->
             api.libraryApi.getItems(userId = userId, ids = chunk, enableUserData = true, enableImages = false).content.items.map { it.id to it.userData }
         }.toMap()
@@ -258,13 +280,17 @@ class Server {
         )
     } } }
 
-    /** Saves locally first, then tells the server. A failed report leaves the local entry for [flush]. */
+    /**
+     * Saves locally first, then tells the server. A failed report leaves the local entry for [flush].
+     * A report whose state a newer local change replaced while it waited for [reports] is not sent:
+     * the server dates a report on arrival, so it would beat that change.
+     */
     suspend fun reportProgress(id: String, mediaSourceId: String, positionTicks: Long, paused: Boolean, transcoding: Boolean, serverPlayed: Boolean, playSession: String) = io {
         val played = knownPlayed(id, serverPlayed)
         val state = PlayState(positionTicks, played, now())
-        record(id, state)
-        reports.withLock { runCatching {
-            api.sessionApi.reportPlaybackProgress(
+        val owner = record(id, state) ?: return@io
+        reports.withLock { if (owner.pending.get(id) == state) runCatching {
+            owner.api.sessionApi.reportPlaybackProgress(
                 PlaybackProgressInfo(
                     itemId = UUID.fromString(id), mediaSourceId = mediaSourceId, positionTicks = positionTicks,
                     canSeek = true, isPaused = paused, isMuted = false,
@@ -272,7 +298,7 @@ class Server {
                     repeatMode = RepeatMode.REPEAT_NONE, playbackOrder = PlaybackOrder.DEFAULT, playSessionId = playSession,
                 )
             )
-        }.onSuccess { confirm(id, state) } }
+        }.onSuccess { confirm(owner, id, state) } }
     }
 
     /**
@@ -283,13 +309,14 @@ class Server {
         App.platform.scope.launch(App.disk) {
             val previous = knownPlayed(id, serverPlayed)
             val state = ResumeRules.onStop(PlayState(0, previous, null), positionTicks, runtimeTicks, now())
-            record(id, state)
+            val owner = record(id, state)
             io {
-                reports.withLock { runCatching {
-                    api.sessionApi.reportPlaybackStopped(
+                // Not sent when superseded, as in reportProgress; the server ends the session on its own.
+                if (owner != null) reports.withLock { if (owner.pending.get(id) == state) runCatching {
+                    owner.api.sessionApi.reportPlaybackStopped(
                         PlaybackStopInfo(itemId = UUID.fromString(id), mediaSourceId = mediaSourceId, positionTicks = positionTicks, playSessionId = playSession, failed = false)
                     )
-                }.onSuccess { confirm(id, state) } }
+                }.onSuccess { confirm(owner, id, state) } }
                 App.platform.scheduleHousekeeping()
             }
         }
@@ -308,11 +335,14 @@ class Server {
     private fun knownPlayed(id: String, serverPlayed: Boolean) = (App.pending.get(id) ?: recorded[id])?.played ?: serverPlayed
 
     /** Every local play-state change: queued for the server and kept with the download for offline resume. */
-    private suspend fun record(id: String, state: PlayState): Unit = withContext(App.disk) {
+    /** Returns the account [state] was queued for, null when logged out (it waits in the last account's file). */
+    private suspend fun record(id: String, state: PlayState): Owner? = withContext(App.disk) {
+        val owner = owner()
         recorded[id] = state
-        App.pending.put(id, state)
+        (owner?.pending ?: App.pending).put(id, state)
         App.downloads?.rememberState(id, state)
         localChanges++
+        owner
     }
 
     /** "Start over" as a saved position of 0, so a restored back stack never restarts the item a second time. */
@@ -322,8 +352,8 @@ class Server {
     }
 
     /** The server has [state]; rows drop their "not synced" at once rather than at the next local change. */
-    private fun confirm(id: String, state: PlayState) {
-        App.pending.confirm(id, state)
+    private fun confirm(owner: Owner, id: String, state: PlayState) {
+        owner.pending.confirm(id, state)
         localChanges++
     }
 
@@ -344,20 +374,24 @@ class Server {
      * rather than timing out once per item. Returns the first failure, null when all went through.
      */
     suspend fun flush(): Throwable? = io { flushing.withLock {
-        val pending = withContext(App.disk) { App.pending.all() }
+        val (owner, pending) = withContext(App.disk) { owner()?.let { it to it.pending.all() } } ?: return@withLock null
         if (pending.isEmpty()) return@withLock null
+        // A 401 for an account switched away from must not end the session of the one switched to.
+        fun expireOwner() { if (owner()?.api === owner.api) expire() }
         // One request for every item's server state; an item the server lacks is absent and its push 404s.
-        val serverStates = try { userData(pending.keys.map(UUID::fromString)) } catch (e: Exception) {
-            if ((e as? InvalidStatusException)?.status == 401) expire()
+        val serverStates = try { userData(owner.api, owner.userId, pending.keys.map(UUID::fromString)) } catch (e: Exception) {
+            if ((e as? InvalidStatusException)?.status == 401) expireOwner()
             return@withLock e
         }
         var failure: Throwable? = null
         for ((id, local) in pending) {
-            runCatching {
+            // Under [reports], and only while [local] is still pending: a report that landed after
+            // serverStates was fetched is newer than both, and pushing [local] would overwrite it.
+            runCatching { reports.withLock {
                 val uuid = UUID.fromString(id)
-                if (shouldPush(local, serverStates[uuid].toPlayState())) {
-                    api.userDataApi.updateItemUserData(
-                        uuid, userId,
+                if (owner.pending.get(id) == local && shouldPush(local, serverStates[uuid].toPlayState())) {
+                    owner.api.userDataApi.updateItemUserData(
+                        uuid, owner.userId,
                         UpdateUserItemDataDto(
                             playbackPositionTicks = local.positionTicks,
                             played = local.played,
@@ -365,10 +399,10 @@ class Server {
                         ),
                     )
                 }
-            }.onSuccess { confirm(id, local) }.onFailure { e ->
+            } }.onSuccess { confirm(owner, id, local) }.onFailure { e ->
                 when ((e as? InvalidStatusException)?.status) {
-                    404 -> confirm(id, local)
-                    401 -> { expire(); return@withLock e }
+                    404 -> confirm(owner, id, local)
+                    401 -> { expireOwner(); return@withLock e }
                     else -> { failure = failure ?: e; if (unreachable(e)) return@withLock e }
                 }
             }

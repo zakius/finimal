@@ -1,0 +1,160 @@
+#!/usr/bin/env bash
+# Drives the finimal desktop app headless: its own Xvfb, its own XDG dirs, logged in to the local test server.
+# Usage: see SKILL.md next to this file, or run with no arguments.
+set -euo pipefail
+
+SKILL_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+REPO=$(cd "$SKILL_DIR/../../.." && pwd)
+ROOT=${FV_ROOT:-/tmp/finimal-verify}
+CMD_FILE="$REPO/desktop/build/verify-run-command.txt"
+SERVER=${FV_SERVER:-http://localhost:8097}
+export JAVA_HOME=${JAVA_HOME:-$HOME/toolchain/jdk-21.0.12+8}
+[[ -n ${ANDROID_HOME:-} || -f $REPO/local.properties ]] || export ANDROID_HOME=$HOME/Android/Sdk
+
+die() { echo "finimal-verify: $*" >&2; exit 1; }
+
+# The run this command acts on: $FV_RUN, else the last one launched.
+run_dir() {
+  local id=${FV_RUN:-$(cat "$ROOT/last" 2>/dev/null || true)}
+  [[ -n $id && -d $ROOT/$id ]] || die "no run; start one with: finimal-verify launch"
+  echo "$ROOT/$id"
+}
+load() {
+  R=$(run_dir); [[ -f $R/run.env ]] || die "run $(basename "$R") is stopped"; source "$R/run.env"; export DISPLAY; EV="$R/evidence"
+  # After a login in the UI (launch --logged-out), the app's own token and user.
+  local s="$R/scratch/config/finimal/settings.json"
+  [[ -n $TOKEN || ! -f $s ]] || { TOKEN=$(jq -r '.token // empty' "$s"); USER_ID=$(jq -r '.userId // empty' "$s"); }
+}
+alive() { [[ -n ${1:-} ]] && kill -0 "$1" 2>/dev/null; }
+auth() { echo "Authorization: MediaBrowser Client=\"finimal-verify\", Device=\"verify\", DeviceId=\"$DEVICE_ID\", Version=\"1\"${TOKEN:+, Token=\"$TOKEN\"}"; }
+
+cmd_build() {
+  ( cd "$REPO" && ./gradlew -q --init-script "$SKILL_DIR/run-command.init.gradle.kts" :desktop:printRunCommand ) > "$CMD_FILE.tmp"
+  mv "$CMD_FILE.tmp" "$CMD_FILE"
+  echo "built; java command line in $CMD_FILE"
+}
+
+# launch [user] [password] | launch --logged-out: fresh Xvfb + XDG dirs, a token from the server seeded as the login
+# (none with --logged-out: the app opens on Login), the app started.
+cmd_launch() {
+  local user=${1:-test} pass=${2:-test}
+  [[ -s $CMD_FILE ]] || cmd_build
+  local id; id=$(date +%Y%m%d-%H%M%S)-$$
+  R="$ROOT/$id"; mkdir -p "$R/evidence" "$R/scratch"/{config/finimal,data,cache}
+  echo "$id" > "$ROOT/last"
+  local d=77; while [[ -e /tmp/.X11-unix/X$d || -e /tmp/.X$d-lock ]]; do d=$((d + 1)); done
+  DISPLAY=:$d
+  Xvfb "$DISPLAY" -screen 0 1600x1000x24 -nolisten tcp > "$R/scratch/xvfb.log" 2>&1 &
+  XVFB_PID=$!
+  for _ in $(seq 50); do [[ -e /tmp/.X11-unix/X$d ]] && break; sleep 0.1; done
+  DEVICE_ID="finimal-verify-$id"; TOKEN= USER_ID=
+  if [[ $user != --logged-out ]]; then
+    local login; login=$(curl -sf -X POST "$SERVER/Users/AuthenticateByName" -H "$(auth)" -H 'Content-Type: application/json' \
+      -d "$(jq -nc --arg u "$user" --arg p "$pass" '{Username:$u,Pw:$p}')") || { kill "$XVFB_PID"; die "login to $SERVER as $user failed"; }
+    TOKEN=$(jq -r .AccessToken <<<"$login")
+    USER_ID=$(jq -r .User.Id <<<"$login" | sed -E 's/(.{8})(.{4})(.{4})(.{4})(.{12})/\1-\2-\3-\4-\5/')
+    # The settings a UI login writes (Prefs.login), so the app starts on Libraries.
+    jq -n --arg url "$SERVER" --arg t "$TOKEN" --arg u "$USER_ID" --arg n "$user" --arg d "$DEVICE_ID" \
+      '{baseUrl:$url, token:$t, userId:$u, deviceId:$d, accounts:([{userId:$u,name:$n,token:$t}]|tostring)}' \
+      > "$R/scratch/config/finimal/settings.json"
+  fi
+  mapfile -t argv < "$CMD_FILE"
+  ( cd "$REPO/desktop" && exec env DISPLAY="$DISPLAY" XDG_CONFIG_HOME="$R/scratch/config" XDG_DATA_HOME="$R/scratch/data" \
+      XDG_CACHE_HOME="$R/scratch/cache" FINIMAL_MPV_LOG="$R/evidence/mpv.log" "${argv[@]}" ) > "$R/evidence/app.log" 2>&1 &
+  APP_PID=$!
+  cat > "$R/run.env" <<EOF
+DISPLAY=$DISPLAY
+XVFB_PID=$XVFB_PID
+APP_PID=$APP_PID
+DEVICE_ID=$DEVICE_ID
+TOKEN=$TOKEN
+USER_ID=$USER_ID
+USER_NAME=${user/--logged-out/ui-login}
+SERVER=$SERVER
+EOF
+  load
+  echo "run $id on $DISPLAY: Xvfb $XVFB_PID, app $APP_PID; evidence in $EV"
+  # Ready means usable: the Libraries screen shows the server's libraries (or the Login form), not just a window.
+  cmd_wait "$([[ $user == --logged-out ]] && echo Password || echo Movies)" 90 || { cmd_shot launch-failed || true; die "app not ready; see $EV/app.log and launch-failed.png"; }
+  echo ready
+}
+
+cmd_doctor() {
+  load; local bad=0
+  check() { if eval "$2"; then echo "ok   $1"; else echo "FAIL $1"; bad=1; fi; }
+  check "Xvfb $XVFB_PID on $DISPLAY is ours" "alive $XVFB_PID && grep -q -- '$DISPLAY' /proc/$XVFB_PID/cmdline"
+  check "app $APP_PID runs this checkout's jar" "alive $APP_PID && tr '\0' '\n' < /proc/$APP_PID/cmdline | grep -q '^$REPO/desktop/build/libs/desktop.jar'"
+  check "window 'finimal' mapped" "xdotool search --onlyvisible --pid $APP_PID >/dev/null 2>&1"
+  check "server $SERVER answers" "curl -sf $SERVER/System/Info/Public >/dev/null"
+  [[ -z $TOKEN ]] || check "token valid for $USER_NAME" "curl -sf -H '$(auth)' $SERVER/Users/Me >/dev/null"
+  local newer; newer=$(find "$REPO"/{desktop,shared,core}/src -newer "$REPO/desktop/build/libs/desktop.jar" -name '*.kt' 2>/dev/null | head -3)
+  check "jar newer than sources${newer:+ (stale: run build, relaunch)}" "[[ -z '$newer' ]]"
+  echo "run $(basename "$R"), evidence $EV"
+  return $bad
+}
+
+# OCR the screen; prints "x y text" per line of words (centre of the line's box).
+ocr_lines() {
+  import -window root "$R/scratch/ocr.png"
+  # Two passes, black on white each time: tesseract reads nothing on the dark theme as is. The first pass reads light
+  # text on dark surfaces; the second keeps only light shapes (flood-filling the dark rest white) for dark text on light
+  # buttons such as "Log in".
+  local pass; for pass in "-negate -threshold 50%" "-threshold 60% -fill white -draw 'color 0,0 floodfill'"; do
+    eval convert '"$R/scratch/ocr.png"' -colorspace Gray "$pass" '"$R/scratch/ocr2.png"'
+    tesseract "$R/scratch/ocr2.png" - --psm 11 tsv 2>/dev/null | awk -F'\t' 'NR>1 && $12 != "" && $11 > 30 {
+        k=$3"."$4"."$5; if (!(k in t)) { o[++n]=k; l[k]=$7; tp[k]=$8; r[k]=$7+$9; b[k]=$8+$10 }
+        t[k]=t[k] (t[k]==""?"":" ") $12; if ($7+$9>r[k]) r[k]=$7+$9; if ($8+$10>b[k]) b[k]=$8+$10 }
+      END { for (i=1;i<=n;i++) { k=o[i]; printf "%d %d %s\n", (l[k]+r[k])/2, (tp[k]+b[k])/2, t[k] } }'
+  done
+}
+# find TEXT: centre of the first OCR line containing TEXT (case-sensitive).
+# Reads all input: exiting early would kill ocr_lines with SIGPIPE, which pipefail turns into a failure.
+find_text() { ocr_lines | awk -v s="$1" '!hit && index(substr($0, index($0,$3)), s) { hit = $1 " " $2 } END { if (hit) print hit }'; }
+
+cmd_wait() {
+  load; local text=$1 limit=${2:-30} end=$((SECONDS + ${2:-30}))
+  while ((SECONDS < end)); do
+    alive "$APP_PID" || die "app exited; see $EV/app.log"
+    [[ -n $(find_text "$text") ]] && { echo "seen: $text"; return 0; }
+    sleep 1
+  done
+  echo "not seen within ${limit}s: $text" >&2; return 1
+}
+click_at() { xdotool mousemove "$1" "$2" sleep 0.1 click "$3"; }
+cmd_click() {
+  load; local pos; pos=$(find_text "$1"); [[ -n $pos ]] || { cmd_text >&2; die "no '$1' on screen (OCR above)"; }
+  click_at $pos "${2:-1}"; echo "clicked '$1' at $pos"
+}
+cmd_rclick() { cmd_click "$1" 3; }
+cmd_xy() { load; click_at "$1" "$2" "${3:-1}"; }
+cmd_move() { load; xdotool mousemove "$1" "$2" sleep 0.2 mousemove_relative 1 1; }
+cmd_key() { load; xdotool key --delay 80 "$@"; }
+cmd_type() { load; xdotool type --delay 40 "$1"; }
+cmd_text() { load; ocr_lines; }
+cmd_shot() {
+  load; local name=${1:?name}
+  import -window root "$EV/$name.png"; ocr_lines > "$EV/$name.txt"
+  echo "$EV/$name.png"
+}
+cmd_api() { load; curl -sf -H "$(auth)" "$SERVER$1"; }
+cmd_env() {
+  load; local v; for v in DISPLAY XVFB_PID APP_PID SERVER USER_NAME USER_ID TOKEN; do echo "$v=${!v}"; done
+  echo "RUN=$(basename "$R")"; echo "EVIDENCE=$EV"
+}
+
+# stop: kill what launch started, delete scratch (settings, caches, Xvfb), keep evidence.
+cmd_stop() {
+  load
+  for p in "$APP_PID" "$XVFB_PID"; do
+    alive "$p" || continue
+    kill "$p"; for _ in $(seq 50); do alive "$p" || break; sleep 0.1; done
+    alive "$p" && kill -9 "$p"
+  done
+  rm -rf "$R/scratch" "$R/run.env"
+  echo "stopped; evidence kept in $EV:"; ls "$EV"
+}
+
+case ${1:-} in
+  build|launch|doctor|wait|click|rclick|xy|move|key|type|text|shot|api|env|stop) c=$1; shift; "cmd_$c" "$@" ;;
+  *) sed -n '/^## Helper commands/,/^## /p' "$SKILL_DIR/SKILL.md" | sed '$d'; exit 2 ;;
+esac
