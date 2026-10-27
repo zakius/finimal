@@ -110,6 +110,11 @@ jobs:
         with:
           name: desktop-image
           path: desktop-image.tar
+      # ProGuard renames the desktop classes; the release keeps the mapping that reads their stack traces (retrace).
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-mapping
+          path: desktop/build/proguard-mapping.txt
 
   # libmpv and FFmpeg build here; flatpak-builder's cache keeps them while the manifest's modules are unchanged.
   flatpak:
@@ -272,10 +277,15 @@ jobs:
         with:
           name: windows
           path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: desktop-mapping
+          path: dist
       - run: mv dist/finimal-x86_64.flatpak "dist/finimal-${GITHUB_REF_NAME#v}-x86_64.flatpak"
+      - run: mv dist/proguard-mapping.txt "dist/finimal-${GITHUB_REF_NAME#v}-desktop-mapping.txt"
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           git log -1 --format=%b --fixed-strings --grep "Release ${GITHUB_REF_NAME#v}" | grep -v '^Co-Authored-By' > "$RUNNER_TEMP/notes.md"
-          gh release create "$GITHUB_REF_NAME" dist/finimal-*.apk dist/finimal-*.flatpak dist/finimal_*.deb dist/finimal-*.rpm dist/finimal-*.msi dist/finimal-*-windows-x64.zip --notes-file "$RUNNER_TEMP/notes.md" --generate-notes
+          gh release create "$GITHUB_REF_NAME" dist/finimal-*.apk dist/finimal-*.flatpak dist/finimal_*.deb dist/finimal-*.rpm dist/finimal-*.msi dist/finimal-*-windows-x64.zip dist/finimal-*-desktop-mapping.txt --notes-file "$RUNNER_TEMP/notes.md" --generate-notes

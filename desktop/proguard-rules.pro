@@ -1,7 +1,17 @@
-# Shrinking only: no renaming or optimizing, so stack traces read as written and nothing changes behaviour.
--dontobfuscate
+# Shrinking and renaming, which takes a fifth off the jars; no optimizing (ProGuard 7.8 fails on Kotlin 2.4's code).
+# Stack traces keep line numbers and read through build/proguard-mapping.txt (retrace; each release attaches it).
+# Exception names stay, as the UI shows them.
 -dontoptimize
--keepattributes *Annotation*, InnerClasses, Signature, Exceptions, EnclosingMethod
+-keepattributes *Annotation*, InnerClasses, Signature, Exceptions, EnclosingMethod, SourceFile, LineNumberTable
+-renamesourcefileattribute SourceFile
+-printmapping build/proguard-mapping.txt
+-keepnames class * extends java.lang.Throwable
+# ServiceLoader finds implementations by the names in these files.
+-adaptresourcefilenames META-INF/services/*
+-adaptresourcefilecontents META-INF/services/*
+
+# Skia's native code calls back through Function0 by name.
+-keep interface kotlin.jvm.functions.Function0 { *; }
 
 # JNA binds libmpv and libc through these interfaces by reflection.
 -keep class com.sun.jna.** { *; }
@@ -17,11 +27,16 @@
 -keep class * implements coil3.util.DecoderServiceLoaderTarget { *; }
 -keep class * implements kotlinx.coroutines.internal.MainDispatcherFactory { *; }
 
-# kotlinx.serialization: the generated serializers of our classes and the Jellyfin SDK's.
--keep,includedescriptorclasses class **$$serializer { *; }
--keepclassmembers class * { *** Companion; }
--keepclasseswithmembers class * { kotlinx.serialization.KSerializer serializer(...); }
--keep class org.jellyfin.sdk.model.** { *; }
+# kotlinx.serialization: its own rules (META-INF/proguard in its jar, which ProGuard doesn't read), keeping the
+# serializers of the classes the app reaches, not every Jellyfin model.
+-keepclassmembers @kotlinx.serialization.Serializable class ** { static ** Companion; }
+-if @kotlinx.serialization.internal.NamedCompanion class *
+-keepclassmembers class * { static <1> *; }
+-if @kotlinx.serialization.Serializable class ** { static **$* *; }
+-keepclassmembers class <2>$<3> { kotlinx.serialization.KSerializer serializer(...); }
+-if @kotlinx.serialization.Serializable class ** { public static ** INSTANCE; }
+-keepclassmembers class <1> { public static <1> INSTANCE; kotlinx.serialization.KSerializer serializer(...); }
+-keepclassmembers public class **$$serializer { private ** descriptor; }
 
 # Optional dependencies of OkHttp, kotlinx and the SDK that the app doesn't use.
 -dontwarn okhttp3.internal.platform.**
