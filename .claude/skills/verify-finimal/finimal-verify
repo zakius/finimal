@@ -150,8 +150,9 @@ cmd_env() {
 # restart: quit the app and start it again on the same settings and caches, for cold-start paths ("Who's watching?").
 cmd_restart() {
   load
+  alive "$XVFB_PID" || die "Xvfb is gone; launch a new run"
   if alive "$APP_PID"; then
-    kill "$APP_PID"; for _ in $(seq 50); do alive "$APP_PID" || break; sleep 0.1; done
+    kill "$APP_PID" 2>/dev/null || true; for _ in $(seq 50); do alive "$APP_PID" || break; sleep 0.1; done
     alive "$APP_PID" && kill -9 "$APP_PID"
   fi
   start_app

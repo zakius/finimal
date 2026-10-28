@@ -30,7 +30,6 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -360,7 +359,7 @@ fun ErrorText(sentence: String, raw: String?, color: Color = Color.Unspecified) 
 }
 
 @Composable
-private fun Loaded(load: Load, onRetry: () -> Unit, onDownloads: () -> Unit, content: @Composable (List<BaseItemDto>, PaddingValues) -> Unit) {
+private fun Loaded(load: Load, onRetry: () -> Unit, onDownloads: () -> Unit, content: @Composable (List<BaseItemDto>) -> Unit) {
     val result = load.result
     when {
         result == null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
@@ -373,13 +372,13 @@ private fun Loaded(load: Load, onRetry: () -> Unit, onDownloads: () -> Unit, con
                 if (App.downloads != null) TextButton(onClick = onDownloads) { Text("Downloads") }
             }
         }
-        // The note about a failed refresh lies over the list's bottom: pushing the list down would move what is under the pointer.
-        // The list gets that much padding at its end, so its last rows can still scroll (and D-pad focus) out from under it.
-        else -> Box(Modifier.fillMaxSize()) {
-            content(result.getOrThrow(), PaddingValues(bottom = if (load.refreshError != null) 48.dp else 0.dp))
+        // The note about a failed refresh goes under the list, which shrinks from below: a note above it would push down
+        // what is under the pointer.
+        else -> Column(Modifier.fillMaxSize()) {
+            Box(Modifier.weight(1f)) { content(result.getOrThrow()) }
             load.refreshError?.let { e ->
                 if (unreachable(e)) RetryOnNewNetwork(onRetry)
-                Row(Modifier.align(Alignment.BottomCenter).fillMaxWidth().background(MaterialTheme.colorScheme.surfaceVariant).padding(start = 16.dp),
+                Row(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceVariant).padding(start = 16.dp),
                     verticalAlignment = Alignment.CenterVertically) {
                     Text("${loadError(e)}. Showing the last list.", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
                     TextButton(onClick = onRetry) { Text("Retry") }
@@ -480,9 +479,9 @@ fun LibrariesScreen(modifier: Modifier, push: (Screen) -> Unit) {
             IconButton(onClick = { push(Screen.Settings) }) { Icon(LocalIcons.current.settings, "Settings") }
             IconButton(onClick = { push(Screen.Accounts) }) { Avatar(me?.name.orEmpty(), Modifier.semantics { contentDescription = "Accounts" }) }
         }
-        Loaded(libs, { refresh++ }, { push(Screen.Downloads) }) { list, pad ->
+        Loaded(libs, { refresh++ }, { push(Screen.Downloads) }) { list ->
             if (list.isEmpty()) Empty("No movie or TV libraries on this server")
-            else LazyColumn(contentPadding = pad) {
+            else LazyColumn {
                 items(list, key = { it.id }) { lib ->
                     Text(lib.name.orEmpty(), style = MaterialTheme.typography.titleLarge,
                         modifier = Modifier.fillMaxWidth().focusMemory(lib.id).combinedClickable(onClick = { push(Screen.Library(lib.id.toString(), lib.name.orEmpty())) }).padding(20.dp))
@@ -524,14 +523,14 @@ fun LibraryScreen(modifier: Modifier, screen: Screen.Library, push: (Screen) -> 
         val scope = rememberCoroutineScope()
         // Outside Loaded, so the scroll survives its "Loading…" pass; a new sort, filter or query starts at the top.
         val gridState = rememberSaveable(sort, unplayed, query, saver = LazyGridState.Saver) { LazyGridState() }
-        Loaded(items, { refresh++ }, { push(Screen.Downloads) }) { list, pad ->
+        Loaded(items, { refresh++ }, { push(Screen.Downloads) }) { list ->
             if (list.isEmpty()) Empty(when {
                 query.isNotBlank() -> "No results for “${query.trim()}”"
                 searchOnly -> "Type to search"
                 unplayed -> "Nothing unplayed here"
                 else -> "This library is empty"
             })
-            else LazyVerticalGrid(GridCells.Adaptive(if (App.tv) 150.dp else if (smallestWidthDp() >= 600) 140.dp else 110.dp), Modifier.fillMaxSize().padding(8.dp), gridState, pad,
+            else LazyVerticalGrid(GridCells.Adaptive(if (App.tv) 150.dp else if (smallestWidthDp() >= 600) 140.dp else 110.dp), Modifier.fillMaxSize().padding(8.dp), gridState,
                 horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 items(list, key = { it.id }) { item ->
                     if (item.type == BaseItemKind.SERIES) Poster(item, null, onClick = { push(Screen.Series(item.id.toString(), item.name.orEmpty())) })
@@ -582,7 +581,7 @@ private fun Poster(
             }
             if (unsynced) Text("not synced", color = Color.White, style = MaterialTheme.typography.labelSmall,
                 modifier = Modifier.align(Alignment.BottomStart).padding(bottom = 4.dp).background(Color(0xAA000000)))
-            ProgressBar(item, state, Modifier.align(Alignment.BottomStart))
+            ProgressBar(item, state, Modifier.align(Alignment.BottomStart).padding(if (focused) 3.dp else 0.dp)) // inside the focus border
             onChanged?.let { ItemMenu(item, state?.played == true, unsynced, menu, { menu = false }, download != null, onStartOver, it) }
         }
         Text(item.name.orEmpty(), maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall)
@@ -626,9 +625,9 @@ fun SeriesScreen(modifier: Modifier, screen: Screen.Series, push: (Screen) -> Un
             }
         }
         val listState = rememberLazyListState() // outside Loaded, so the scroll survives its "Loading…" pass
-        Loaded(seasons, { refresh++ }, { push(Screen.Downloads) }) { list, pad ->
+        Loaded(seasons, { refresh++ }, { push(Screen.Downloads) }) { list ->
             if (list.isEmpty()) Empty("This series has no seasons")
-            else if (shownEpisodes != null) LazyColumn(state = listState, contentPadding = pad) {
+            else if (shownEpisodes != null) LazyColumn(state = listState) {
                 items(shownEpisodes, key = { it.id }) { ep ->
                     EpisodeRow(ep, statuses?.get(ep.id.toString()),
                         onPlay = { push(Screen.Play(ep.id.toString())) },
@@ -636,7 +635,7 @@ fun SeriesScreen(modifier: Modifier, screen: Screen.Series, push: (Screen) -> Un
                         onChanged = { refresh++ })
                 }
             }
-            else LazyColumn(state = listState, contentPadding = pad) {
+            else LazyColumn(state = listState) {
                 items(list, key = { it.id }) { season ->
                     Row(Modifier.fillMaxWidth().focusMemory(season.id).combinedClickable(onClick = {
                         push(Screen.Season(screen.id, season.id.toString(), "${screen.name} · ${season.name}"))
@@ -680,9 +679,9 @@ fun SeasonScreen(modifier: Modifier, screen: Screen.Season, push: (Screen) -> Un
                 }
             }
         }
-        Loaded(episodes, { refresh++ }, { push(Screen.Downloads) }) { list, pad ->
+        Loaded(episodes, { refresh++ }, { push(Screen.Downloads) }) { list ->
             if (list.isEmpty()) Empty("This season has no episodes")
-            else LazyColumn(state = listState, contentPadding = pad) {
+            else LazyColumn(state = listState) {
                 items(list, key = { it.id }) { ep ->
                     EpisodeRow(
                         ep,

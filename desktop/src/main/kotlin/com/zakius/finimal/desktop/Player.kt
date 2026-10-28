@@ -36,6 +36,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import finimal.core.RECONNECT_WINDOW_MS
 import finimal.core.reconnectDelayMs
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeoutOrNull
 import androidx.compose.runtime.mutableLongStateOf
@@ -415,6 +416,8 @@ private fun VideoSurface(
         }
     }
     LaunchedEffect(overlay) { if (overlay != null) { delay(800); overlay = null } }
+    // From mpv's own flag once it changes, not at the key press: the flag arrives late, and quick presses would show stale text.
+    LaunchedEffect(mpv) { snapshotFlow { mpv.muted }.drop(1).collect { overlay = if (it) "Muted" else "Volume ${mpv.volume.toInt()}%" } }
 
     // Offered, never done on its own. Credits offer the next episode in season order when there is one.
     val ranges = remember(segments) { segments.map { it.type to (it.startTicks / TICKS_PER_MS until it.endTicks / TICKS_PER_MS - 1_000) } }
@@ -441,8 +444,7 @@ private fun VideoSurface(
                 Key.DirectionRight, Key.L -> { seekBy(step); true }
                 Key.DirectionUp -> { volumeBy(5.0); true }
                 Key.DirectionDown -> { volumeBy(-5.0); true }
-                // cycle, not a set from [Mpv.muted]: that arrives late, and two quick presses would both mute.
-                Key.M -> { mpv.command("cycle", "mute"); overlay = if (mpv.muted) "Volume ${mpv.volume.toInt()}%" else "Muted"; true }
+                Key.M -> { mpv.command("cycle", "mute"); true }
                 Key.F -> { toggleFullscreen(); true }
                 Key.N, Key.MediaNext -> { next?.let { onPlay(it.id.toString()) }; true }
                 Key.PageUp, Key.PageDown -> {
