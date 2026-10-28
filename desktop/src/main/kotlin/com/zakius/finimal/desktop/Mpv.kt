@@ -101,6 +101,7 @@ class Mpv(options: Map<String, String>) {
     var eof by mutableStateOf(false); private set
     var speed by mutableDoubleStateOf(1.0); private set
     var volume by mutableDoubleStateOf(100.0); private set
+    var muted by mutableStateOf(false); private set
     var loaded by mutableStateOf(false); private set
     /** Set when a file ends with an error; cleared by the next [load]. */
     var error by mutableStateOf<String?>(null); private set
@@ -137,7 +138,7 @@ class Mpv(options: Map<String, String>) {
         check(lib.mpv_initialize(ctx) >= 0) { "mpv_initialize failed" }
         listOf("time-pos" to FORMAT_DOUBLE, "duration" to FORMAT_DOUBLE, "demuxer-cache-time" to FORMAT_DOUBLE, "pause" to FORMAT_FLAG,
             "paused-for-cache" to FORMAT_FLAG, "seeking" to FORMAT_FLAG, "eof-reached" to FORMAT_FLAG, "speed" to FORMAT_DOUBLE,
-            "volume" to FORMAT_DOUBLE, "track-list/count" to FORMAT_DOUBLE, "core-idle" to FORMAT_FLAG,
+            "volume" to FORMAT_DOUBLE, "mute" to FORMAT_FLAG, "track-list/count" to FORMAT_DOUBLE, "core-idle" to FORMAT_FLAG,
         ).forEach { (name, format) -> lib.mpv_observe_property(ctx, 0, name, format) }
         val apiType = Memory(3).apply { setString(0, "sw") }
         val params = renderParams(listOf(RENDER_PARAM_API_TYPE to apiType))
@@ -185,6 +186,7 @@ class Mpv(options: Map<String, String>) {
                         "eof-reached" -> eof = f ?: false
                         "speed" -> speed = d ?: 1.0
                         "volume" -> volume = d ?: 100.0
+                        "mute" -> muted = f ?: false
                         "track-list/count" -> tracksChanged++
                     }
                     buffering = !loaded || cacheWait || seekingNow

@@ -5,7 +5,7 @@ set -euo pipefail
 
 SKILL_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO=$(cd "$SKILL_DIR/../../.." && pwd)
-ROOT=${FV_ROOT:-/tmp/finimal-verify}
+ROOT=${FV_ROOT:-${XDG_CACHE_HOME:-$HOME/.cache}/finimal-verify}  # not /tmp: a tmpfs, and the player buffers whole episodes
 CMD_FILE="$REPO/desktop/build/verify-run-command.txt"
 SERVER=${FV_SERVER:-http://localhost:8097}
 export JAVA_HOME=${JAVA_HOME:-$HOME/toolchain/jdk-21.0.12+8}
@@ -29,9 +29,17 @@ alive() { [[ -n ${1:-} ]] && kill -0 "$1" 2>/dev/null; }
 auth() { echo "Authorization: MediaBrowser Client=\"finimal-verify\", Device=\"verify\", DeviceId=\"$DEVICE_ID\", Version=\"1\"${TOKEN:+, Token=\"$TOKEN\"}"; }
 
 cmd_build() {
+  mkdir -p "$(dirname "$CMD_FILE")"
   ( cd "$REPO" && ./gradlew -q --init-script "$SKILL_DIR/run-command.init.gradle.kts" :desktop:printRunCommand ) > "$CMD_FILE.tmp"
   mv "$CMD_FILE.tmp" "$CMD_FILE"
   echo "built; java command line in $CMD_FILE"
+}
+
+start_app() {
+  mapfile -t argv < "$CMD_FILE"
+  ( cd "$REPO/desktop" && exec env DISPLAY="$DISPLAY" XDG_CONFIG_HOME="$R/scratch/config" XDG_DATA_HOME="$R/scratch/data" \
+      XDG_CACHE_HOME="$R/scratch/cache" FINIMAL_MPV_LOG="$R/evidence/mpv.log" "${argv[@]}" ) >> "$R/evidence/app.log" 2>&1 &
+  APP_PID=$!
 }
 
 # launch [user] [password] | launch --logged-out: fresh Xvfb + XDG dirs, a token from the server seeded as the login
@@ -58,10 +66,7 @@ cmd_launch() {
       '{baseUrl:$url, token:$t, userId:$u, deviceId:$d, accounts:([{userId:$u,name:$n,token:$t}]|tostring)}' \
       > "$R/scratch/config/finimal/settings.json"
   fi
-  mapfile -t argv < "$CMD_FILE"
-  ( cd "$REPO/desktop" && exec env DISPLAY="$DISPLAY" XDG_CONFIG_HOME="$R/scratch/config" XDG_DATA_HOME="$R/scratch/data" \
-      XDG_CACHE_HOME="$R/scratch/cache" FINIMAL_MPV_LOG="$R/evidence/mpv.log" "${argv[@]}" ) > "$R/evidence/app.log" 2>&1 &
-  APP_PID=$!
+  start_app
   cat > "$R/run.env" <<EOF
 DISPLAY=$DISPLAY
 XVFB_PID=$XVFB_PID
@@ -142,6 +147,16 @@ cmd_env() {
   echo "RUN=$(basename "$R")"; echo "EVIDENCE=$EV"
 }
 
+# restart: quit the app and start it again on the same settings and caches, for cold-start paths ("Who's watching?").
+cmd_restart() {
+  load
+  kill "$APP_PID"; for _ in $(seq 50); do alive "$APP_PID" || break; sleep 0.1; done
+  alive "$APP_PID" && kill -9 "$APP_PID"
+  start_app
+  sed -i "s/^APP_PID=.*/APP_PID=$APP_PID/" "$R/run.env"
+  echo "app restarted: $APP_PID"
+}
+
 # stop: kill what launch started, delete scratch (settings, caches, Xvfb), keep evidence.
 cmd_stop() {
   load
@@ -155,6 +170,6 @@ cmd_stop() {
 }
 
 case ${1:-} in
-  build|launch|doctor|wait|click|rclick|xy|move|key|type|text|shot|api|env|stop) c=$1; shift; "cmd_$c" "$@" ;;
+  build|launch|restart|doctor|wait|click|rclick|xy|move|key|type|text|shot|api|env|stop) c=$1; shift; "cmd_$c" "$@" ;;
   *) sed -n '/^## Helper commands/,/^## /p' "$SKILL_DIR/SKILL.md" | sed '$d'; exit 2 ;;
 esac

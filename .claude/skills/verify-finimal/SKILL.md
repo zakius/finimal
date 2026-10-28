@@ -53,6 +53,7 @@ Compose Desktop exposes no accessibility tree on Linux, so the handle is the vis
 finimal-verify build                 build jars, record the java command line
 finimal-verify launch [user] [pass]  new run: Xvfb, seeded login, app; waits for the Libraries screen
 finimal-verify launch --logged-out   new run with no login; waits for the Login screen
+finimal-verify restart               quit and start the app again on the same settings (cold-start paths)
 finimal-verify doctor                read-only health check of the current run
 finimal-verify text                  OCR the screen: "x y text" per line
 finimal-verify wait <text> [secs]    wait until OCR sees <text> (default 30 s); exit 1 on timeout

@@ -390,6 +390,8 @@ private fun VideoSurface(
     val fullscreen = window?.fullscreen == true
     fun toggleFullscreen() { window?.toggleFullscreen() }
     var controls by remember { mutableStateOf(true) }
+    // While the ⋮ menu is open, keys are the menu's: Esc closes it, the arrows move through it.
+    var menu by remember { mutableStateOf(false) }
     var lastInteraction by remember { mutableLongStateOf(System.currentTimeMillis()) }
     var overlay by remember { mutableStateOf<String?>(null) }
     val positionMs = (mpv.position * 1000).toLong()
@@ -402,7 +404,7 @@ private fun VideoSurface(
     fun volumeBy(step: Double) {
         val v = (mpv.volume + step).coerceIn(0.0, 130.0)
         mpv.set("volume", "$v")
-        overlay = "Volume ${v.toInt()}%"
+        overlay = "Volume ${v.toInt()}%" + if (mpv.muted) " · muted" else ""
     }
     fun interact() { lastInteraction = System.currentTimeMillis(); controls = true }
 
@@ -427,8 +429,9 @@ private fun VideoSurface(
 
     // At the window, not on a focused node: covered screens stay composed and can keep focus, and menus take it.
     val keys by rememberUpdatedState { e: KeyEvent ->
+        if (menu) false
         // The release too: a focused button would otherwise click on it (Space), undoing the toggle.
-        if (e.type == KeyEventType.KeyUp) e.key in playerKeys
+        else if (e.type == KeyEventType.KeyUp) e.key in playerKeys
         else if (e.type != KeyEventType.KeyDown) false
         else {
             interact()
@@ -438,7 +441,7 @@ private fun VideoSurface(
                 Key.DirectionRight, Key.L -> { seekBy(step); true }
                 Key.DirectionUp -> { volumeBy(5.0); true }
                 Key.DirectionDown -> { volumeBy(-5.0); true }
-                Key.M -> { mpv.command("cycle", "mute"); true }
+                Key.M -> { mpv.set("mute", if (mpv.muted) "no" else "yes"); overlay = if (mpv.muted) "Volume ${mpv.volume.toInt()}%" else "Muted"; true }
                 Key.F -> { toggleFullscreen(); true }
                 Key.N, Key.MediaNext -> { next?.let { onPlay(it.id.toString()) }; true }
                 Key.PageUp, Key.PageDown -> {
@@ -507,7 +510,7 @@ private fun VideoSurface(
                 FilledTonalButton(onClick = onBack) { Text("Back") }
             }
         } else if (controls) {
-            Controls(mpv, item, positionMs, durationMs, title, transcoding, fullscreen, skip, next,
+            Controls(mpv, item, positionMs, durationMs, title, transcoding, fullscreen, skip, next, menu, { menu = it },
                 onBack, ::toggleFullscreen, onSeek, onPlay, onTracksChosen, onInteraction = ::interact)
         }
     }
@@ -524,6 +527,8 @@ private fun Controls(
     fullscreen: Boolean,
     skip: Skip?,
     next: BaseItemDto?,
+    menu: Boolean,
+    onMenu: (Boolean) -> Unit,
     onBack: () -> Unit,
     onToggleFullscreen: () -> Unit,
     onSeek: (Long, Boolean) -> Unit,
@@ -531,14 +536,15 @@ private fun Controls(
     onTracksChosen: (String?, String?) -> Unit,
     onInteraction: () -> Unit,
 ) {
-    var menu by remember { mutableStateOf(false) }
     var sub by remember { mutableStateOf<String?>(null) }
     var tracks by remember { mutableStateOf<List<Mpv.Track>>(emptyList()) }
     var dragging by remember { mutableFloatStateOf(-1f) }
     val chapters = remember(item) { chapters(item) }
     LaunchedEffect(menu) { while (menu) { onInteraction(); delay(1_000) } }
+    // The end or an error screen can take the controls' place with the menu open; keys must not stay the menu's.
+    DisposableEffect(Unit) { onDispose { onMenu(false) } }
     LaunchedEffect(sub, mpv.tracksChanged) { if (sub == "audio" || sub == "text") tracks = withContext(Dispatchers.IO) { mpv.tracks() } }
-    fun close() { menu = false; sub = null }
+    fun close() { onMenu(false); sub = null }
     Box(Modifier.fillMaxSize().background(Color(0x55000000))) {
         Row(Modifier.align(Alignment.TopStart).fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = Color.White) }
@@ -547,7 +553,7 @@ private fun Controls(
                 if (transcoding) Text("Transcoding to fit the \"Direct play up to\" setting", color = Color.White, style = MaterialTheme.typography.labelSmall)
             }
             Box {
-                IconButton(onClick = { menu = true; onInteraction() }) { Icon(Icons.Default.MoreVert, "Menu", tint = Color.White) }
+                IconButton(onClick = { onMenu(true); onInteraction() }) { Icon(Icons.Default.MoreVert, "Menu", tint = Color.White) }
                 DropdownMenu(expanded = menu, onDismissRequest = ::close) {
                     when (sub) {
                         null -> {
