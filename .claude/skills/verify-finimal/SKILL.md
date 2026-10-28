@@ -29,7 +29,7 @@ $V launch --logged-out   # no seeded login: the app opens on the Login screen (r
 
 `build` runs `:desktop:printRunCommand` from `run-command.init.gradle.kts` (an init script, so the repo's build files stay untouched). It writes the exact command `./gradlew :desktop:run` would execute to `desktop/build/verify-run-command.txt`. `launch` builds first if that file is missing.
 
-`launch` creates a run under `/tmp/finimal-verify/<run-id>/`. It starts its own `Xvfb` on the first free display from `:77` (1600x1000). It logs in to the server with curl and seeds `settings.json` with the keys a UI login writes (`baseUrl`, `token`, dashed `userId`, `accounts`, `deviceId`). Then it starts the app with private `XDG_CONFIG_HOME`, `XDG_DATA_HOME` and `XDG_CACHE_HOME` and `FINIMAL_MPV_LOG`. It prints `ready` only after OCR sees the `Movies` library on the Libraries screen, so ready means usable, not just a window. A failed launch leaves `launch-failed.png` and `app.log` in the evidence dir. Cold start takes about 5 s at low load.
+`launch` creates a run under `~/.cache/finimal-verify/<run-id>/` (`FV_ROOT` overrides it; not `/tmp`, a RAM tmpfs here). It starts its own `Xvfb` on the first free display from `:77` (1600x1000). It logs in to the server with curl and seeds `settings.json` with the keys a UI login writes (`baseUrl`, `token`, dashed `userId`, `accounts`, `deviceId`). Then it starts the app with private `XDG_CONFIG_HOME`, `XDG_DATA_HOME` and `XDG_CACHE_HOME` and `FINIMAL_MPV_LOG`. It prints `ready` only after OCR sees the `Movies` library on the Libraries screen, so ready means usable, not just a window. A failed launch leaves `launch-failed.png` and `app.log` in the evidence dir. Cold start takes about 5 s at low load.
 
 Each launch is a separate run, so two runs can coexist. Commands act on the last launched run; set `FV_RUN=<run-id>` to address another one. The server is shared, so two runs that change the same item's played state interfere.
 
@@ -53,7 +53,7 @@ Compose Desktop exposes no accessibility tree on Linux, so the handle is the vis
 finimal-verify build                 build jars, record the java command line
 finimal-verify launch [user] [pass]  new run: Xvfb, seeded login, app; waits for the Libraries screen
 finimal-verify launch --logged-out   new run with no login; waits for the Login screen
-finimal-verify restart               quit and start the app again on the same settings (cold-start paths)
+finimal-verify restart               quit and start the app again on the same settings (cold-start paths); wait for a label after it
 finimal-verify doctor                read-only health check of the current run
 finimal-verify text                  OCR the screen: "x y text" per line
 finimal-verify wait <text> [secs]    wait until OCR sees <text> (default 30 s); exit 1 on timeout
@@ -78,7 +78,7 @@ Driving rules:
 
 ## Evidence
 
-Everything goes to `/tmp/finimal-verify/<run-id>/evidence/`, and `stop` keeps it: `app.log` (stdout and stderr of the app), `mpv.log` (mpv's verbose log once something plays), and the `shot` pairs of `<name>.png` and `<name>.txt`.
+Everything goes to `~/.cache/finimal-verify/<run-id>/evidence/`, and `stop` keeps it: `app.log` (stdout and stderr of the app), `mpv.log` (mpv's verbose log once something plays), and the `shot` pairs of `<name>.png` and `<name>.txt`.
 
 Proof standards:
 

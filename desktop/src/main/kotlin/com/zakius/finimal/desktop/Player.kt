@@ -441,7 +441,8 @@ private fun VideoSurface(
                 Key.DirectionRight, Key.L -> { seekBy(step); true }
                 Key.DirectionUp -> { volumeBy(5.0); true }
                 Key.DirectionDown -> { volumeBy(-5.0); true }
-                Key.M -> { mpv.set("mute", if (mpv.muted) "no" else "yes"); overlay = if (mpv.muted) "Volume ${mpv.volume.toInt()}%" else "Muted"; true }
+                // cycle, not a set from [Mpv.muted]: that arrives late, and two quick presses would both mute.
+                Key.M -> { mpv.command("cycle", "mute"); overlay = if (mpv.muted) "Volume ${mpv.volume.toInt()}%" else "Muted"; true }
                 Key.F -> { toggleFullscreen(); true }
                 Key.N, Key.MediaNext -> { next?.let { onPlay(it.id.toString()) }; true }
                 Key.PageUp, Key.PageDown -> {

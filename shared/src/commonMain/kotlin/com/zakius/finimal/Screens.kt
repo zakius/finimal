@@ -30,6 +30,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -359,7 +360,7 @@ fun ErrorText(sentence: String, raw: String?, color: Color = Color.Unspecified) 
 }
 
 @Composable
-private fun Loaded(load: Load, onRetry: () -> Unit, onDownloads: () -> Unit, content: @Composable (List<BaseItemDto>) -> Unit) {
+private fun Loaded(load: Load, onRetry: () -> Unit, onDownloads: () -> Unit, content: @Composable (List<BaseItemDto>, PaddingValues) -> Unit) {
     val result = load.result
     when {
         result == null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
@@ -373,8 +374,9 @@ private fun Loaded(load: Load, onRetry: () -> Unit, onDownloads: () -> Unit, con
             }
         }
         // The note about a failed refresh lies over the list's bottom: pushing the list down would move what is under the pointer.
+        // The list gets that much padding at its end, so its last rows can still scroll (and D-pad focus) out from under it.
         else -> Box(Modifier.fillMaxSize()) {
-            content(result.getOrThrow())
+            content(result.getOrThrow(), PaddingValues(bottom = if (load.refreshError != null) 48.dp else 0.dp))
             load.refreshError?.let { e ->
                 if (unreachable(e)) RetryOnNewNetwork(onRetry)
                 Row(Modifier.align(Alignment.BottomCenter).fillMaxWidth().background(MaterialTheme.colorScheme.surfaceVariant).padding(start = 16.dp),
@@ -478,9 +480,9 @@ fun LibrariesScreen(modifier: Modifier, push: (Screen) -> Unit) {
             IconButton(onClick = { push(Screen.Settings) }) { Icon(LocalIcons.current.settings, "Settings") }
             IconButton(onClick = { push(Screen.Accounts) }) { Avatar(me?.name.orEmpty(), Modifier.semantics { contentDescription = "Accounts" }) }
         }
-        Loaded(libs, { refresh++ }, { push(Screen.Downloads) }) { list ->
+        Loaded(libs, { refresh++ }, { push(Screen.Downloads) }) { list, pad ->
             if (list.isEmpty()) Empty("No movie or TV libraries on this server")
-            else LazyColumn {
+            else LazyColumn(contentPadding = pad) {
                 items(list, key = { it.id }) { lib ->
                     Text(lib.name.orEmpty(), style = MaterialTheme.typography.titleLarge,
                         modifier = Modifier.fillMaxWidth().focusMemory(lib.id).combinedClickable(onClick = { push(Screen.Library(lib.id.toString(), lib.name.orEmpty())) }).padding(20.dp))
@@ -522,14 +524,14 @@ fun LibraryScreen(modifier: Modifier, screen: Screen.Library, push: (Screen) -> 
         val scope = rememberCoroutineScope()
         // Outside Loaded, so the scroll survives its "Loading…" pass; a new sort, filter or query starts at the top.
         val gridState = rememberSaveable(sort, unplayed, query, saver = LazyGridState.Saver) { LazyGridState() }
-        Loaded(items, { refresh++ }, { push(Screen.Downloads) }) { list ->
+        Loaded(items, { refresh++ }, { push(Screen.Downloads) }) { list, pad ->
             if (list.isEmpty()) Empty(when {
                 query.isNotBlank() -> "No results for “${query.trim()}”"
                 searchOnly -> "Type to search"
                 unplayed -> "Nothing unplayed here"
                 else -> "This library is empty"
             })
-            else LazyVerticalGrid(GridCells.Adaptive(if (App.tv) 150.dp else if (smallestWidthDp() >= 600) 140.dp else 110.dp), Modifier.fillMaxSize().padding(8.dp), gridState,
+            else LazyVerticalGrid(GridCells.Adaptive(if (App.tv) 150.dp else if (smallestWidthDp() >= 600) 140.dp else 110.dp), Modifier.fillMaxSize().padding(8.dp), gridState, pad,
                 horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 items(list, key = { it.id }) { item ->
                     if (item.type == BaseItemKind.SERIES) Poster(item, null, onClick = { push(Screen.Series(item.id.toString(), item.name.orEmpty())) })
@@ -601,8 +603,8 @@ fun SeriesScreen(modifier: Modifier, screen: Screen.Series, push: (Screen) -> Un
     val all = episodes.result?.getOrNull()
     val onlySeason = seasons.result?.getOrNull()?.singleOrNull()
     val shownEpisodes = onlySeason?.let { s -> all?.filter { it.seasonId == s.id } }
-    // With one season the rows are its episodes; with several, "all" is every episode of the series.
-    val markable = (shownEpisodes ?: all)?.takeIf { it.isNotEmpty() }
+    // With one season the rows are its episodes; with several, "all" is the series' episodes outside specials.
+    val markable = (shownEpisodes ?: all?.filter { it.parentIndexNumber != 0 && it.locationType != LocationType.VIRTUAL })?.takeIf { it.isNotEmpty() }
     Column(modifier.fillMaxSize()) {
         Bar(screen.name, pop) {
             if (App.downloads != null || markable != null) BarMenu { close ->
@@ -624,9 +626,9 @@ fun SeriesScreen(modifier: Modifier, screen: Screen.Series, push: (Screen) -> Un
             }
         }
         val listState = rememberLazyListState() // outside Loaded, so the scroll survives its "Loading…" pass
-        Loaded(seasons, { refresh++ }, { push(Screen.Downloads) }) { list ->
+        Loaded(seasons, { refresh++ }, { push(Screen.Downloads) }) { list, pad ->
             if (list.isEmpty()) Empty("This series has no seasons")
-            else if (shownEpisodes != null) LazyColumn(state = listState) {
+            else if (shownEpisodes != null) LazyColumn(state = listState, contentPadding = pad) {
                 items(shownEpisodes, key = { it.id }) { ep ->
                     EpisodeRow(ep, statuses?.get(ep.id.toString()),
                         onPlay = { push(Screen.Play(ep.id.toString())) },
@@ -634,7 +636,7 @@ fun SeriesScreen(modifier: Modifier, screen: Screen.Series, push: (Screen) -> Un
                         onChanged = { refresh++ })
                 }
             }
-            else LazyColumn(state = listState) {
+            else LazyColumn(state = listState, contentPadding = pad) {
                 items(list, key = { it.id }) { season ->
                     Row(Modifier.fillMaxWidth().focusMemory(season.id).combinedClickable(onClick = {
                         push(Screen.Season(screen.id, season.id.toString(), "${screen.name} · ${season.name}"))
@@ -670,7 +672,7 @@ fun SeasonScreen(modifier: Modifier, screen: Screen.Season, push: (Screen) -> Un
     }
     Column(modifier.fillMaxSize()) {
         Bar(screen.name, pop) {
-            BarMenu { close ->
+            if (App.downloads != null || !list.isNullOrEmpty()) BarMenu { close ->
                 if (App.downloads != null) DropdownMenuItem({ Text("Download season") }, { close(); downloadAll() })
                 list?.takeIf { it.isNotEmpty() }?.let { eps ->
                     val played = eps.all { it.localState().first?.played == true }
@@ -678,9 +680,9 @@ fun SeasonScreen(modifier: Modifier, screen: Screen.Season, push: (Screen) -> Un
                 }
             }
         }
-        Loaded(episodes, { refresh++ }, { push(Screen.Downloads) }) { list ->
+        Loaded(episodes, { refresh++ }, { push(Screen.Downloads) }) { list, pad ->
             if (list.isEmpty()) Empty("This season has no episodes")
-            else LazyColumn(state = listState) {
+            else LazyColumn(state = listState, contentPadding = pad) {
                 items(list, key = { it.id }) { ep ->
                     EpisodeRow(
                         ep,
@@ -990,7 +992,7 @@ private fun Stepper(label: String, value: Int, options: List<Int>, show: (Int) -
         Text(label, Modifier.weight(1f))
         TextButton(onClick = { set(options[i - 1]) }, enabled = i > 0) { Text("−", Modifier.semantics { contentDescription = "Decrease $label, now ${show(options[i])}" }) }
         // A fixed width: "−" must not move under the pointer when the value gets a digit longer.
-        Text(show(options[i]), Modifier.width(48.dp), textAlign = TextAlign.Center)
+        Text(show(options[i]), Modifier.widthIn(min = 48.dp), textAlign = TextAlign.Center, maxLines = 1)
         TextButton(onClick = { set(options[i + 1]) }, enabled = i < options.lastIndex) { Text("+", Modifier.semantics { contentDescription = "Increase $label, now ${show(options[i])}" }) }
     }
 
@@ -1069,10 +1071,11 @@ private fun PinDialog(title: String, onDismiss: () -> Unit, onPin: (String) -> B
     var pin by remember { mutableStateOf("") }
     var wrong by remember { mutableStateOf(false) }
     val ok = pin.length in 4..8
-    fun submit() { if (!onPin(pin)) { wrong = true; pin = "" } }
     // Typing goes straight in, from a keyboard or a TV remote's number keys.
     val focus = remember { FocusRequester() }
     LaunchedEffect(Unit) { focus.requestFocus() }
+    // A wrong PIN clears; focus goes back to the field, as the now disabled OK can't keep it.
+    fun submit() { if (!onPin(pin)) { wrong = true; pin = ""; focus.requestFocus() } }
     AlertDialog(onDismiss,
         title = { Text(title) },
         text = {
