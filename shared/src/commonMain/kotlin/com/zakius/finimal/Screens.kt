@@ -98,6 +98,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
@@ -371,7 +372,10 @@ private fun Loaded(load: Load, onRetry: () -> Unit, onDownloads: () -> Unit, con
                 if (App.downloads != null) TextButton(onClick = onDownloads) { Text("Downloads") }
             }
         }
+        // The note about a failed refresh goes under the list, which shrinks from below: a note above it would push down
+        // what is under the pointer.
         else -> Column(Modifier.fillMaxSize()) {
+            Box(Modifier.weight(1f)) { content(result.getOrThrow()) }
             load.refreshError?.let { e ->
                 if (unreachable(e)) RetryOnNewNetwork(onRetry)
                 Row(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceVariant).padding(start = 16.dp),
@@ -380,7 +384,6 @@ private fun Loaded(load: Load, onRetry: () -> Unit, onDownloads: () -> Unit, con
                     TextButton(onClick = onRetry) { Text("Retry") }
                 }
             }
-            content(result.getOrThrow())
         }
     }
 }
@@ -407,7 +410,7 @@ fun LoginScreen(modifier: Modifier, onBack: (() -> Unit)? = null, onDone: () -> 
     var showPass by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val portOk = isValidPort(port.trim())
-    val canSubmit = portOk && url.isNotBlank()
+    val canSubmit = portOk && url.isNotBlank() && user.isNotBlank()
     fun submit() {
         if (busy || !canSubmit) return
         busy = true
@@ -512,7 +515,8 @@ fun LibraryScreen(modifier: Modifier, screen: Screen.Library, push: (Screen) -> 
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
             keyboardActions = KeyboardActions(onSearch = { query = search; keyboard?.hide() }))
         if (!searchOnly) Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Sort.entries.forEach { s -> FilterChip(sort == s, { sort = s }, { Text(s.label) }) }
+            // The server orders search results by how well they match, whatever the sort.
+            Sort.entries.forEach { s -> FilterChip(sort == s, { sort = s }, { Text(s.label) }, enabled = query.isBlank()) }
             FilterChip(unplayed, { unplayed = !unplayed }, { Text("Unplayed") })
         }
         val statuses = rememberDownloadStatuses()
@@ -576,10 +580,10 @@ private fun Poster(
                     .semantics { contentDescription = if (it == "✓") "Played" else "$it unplayed" })
             }
             if (unsynced) Text("not synced", color = Color.White, style = MaterialTheme.typography.labelSmall,
-                modifier = Modifier.align(Alignment.BottomStart).background(Color(0xAA000000)))
+                modifier = Modifier.align(Alignment.BottomStart).padding(bottom = if (focused) 7.dp else 4.dp).background(Color(0xAA000000)))
+            ProgressBar(item, state, Modifier.align(Alignment.BottomStart).padding(if (focused) 3.dp else 0.dp)) // inside the focus border
             onChanged?.let { ItemMenu(item, state?.played == true, unsynced, menu, { menu = false }, download != null, onStartOver, it) }
         }
-        ProgressBar(item, state)
         Text(item.name.orEmpty(), maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall)
     }
 }
@@ -598,11 +602,13 @@ fun SeriesScreen(modifier: Modifier, screen: Screen.Series, push: (Screen) -> Un
     val all = episodes.result?.getOrNull()
     val onlySeason = seasons.result?.getOrNull()?.singleOrNull()
     val shownEpisodes = onlySeason?.let { s -> all?.filter { it.seasonId == s.id } }
+    // With one season the rows are its episodes; with several, "all" is the series' episodes outside specials.
+    val markable = (shownEpisodes ?: all?.filter { it.parentIndexNumber != 0 && it.locationType != LocationType.VIRTUAL })?.takeIf { it.isNotEmpty() }
     Column(modifier.fillMaxSize()) {
         Bar(screen.name, pop) {
-            BarMenu { close ->
+            if (App.downloads != null || markable != null) BarMenu { close ->
                 if (App.downloads != null) DropdownMenuItem({ Text("Download all") }, { close(); downloadAll() })
-                shownEpisodes?.let { eps ->
+                markable?.let { eps ->
                     val played = eps.all { it.localState().first?.played == true }
                     DropdownMenuItem({ Text(if (played) "Mark all unplayed" else "Mark all played") }, { close(); markAll(eps) })
                 }
@@ -665,7 +671,7 @@ fun SeasonScreen(modifier: Modifier, screen: Screen.Season, push: (Screen) -> Un
     }
     Column(modifier.fillMaxSize()) {
         Bar(screen.name, pop) {
-            BarMenu { close ->
+            if (App.downloads != null || !list.isNullOrEmpty()) BarMenu { close ->
                 if (App.downloads != null) DropdownMenuItem({ Text("Download season") }, { close(); downloadAll() })
                 list?.takeIf { it.isNotEmpty() }?.let { eps ->
                     val played = eps.all { it.localState().first?.played == true }
@@ -726,10 +732,10 @@ fun EpisodeRow(
             .padding(8.dp),
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Column(Modifier.width(140.dp)) {
+        Box(Modifier.width(140.dp)) {
             AsyncImage(App.server.imageUrl(ep, ImageType.PRIMARY, 320), null, contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9).background(Color.DarkGray))
-            ProgressBar(ep, state)
+            ProgressBar(ep, state, Modifier.align(Alignment.BottomStart))
         }
         Column(Modifier.weight(1f)) {
             Text(listOfNotNull(ep.indexNumber?.let { "$it." }, ep.name).joinToString(" "), style = MaterialTheme.typography.titleSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
@@ -749,10 +755,10 @@ fun EpisodeRow(
 }
 
 @Composable
-private fun ProgressBar(item: BaseItemDto, state: PlayState?) {
+private fun ProgressBar(item: BaseItemDto, state: PlayState?, modifier: Modifier = Modifier) {
     val runtime = item.runTimeTicks ?: 0
     if (state != null && state.positionTicks > 0 && runtime > 0) {
-        LinearProgressIndicator({ state.positionTicks.toFloat() / runtime }, Modifier.fillMaxWidth())
+        LinearProgressIndicator({ state.positionTicks.toFloat() / runtime }, modifier.fillMaxWidth())
     }
 }
 
@@ -984,7 +990,8 @@ private fun Stepper(label: String, value: Int, options: List<Int>, show: (Int) -
         val i = options.indices.minBy { abs(options[it] - value) }
         Text(label, Modifier.weight(1f))
         TextButton(onClick = { set(options[i - 1]) }, enabled = i > 0) { Text("−", Modifier.semantics { contentDescription = "Decrease $label, now ${show(options[i])}" }) }
-        Text(show(options[i]))
+        // A fixed width: "−" must not move under the pointer when the value gets a digit longer.
+        Text(show(options[i]), Modifier.widthIn(min = 48.dp), textAlign = TextAlign.Center, maxLines = 1)
         TextButton(onClick = { set(options[i + 1]) }, enabled = i < options.lastIndex) { Text("+", Modifier.semantics { contentDescription = "Increase $label, now ${show(options[i])}" }) }
     }
 
@@ -1066,15 +1073,17 @@ private fun PinDialog(title: String, onDismiss: () -> Unit, onPin: (String) -> B
     // Typing goes straight in, from a keyboard or a TV remote's number keys.
     val focus = remember { FocusRequester() }
     LaunchedEffect(Unit) { focus.requestFocus() }
+    // A wrong PIN clears; focus goes back to the field, as the now disabled OK can't keep it.
+    fun submit() { if (!onPin(pin)) { wrong = true; pin = ""; focus.requestFocus() } }
     AlertDialog(onDismiss,
         title = { Text(title) },
         text = {
             OutlinedTextField(pin, { pin = it.filter(Char::isDigit).take(8); wrong = false }, singleLine = true, isError = wrong,
-                label = { Text("PIN") }, supportingText = { if (wrong) Text("Wrong PIN") }, modifier = Modifier.focusRequester(focus),
+                label = { Text("PIN") }, supportingText = { Text(if (wrong) "Wrong PIN" else "4 to 8 digits") }, modifier = Modifier.focusRequester(focus),
                 visualTransformation = PasswordVisualTransformation(),
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword, imeAction = ImeAction.Done),
-                keyboardActions = KeyboardActions(onDone = { if (ok) wrong = !onPin(pin) }))
+                keyboardActions = KeyboardActions(onDone = { if (ok) submit() }))
         },
-        confirmButton = { TextButton(onClick = { wrong = !onPin(pin) }, enabled = ok) { Text("OK") } },
+        confirmButton = { TextButton(onClick = ::submit, enabled = ok) { Text("OK") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
 }

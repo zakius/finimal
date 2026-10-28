@@ -30,4 +30,5 @@ Preconditions:
 
 - The PIN and the account list are local to the run's settings file. The server never sees them, so the proof is the dialog behavior plus `settings.json` (`accounts` has a `pin` of the form `salt:hash`).
 - The gear and the avatar are icons without text. Use the coordinates from `SKILL.md`. They hold for the default 1280x800 window only.
-- Only the Open step was driven while this map was written. The add, PIN and switch steps follow `Screens.kt` (`AccountsScreen`, `PinDialog`) and have not been run yet.
+- The PIN dialog's `OK` (dark text on a light button) and the `Mark`/`Log out` buttons of confirm dialogs share a line with the dialog text in OCR, so `click` can hit the text. Press `Return` in the PIN field, or use `xy` on the button.
+- `restart` brings the app up again on the same settings, which is how to reach `accounts-start`.
