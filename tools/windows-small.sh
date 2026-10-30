@@ -52,7 +52,7 @@ rm -rf "$small/runtime"
 find "$small" -name libmpv-2.dll -delete
 rm -f "$small/finimal.exe" # jpackage's launcher, read-only
 cp "$tmp/finimal.exe" "$small/finimal.exe"
-(cd "$(dirname "$small")" && 7z a -tzip -mx=9 "$OLDPWD/dist/finimal-$version-windows-x64.zip" finimal > /dev/null)
+(cd "$(dirname "$small")" && 7z a -tzip "$OLDPWD/dist/finimal-$version-windows-x64.zip" finimal > /dev/null)
 
 # The installer around it, as packageReleaseMsi makes the full one (desktop/build.gradle.kts): the same upgrade code,
 # so either build replaces the other.

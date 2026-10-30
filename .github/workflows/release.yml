@@ -173,22 +173,25 @@ jobs:
       # mirror was slow.
       - run: tools/linux-packages.sh --no-gradle
       # In clean containers, not on the runner: no background upgrades holding apt, and no preinstalled JDKs to hide
-      # what a user's system lacks. One step each, with its own limit.
+      # what a user's system lacks. All three run at once; each has a step that shows its output, with its own limit.
+      # --init: with timeout as a container's first process (bash execs the last command), Fedora's exited 125.
+      - name: Start the install checks
+        timeout-minutes: 5
+        run: |
+          deb='apt-get update -q > /dev/null && apt-get install -y -q /dist/finimal_*_amd64.deb > /tmp/apt.log || { tail -40 /tmp/apt.log; exit 1; }; timeout 120 finimal --check-player'
+          docker run -d --init --name ubuntu -e DEBIAN_FRONTEND=noninteractive -v "$PWD/dist:/dist:ro" ubuntu:26.04 bash -c "$deb" &
+          docker run -d --init --name debian -e DEBIAN_FRONTEND=noninteractive -v "$PWD/dist:/dist:ro" debian:trixie bash -c "$deb" &
+          docker run -d --init --name fedora -v "$PWD/dist:/dist:ro" fedora:latest bash -c 'dnf -q -y install /dist/finimal-*.rpm && timeout 120 finimal --check-player' &
+          wait
       - name: Install the .deb on Ubuntu 26.04 and check the player
         timeout-minutes: 10
-        run: docker run --rm -e DEBIAN_FRONTEND=noninteractive -v "$PWD/dist:/dist:ro" ubuntu:26.04 bash -c 'apt-get update -q > /dev/null && apt-get install -y -q /dist/finimal_*_amd64.deb > /tmp/apt.log || { tail -40 /tmp/apt.log; exit 1; }; timeout 120 finimal --check-player'
+        run: docker logs -f ubuntu; exit $(docker wait ubuntu)
       - name: Install the .deb on Debian 13 and check the player
         timeout-minutes: 10
-        run: docker run --rm -e DEBIAN_FRONTEND=noninteractive -v "$PWD/dist:/dist:ro" debian:trixie bash -c 'apt-get update -q > /dev/null && apt-get install -y -q /dist/finimal_*_amd64.deb > /tmp/apt.log || { tail -40 /tmp/apt.log; exit 1; }; timeout 120 finimal --check-player'
-      - name: Start Fedora
-        timeout-minutes: 5
-        run: docker run -d --name fedora -v "$PWD/dist:/dist:ro" fedora:latest sleep infinity
-      - name: Install the .rpm on Fedora
+        run: docker logs -f debian; exit $(docker wait debian)
+      - name: Install the .rpm on Fedora and check the player
         timeout-minutes: 10
-        run: docker exec fedora bash -c 'dnf -q -y install /dist/finimal-*.rpm'
-      - name: Check the player from the .rpm
-        timeout-minutes: 3
-        run: docker exec fedora timeout 120 finimal --check-player
+        run: docker logs -f fedora; exit $(docker wait fedora)
       - uses: actions/upload-artifact@v7
         with:
           name: linux-packages
@@ -220,6 +223,11 @@ jobs:
           key: libmpv-windows-${{ hashFiles('tools/fetch-libmpv-windows.sh') }}
       - if: steps.libmpv.outputs.cache-hit != 'true'
         run: tools/fetch-libmpv-windows.sh
+      # jpackage's WiX toolset, which the Compose plugin downloads (about 30 s) unless this zip is there.
+      - uses: actions/cache@v5
+        with:
+          path: ${{ env.GRADLE_USER_HOME }}/compose-jb/wix311.zip
+          key: wix311
       - run: ./gradlew :desktop:packageReleaseMsi :desktop:createReleaseDistributable
       # The launcher is a windowed program: run from bash it neither waited for the app nor passed on its result. Start-
       # Process waits for it and keeps its output and exit code.
@@ -253,12 +261,13 @@ jobs:
           [System.Drawing.Graphics]::FromImage($bmp).CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
           $bmp.Save("$PWD/windows-screen.png")
           Stop-Process $app
+      # 7z's default level for both zips: -mx=9 took about a minute longer here for a zip 1% smaller.
       - name: Package the full build
         run: |
           version=$(sed -n 's/^finimal.versionName=//p' gradle.properties)
           mkdir -p dist
           cp desktop/build/compose/binaries/main-release/msi/*.msi "dist/finimal-$version-x64-full.msi"
-          (cd desktop/build/compose/binaries/main-release/app && 7z a -tzip -mx=9 "$OLDPWD/dist/finimal-$version-windows-x64-full.zip" finimal > /dev/null)
+          (cd desktop/build/compose/binaries/main-release/app && 7z a -tzip "$OLDPWD/dist/finimal-$version-windows-x64-full.zip" finimal > /dev/null)
           ls -l dist
       - name: Package the small build
         env:
