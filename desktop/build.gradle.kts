@@ -1,6 +1,9 @@
 // The desktop app: the shared UI in a window, playback through libmpv.
 import org.jetbrains.compose.desktop.application.dsl.TargetFormat
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import java.util.Arrays
 
 plugins {
     id("org.jetbrains.kotlin.jvm")
@@ -75,14 +78,70 @@ compose.desktop {
     }
 }
 
-// Linux: Skia's symbol table (3 MB). Its exported symbols stay; the Java runtime keeps its own for crash logs.
+// Skia's library (Linux; on Windows its icudtl.dat) carries ICU's whole data (10.4 MB) and reads only its line, word
+// and character breaking. The rest (collation, time zones, locale names, converters, the Chinese/Japanese word
+// dictionary) goes: the blob keeps its place and size, its table of contents lists only what stays, and what's freed
+// is zeros, which the packages' compression takes out. :desktop:skiaCheck shows text lays out as with the full data.
+// Without the dictionary, word steps (Ctrl+arrow, double-click) in Chinese and Japanese go one character at a time.
+fun trimSkiaIcu(lib: File) {
+    val bytes = lib.readBytes()
+    val b = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+    // ICU's common data: a header ("CmnD" at 12), then the table: count, (name offset, data offset) pairs, the names,
+    // the items in name order, each up to where the next begins. Offsets count from the table.
+    val header = (0 until bytes.size - 16).single { i ->
+        bytes[i + 2] == 0xda.toByte() && bytes[i + 3] == 0x27.toByte() && String(bytes, i + 12, 4) == "CmnD"
+    }
+    val toc = header + b.getShort(header).toInt()
+    val count = b.getInt(toc)
+    fun name(k: Int) = String(bytes, toc + b.getInt(toc + 4 + 8 * k), 64).substringBefore('\u0000').substringAfter('/')
+    fun data(k: Int) = toc + b.getInt(toc + 8 + 8 * k)
+    val keepTop = setOf("root", "pool", "res_index", "supplementalData", "metadata", "icuver", "icustd", "keyTypeData", "langInfo")
+    val kept = (0 until count).filter { k ->
+        val n = name(k)
+        if (n.startsWith("brkitr/")) n != "brkitr/cjdict.dict"
+        else '/' !in n && (n.endsWith(".icu") || n.endsWith(".nrm") || n.removeSuffix(".res") in keepTop)
+    }
+    // The last item's size isn't recorded; it's a locale's (zu_ZA.res), which goes.
+    check(kept.size in 20 until count && count - 1 !in kept) { "${lib.name}: unexpected ICU data" }
+    val out = bytes.copyOf()
+    val o = ByteBuffer.wrap(out).order(ByteOrder.LITTLE_ENDIAN)
+    Arrays.fill(out, toc + 4 + 8 * kept.size, toc + 4 + 8 * count, 0)
+    Arrays.fill(out, data(0), data(count - 1), 0)
+    o.putInt(toc, kept.size)
+    var at = data(0)
+    kept.forEachIndexed { i, k ->
+        o.putInt(toc + 4 + 8 * i, b.getInt(toc + 4 + 8 * k))
+        o.putInt(toc + 8 + 8 * i, at - toc)
+        System.arraycopy(bytes, data(k), out, at, data(k + 1) - data(k))
+        at += data(k + 1) - data(k)
+    }
+    lib.writeBytes(out)
+}
+// Linux: also Skia's symbol table (3 MB). Its exported symbols stay; the Java runtime keeps its own for crash logs.
 tasks.matching { it.name == "createDistributable" || it.name == "createReleaseDistributable" }.configureEach {
     doLast {
+        val libs = outputs.files.asFileTree.matching { include("**/lib/app/*skiko*.so", "**/app/icudtl.dat") }.files
+        check(libs.isNotEmpty()) { "no ICU data of Skia's in ${outputs.files.files}" }
+        libs.forEach(::trimSkiaIcu)
         if (System.getProperty("os.name") != "Linux") return@doLast
-        val libs = outputs.files.asFileTree.matching { include("**/lib/app/*.so") }.files.map { it.path }
-        val strip = ProcessBuilder(listOf("strip", "--strip-unneeded") + libs).inheritIO().start()
+        val strip = ProcessBuilder(listOf("strip", "--strip-unneeded") + libs.map { it.path }).inheritIO().start()
         check(strip.waitFor() == 0) { "strip failed" }
     }
+}
+
+// The original Skia files, for skiaCheck to compare the trimmed ones with, each in a JVM of its own.
+val skiaFull = tasks.register<Copy>("skiaFull") {
+    from({ configurations["runtimeClasspath"].filter { it.name.startsWith("skiko-awt-runtime-") }.map { zipTree(it) } })
+    include("*.so", "*.dll", "icudtl.dat")
+    into(layout.buildDirectory.dir("skia-full"))
+}
+tasks.register<JavaExec>("skiaCheck") {
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass = "com.zakius.finimal.desktop.SkiaCheckKt"
+    val windows = System.getProperty("os.name").startsWith("Windows")
+    val app = "compose/binaries/main-release/app/finimal/" + if (windows) "app" else "lib/app" // jpackage's layouts
+    args(skiaFull.get().destinationDir.path, layout.buildDirectory.dir(app).get().asFile.path)
+    dependsOn(skiaFull, "createReleaseDistributable")
 }
 
 // Compose's default ProGuard rules keep all of Kotlin's standard library, names and all, and with it much that the

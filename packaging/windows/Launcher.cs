@@ -2,7 +2,7 @@
 // newest installed Java 21 or later, with libmpv-2.dll from %APPDATA%\finimal or the PATH. Whatever is missing it
 // downloads once: Eclipse Temurin's JRE to %LOCALAPPDATA%\finimal\java (not runtime: the full build installs its own
 // there), and the libmpv the full build carries to %APPDATA%\finimal, each checked against the SHA-256 pinned at
-// build time (Pins.cs, from tools/windows-small.sh).
+// build time (Pins.cs, from tools/windows-packages.sh).
 // The Java options come from app\finimal.cfg, which jpackage writes for the full build's own launcher.
 // C# 5: the compiler that comes with .NET Framework 4, which every Windows 10 and 11 has, builds it.
 using System;
