@@ -15,6 +15,7 @@ import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.awt.Rectangle
+import java.awt.Toolkit
 
 /** The window, for the player: fullscreen that comes back to what was there before, and the title. */
 val LocalWindow = compositionLocalOf<WindowControl?> { null }
@@ -49,19 +50,34 @@ class WindowControl(val state: WindowState) {
         /** Where and how big the window was when it last moved; centred at 1280×800 the first time or off-screen. */
         fun restore(): WindowControl {
             fun int(key: String) = (store[key] as Number?)?.toInt()
-            val w = int("window.width") ?: 1280
-            val h = int("window.height") ?: 800
-            val x = int("window.x")
-            val y = int("window.y")
-            // A monitor unplugged since would leave it out of reach.
-            val visible = x != null && y != null && runCatching {
-                GraphicsEnvironment.getLocalGraphicsEnvironment().screenDevices.any { it.defaultConfiguration.bounds.intersects(Rectangle(x, y, w, h)) }
-            }.getOrDefault(false)
+            val saved = Rectangle(int("window.x") ?: 0, int("window.y") ?: 0, int("window.width") ?: 1280, int("window.height") ?: 800)
+            val bounds = runCatching {
+                val ge = GraphicsEnvironment.getLocalGraphicsEnvironment()
+                val screens = ge.screenDevices.map { it.defaultConfiguration }.map { c ->
+                    val i = Toolkit.getDefaultToolkit().getScreenInsets(c)
+                    c.bounds.run { Rectangle(x + i.left, y + i.top, width - i.left - i.right, height - i.top - i.bottom) }
+                }
+                fit(saved, int("window.x") != null && int("window.y") != null, ge.maximumWindowBounds, screens)
+            }.getOrNull() // headless
             return WindowControl(WindowState(
                 placement = if (store["window.maximized"] == true) WindowPlacement.Maximized else WindowPlacement.Floating,
-                position = if (visible) WindowPosition(x!!.dp, y!!.dp) else WindowPosition(Alignment.Center),
-                size = DpSize(w.dp, h.dp),
+                position = bounds?.let { WindowPosition(it.x.dp, it.y.dp) } ?: WindowPosition(Alignment.Center),
+                size = (bounds ?: saved).let { DpSize(it.width.dp, it.height.dp) },
             ))
+        }
+
+        /**
+         * [saved] made to fit the free area (less taskbars and panels) of the screen it overlaps, or centred in the main
+         * screen's when it overlaps none (a monitor unplugged since) or has no place yet. A smaller monitor than last
+         * time, or a 768 px laptop, would otherwise leave the window's bottom under the taskbar.
+         */
+        fun fit(saved: Rectangle, placed: Boolean, main: Rectangle, screens: List<Rectangle>): Rectangle {
+            val screen = screens.firstOrNull { placed && it.intersects(saved) }
+            val area = screen ?: main
+            val w = saved.width.coerceAtMost(area.width)
+            val h = saved.height.coerceAtMost(area.height)
+            if (screen == null) return Rectangle(area.x + (area.width - w) / 2, area.y + (area.height - h) / 2, w, h)
+            return Rectangle(saved.x.coerceIn(area.x, area.x + area.width - w), saved.y.coerceIn(area.y, area.y + area.height - h), w, h)
         }
     }
 
