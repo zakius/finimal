@@ -1,13 +1,16 @@
 #!/bin/bash
-# The small Windows build, dist/finimal-<version>-x64.msi and dist/finimal-<version>-windows-x64.zip: the full build's
-# app without its Java runtime and libmpv, started by packaging/windows/Launcher.cs, which finds both on the machine or
-# downloads them once. The image stays in desktop/build/windows-small for CI's checks.
+# The Windows installers, from the release app image (createReleaseDistributable, whose Skia ICU data is trimmed):
+# - dist/finimal-<version>-x64-full.msi, with its own Java runtime and libmpv;
+# - dist/finimal-<version>-x64.msi and dist/finimal-<version>-windows-x64.zip, small: the app without its Java runtime
+#   and libmpv, started by packaging/windows/Launcher.cs, which finds both on the machine or downloads them once. Its
+#   image stays in desktop/build/windows-small for CI's checks.
+# Not packageReleaseMsi's .msi: that task unpacks Skia's files again, untrimmed. It runs first for the WiX toolset.
 # The JRE is pinned here. The libmpv is the full build's (tools/fetch-libmpv-windows.sh), zipped and published once per
 # libmpv build as a release of its own, libmpv-<build>, which needs gh with write access: a pull request that bumps
 # libmpv fails here until the bump reaches main.
 # Runs on Windows (Git Bash) after :desktop:packageReleaseMsi :desktop:createReleaseDistributable, which leave the
 # app image and the WiX toolset jpackage needs.
-# Usage: tools/windows-small.sh
+# Usage: tools/windows-packages.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."
 jre_url=https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12.1%2B1/OpenJDK21U-jre_x64_windows_hotspot_21.0.12.1_1.zip
@@ -54,13 +57,18 @@ rm -f "$small/finimal.exe" # jpackage's launcher, read-only
 cp "$tmp/finimal.exe" "$small/finimal.exe"
 (cd "$(dirname "$small")" && 7z a -tzip "$OLDPWD/dist/finimal-$version-windows-x64.zip" finimal > /dev/null)
 
-# The installer around it, as packageReleaseMsi makes the full one (desktop/build.gradle.kts): the same upgrade code,
-# so either build replaces the other.
+# The installers, as packageReleaseMsi makes them (desktop/build.gradle.kts): the same upgrade code, so either build
+# replaces the other.
 candle=$(find desktop/build build ~/AppData/Local -name candle.exe 2> /dev/null | head -n 1)
 [ -n "$candle" ] || { echo "No WiX toolset (candle.exe) found" >&2; exit 1; }
-PATH="$(dirname "$candle"):$PATH" "$JAVA_HOME/bin/jpackage" --type msi --app-image "$(cygpath -w "$small")" \
-  --name finimal --app-version "$version" --vendor zakius --description "Jellyfin client for movies and TV" \
-  --license-file LICENSE --win-per-user-install --win-menu --win-menu-group finimal --win-shortcut \
-  --win-upgrade-uuid 3f7c2a4e-8b1d-4e6a-9c2f-5d8e1a7b4c90 --dest "$(cygpath -w "$tmp/msi")"
-cp "$tmp"/msi/*.msi "dist/finimal-$version-x64.msi"
-ls -l "dist/finimal-$version-x64.msi" "dist/finimal-$version-windows-x64.zip"
+msi() { # app image, output
+  rm -rf "$tmp/msi"
+  PATH="$(dirname "$candle"):$PATH" "$JAVA_HOME/bin/jpackage" --type msi --app-image "$(cygpath -w "$1")" \
+    --name finimal --app-version "$version" --vendor zakius --description "Jellyfin client for movies and TV" \
+    --license-file LICENSE --win-per-user-install --win-menu --win-menu-group finimal --win-shortcut \
+    --win-upgrade-uuid 3f7c2a4e-8b1d-4e6a-9c2f-5d8e1a7b4c90 --dest "$(cygpath -w "$tmp/msi")"
+  cp "$tmp"/msi/*.msi "$2"
+}
+msi "$small" "dist/finimal-$version-x64.msi"
+msi desktop/build/compose/binaries/main-release/app/finimal "dist/finimal-$version-x64-full.msi"
+ls -l dist/finimal-"$version"-*

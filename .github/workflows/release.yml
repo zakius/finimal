@@ -117,7 +117,8 @@ jobs:
           distribution: temurin
           java-version: 21
       - uses: gradle/actions/setup-gradle@v5
-      - run: ./gradlew :desktop:createReleaseDistributable && tar -C desktop/build/compose/binaries/main-release -cf desktop-image.tar app
+      # skiaCheck: the app image's Skia, its ICU data trimmed, breaks text as the original does (desktop/build.gradle.kts).
+      - run: ./gradlew :desktop:createReleaseDistributable :desktop:skiaCheck && tar -C desktop/build/compose/binaries/main-release -cf desktop-image.tar app
       - uses: actions/upload-artifact@v7
         with:
           name: desktop-image
@@ -200,7 +201,7 @@ jobs:
             dist/finimal-*.rpm
 
   # The Windows app, each as an MSI and a portable zip: the full build carries its Java runtime and libmpv-2.dll
-  # (Windows has no system libmpv); the small one finds or downloads both (tools/windows-small.sh).
+  # (Windows has no system libmpv); the small one finds or downloads both (tools/windows-packages.sh).
   windows:
     runs-on: windows-latest
     timeout-minutes: 40
@@ -228,7 +229,7 @@ jobs:
         with:
           path: ${{ env.GRADLE_USER_HOME }}/compose-jb/wix311.zip
           key: wix311
-      - run: ./gradlew :desktop:packageReleaseMsi :desktop:createReleaseDistributable
+      - run: ./gradlew :desktop:packageReleaseMsi :desktop:createReleaseDistributable :desktop:skiaCheck
       # The launcher is a windowed program: run from bash it neither waited for the app nor passed on its result. Start-
       # Process waits for it and keeps its output and exit code.
       - name: Check the player
@@ -262,17 +263,16 @@ jobs:
           $bmp.Save("$PWD/windows-screen.png")
           Stop-Process $app
       # 7z's default level for both zips: -mx=9 took about a minute longer here for a zip 1% smaller.
-      - name: Package the full build
+      - name: Package the full zip
         run: |
           version=$(sed -n 's/^finimal.versionName=//p' gradle.properties)
           mkdir -p dist
-          cp desktop/build/compose/binaries/main-release/msi/*.msi "dist/finimal-$version-x64-full.msi"
           (cd desktop/build/compose/binaries/main-release/app && 7z a -tzip "$OLDPWD/dist/finimal-$version-windows-x64-full.zip" finimal > /dev/null)
           ls -l dist
-      - name: Package the small build
+      - name: Package the installers and the small build
         env:
           GH_TOKEN: ${{ github.token }}
-        run: tools/windows-small.sh
+        run: tools/windows-packages.sh
       # No Java on the PATH or in JAVA_HOME, no libmpv: the small build downloads them. One the runner registers (it
       # may have its own Java installs) is used instead, which the warning tells.
       - name: Check the small build
