@@ -15,11 +15,17 @@ import java.security.MessageDigest
 // line and character break iterators, and the results are digested for comparison. Word breaking isn't compared,
 // because without the Chinese/Japanese dictionary it splits those languages per character.
 fun main(args: Array<String>) {
-    if (args[0] == "run") return println(digests())
-    fun run(dir: String) = ProcessBuilder(
-        File(System.getProperty("java.home"), "bin/java").path, "-Dskiko.library.path=$dir",
-        "-cp", System.getProperty("java.class.path"), "com.zakius.finimal.desktop.SkiaCheckKt", "run",
-    ).redirectError(ProcessBuilder.Redirect.INHERIT).start().inputStream.bufferedReader().readText().trim()
+    if (args[0] == "run") {
+        println(digests())
+        return
+    }
+    fun run(dir: String): String {
+        val process = ProcessBuilder(
+            File(System.getProperty("java.home"), "bin/java").path, "-Dskiko.library.path=$dir",
+            "-cp", System.getProperty("java.class.path"), "com.zakius.finimal.desktop.SkiaCheckKt", "run",
+        ).redirectError(ProcessBuilder.Redirect.INHERIT).start()
+        return process.inputStream.bufferedReader().readText().trim()
+    }
     val full = run(args[0])
     val trimmed = run(args[1])
     println("full    $full\ntrimmed $trimmed")
@@ -49,7 +55,10 @@ private fun digests(): String {
         for (iterator in listOf(BreakIterator.makeLineInstance(), BreakIterator.makeCharacterInstance())) {
             iterator.setText(text)
             var at = iterator.first()
-            while (at != BreakIterator.DONE) { md.update("$at,".toByteArray()); at = iterator.next() }
+            while (at != BreakIterator.DONE) {
+                md.update("$at,".toByteArray())
+                at = iterator.next()
+            }
             iterator.close()
         }
     }

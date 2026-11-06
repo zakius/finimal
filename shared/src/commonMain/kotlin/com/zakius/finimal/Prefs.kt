@@ -20,7 +20,12 @@ class Prefs(private val p: KeyValueStore) {
     var clockOffsetMs by long("clockOffsetMs")
 
     /** The accounts on [baseUrl]; only one server is kept at a time. The current account is [userId], with its token in [token]. */
-    fun accounts(): List<Account> = (p["accounts"] as String?)?.let { runCatching { json.decodeFromString<List<Account>>(it) }.getOrNull() }.orEmpty()
+    fun accounts(): List<Account> {
+        val saved = p["accounts"] as String?
+        if (saved == null) return emptyList()
+        val accounts = runCatching { json.decodeFromString<List<Account>>(saved) }.getOrNull()
+        return accounts.orEmpty()
+    }
 
     /**
      * Adds or refreshes [user]'s account and makes it current in one write, so a kill in between can't leave a token
@@ -29,18 +34,35 @@ class Prefs(private val p: KeyValueStore) {
     fun login(url: String, token: String, user: String, name: String) {
         val kept = if (url == baseUrl) accounts().filter { it.userId != user } else emptyList()
         val pin = accounts().firstOrNull { it.userId == user && url == baseUrl }?.pin
-        p.edit { put("baseUrl", url); put("token", token); put("userId", user); put("accounts", json.encodeToString(kept + Account(user, name, token, pin))) }
+        p.edit {
+            put("baseUrl", url)
+            put("token", token)
+            put("userId", user)
+            put("accounts", json.encodeToString(kept + Account(user, name, token, pin)))
+        }
     }
 
-    fun switchTo(a: Account) = p.edit { put("token", a.token); put("userId", a.userId) }
+    fun switchTo(a: Account) = p.edit {
+        put("token", a.token)
+        put("userId", a.userId)
+    }
 
-    fun setPin(userId: String, pin: String?) = update(userId) { it.copy(pin = pin?.let(::pinHash)) }
+    fun setPin(userId: String, pin: String?) = update(userId) { account ->
+        val hash = if (pin == null) null else pinHash(pin)
+        account.copy(pin = hash)
+    }
     /** Fills in the name of an account migrated from before names were stored (see init). */
     fun setName(userId: String, name: String) = update(userId) { it.copy(name = name) }
-    private fun update(userId: String, change: (Account) -> Account) =
-        p.edit { put("accounts", json.encodeToString(accounts().map { if (it.userId == userId) change(it) else it })) }
+    private fun update(userId: String, change: (Account) -> Account) = p.edit {
+        val updated = accounts().map { account -> if (account.userId == userId) change(account) else account }
+        put("accounts", json.encodeToString(updated))
+    }
 
-    fun pinMatches(a: Account, pin: String) = a.pin == null || a.pin.substringBefore(':').let { pinHash(pin, it) == a.pin }
+    fun pinMatches(a: Account, pin: String): Boolean {
+        if (a.pin == null) return true
+        val salt = a.pin.substringBefore(':')
+        return pinHash(pin, salt) == a.pin
+    }
 
     var bufferOnMetered by bool("bufferOnMetered", false)
     var downloadOnMetered by bool("downloadOnMetered", false)
@@ -66,20 +88,33 @@ class Prefs(private val p: KeyValueStore) {
     var codecs by int("codecs", 0)
 
     /** Lowest decoder load, in pixels a second, at which the user chose a transcode for choppy [codec] playback. */
-    fun learnedPixelRate(codec: String): Long? = (p["learnedRate.$codec"] as Number?)?.toLong()?.takeIf { it > 0 }
+    fun learnedPixelRate(codec: String): Long? {
+        val rate = (p["learnedRate.$codec"] as Number?)?.toLong()
+        if (rate == null || rate <= 0) return null
+        return rate
+    }
     fun learnChoppy(codec: String, pixelRate: Long) {
-        if (pixelRate < (learnedPixelRate(codec) ?: Long.MAX_VALUE)) p.edit { put("learnedRate.$codec", pixelRate) }
+        val learned = learnedPixelRate(codec) ?: Long.MAX_VALUE
+        if (pixelRate < learned) p.edit { put("learnedRate.$codec", pixelRate) }
     }
     fun learnedCodecs() = p.keys().filter { it.startsWith("learnedRate.") }.map { it.removePrefix("learnedRate.") }
-    fun forgetLearned() = p.edit { learnedCodecs().forEach { put("learnedRate.$it", null) } }
+    fun forgetLearned() = p.edit {
+        for (codec in learnedCodecs()) put("learnedRate.$codec", null)
+    }
 
     /** 0 means "keep next N" is off for the series. */
     fun keepNext(seriesId: String) = (p[u("keepNext.$seriesId")] as Number?)?.toInt() ?: 0
     fun setKeepNext(seriesId: String, n: Int) = p.edit { put(u("keepNext.$seriesId"), n) }
-    fun keepNextSeries(): Map<String, Int> =
-        p.keys().filter { it.startsWith(u("keepNext.")) }
-            .associate { it.removePrefix(u("keepNext.")) to keepNext(it.removePrefix(u("keepNext."))) }
-            .filterValues { it > 0 }
+    fun keepNextSeries(): Map<String, Int> {
+        val prefix = u("keepNext.")
+        return p.keys()
+            .filter { key -> key.startsWith(prefix) }
+            .associate { key ->
+                val seriesId = key.removePrefix(prefix)
+                seriesId to keepNext(seriesId)
+            }
+            .filterValues { n -> n > 0 }
+    }
 
     /** Per-series track choice as language codes; "" means subtitles off. */
     fun audioLang(seriesId: String): String? = p[u("audio.$seriesId")] as String?
@@ -92,10 +127,17 @@ class Prefs(private val p: KeyValueStore) {
     val loggedIn get() = token != null
 
     /** Removes the current account; its unsynced progress and settings stay for when it logs in again. */
-    fun logout() = p.edit { put("accounts", json.encodeToString(accounts().filter { it.userId != userId })); put("token", null); put("userId", null) }
+    fun logout() = p.edit {
+        put("accounts", json.encodeToString(accounts().filter { it.userId != userId }))
+        put("token", null)
+        put("userId", null)
+    }
 
     /** The server ended the session: logged out, the account and its PIN kept for logging in again. */
-    fun endSession() = p.edit { put("token", null); put("userId", null) }
+    fun endSession() = p.edit {
+        put("token", null)
+        put("userId", null)
+    }
 
     /** The key for a setting that follows the account rather than the device. */
     private fun u(key: String) = "$userId/$key"
@@ -105,10 +147,15 @@ class Prefs(private val p: KeyValueStore) {
         val user = userId
         val token = token
         if (p["accounts"] == null && user != null && token != null) {
-            val moved = p.keys().filter { it in USER_KEYS || USER_PREFIXES.any(it::startsWith) }.associateWith { p[it] }
+            val moved = p.keys()
+                .filter { key -> key in USER_KEYS || USER_PREFIXES.any { prefix -> key.startsWith(prefix) } }
+                .associateWith { key -> p[key] }
             p.edit {
                 put("accounts", json.encodeToString(listOf(Account(user, "", token))))
-                moved.forEach { (k, v) -> put("$user/$k", v); put(k, null) }
+                for ((key, value) in moved) {
+                    put("$user/$key", value)
+                    put(key, null)
+                }
             }
         }
     }
@@ -148,7 +195,9 @@ class Prefs(private val p: KeyValueStore) {
         val USER_KEYS = setOf("maxHeight", "subtitleScale", "doubleTapSeconds")
         val USER_PREFIXES = listOf("keepNext.", "audio.", "sub.")
 
-        fun pinHash(pin: String, salt: String = ByteArray(16).also(SecureRandom()::nextBytes).joinToString("") { "%02x".format(it) }) =
-            salt + ":" + MessageDigest.getInstance("SHA-256").digest("$salt:$pin".toByteArray()).joinToString("") { "%02x".format(it) }
+        fun pinHash(pin: String, salt: String = ByteArray(16).also { SecureRandom().nextBytes(it) }.joinToString("") { "%02x".format(it) }): String {
+            val digest = MessageDigest.getInstance("SHA-256").digest("$salt:$pin".toByteArray())
+            return salt + ":" + digest.joinToString("") { "%02x".format(it) }
+        }
     }
 }

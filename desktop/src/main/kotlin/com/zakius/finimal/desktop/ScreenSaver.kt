@@ -38,14 +38,20 @@ private interface Kernel32 : com.sun.jna.Library {
  * it lives. So everything runs on one worker thread, which also keeps a slow D-Bus from holding up the player.
  */
 object ScreenSaver {
-    private val worker = Executors.newSingleThreadExecutor { Thread(it, "screensaver").apply { isDaemon = true } }
+    private val worker = Executors.newSingleThreadExecutor { task -> Thread(task, "screensaver").apply { isDaemon = true } }
     private var bus: DBusConnection? = null
     private var release: (() -> Unit)? = null
 
     fun inhibit(on: Boolean) = worker.execute {
         if (on == (release != null)) return@execute
-        if (!on) { runCatching { release?.invoke() }; release = null; return@execute }
-        release = runCatching { hold() }.onFailure { System.err.println("finimal: can't keep the screen on: $it") }.getOrNull()
+        if (!on) {
+            runCatching { release?.invoke() }
+            release = null
+            return@execute
+        }
+        val held = runCatching { hold() }
+        held.onFailure { e -> System.err.println("finimal: can't keep the screen on: $e") }
+        release = held.getOrNull()
     }
 
     /** For --check-player on Windows. Sets and clears the state on the worker thread as playback would, and throws if it can't. */
@@ -57,10 +63,12 @@ object ScreenSaver {
     private fun hold(): (() -> Unit)? {
         if (System.getProperty("os.name").startsWith("Windows")) {
             val kernel = com.sun.jna.Native.load("kernel32", Kernel32::class.java)
-            check(kernel.SetThreadExecutionState(ES_CONTINUOUS or ES_DISPLAY_REQUIRED or ES_SYSTEM_REQUIRED) != 0) { "SetThreadExecutionState failed" }
+            val flags = ES_CONTINUOUS or ES_DISPLAY_REQUIRED or ES_SYSTEM_REQUIRED
+            check(kernel.SetThreadExecutionState(flags) != 0) { "SetThreadExecutionState failed" }
             return { kernel.SetThreadExecutionState(ES_CONTINUOUS) } // ES_CONTINUOUS alone clears the other flags.
         }
-        val conn = bus ?: DBusConnectionBuilder.forSessionBus().build().also { bus = it }
+        val conn = bus ?: DBusConnectionBuilder.forSessionBus().build()
+        bus = conn
         return runCatching {
             val portal = conn.getRemoteObject("org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop", PortalInhibit::class.java)
             // The inhibition lasts until its request object is closed.

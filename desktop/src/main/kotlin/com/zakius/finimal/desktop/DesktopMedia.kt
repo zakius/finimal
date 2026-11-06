@@ -14,7 +14,11 @@ import org.jellyfin.sdk.model.api.BaseItemDto
 object DesktopMedia {
     val scratch: Scratch by lazy {
         Scratch(File(App.platform.appFiles, "scratch"), App.http).apply {
-            onStorageFull = { val before = freeBytes(); evict(); freeBytes() > before }
+            onStorageFull = {
+                val before = freeBytes()
+                evict()
+                freeBytes() > before
+            }
         }
     }
     private val proxy by lazy { ScratchServer({ scratch }) }
@@ -24,11 +28,16 @@ object DesktopMedia {
 
     private fun entry(item: BaseItemDto): Scratch.Entry {
         val source = item.mediaSources!!.first()
-        return scratch.entry(scratchKey(item)).apply { source({ App.server.streamUrl(item.id.toString(), source.id!!) }, source.size) }
+        val entry = scratch.entry(scratchKey(item))
+        entry.source({ App.server.streamUrl(item.id.toString(), source.id!!) }, source.size)
+        return entry
     }
 
     /** A URL for mpv that serves the item's file through the scratch. */
-    fun streamUrl(item: BaseItemDto): String = entry(item).let { proxy.url(scratchKey(item)) }
+    fun streamUrl(item: BaseItemDto): String {
+        entry(item)
+        return proxy.url(scratchKey(item))
+    }
 
     private var buffer: Pair<String, Scratch.Demand>? = null
 
@@ -37,7 +46,10 @@ object DesktopMedia {
     fun startBuffer(item: BaseItemDto, position: Long) {
         val key = scratchKey(item)
         val current = buffer
-        if (current?.first == key) return current.second.moveTo(position)
+        if (current != null && current.first == key) {
+            current.second.moveTo(position)
+            return
+        }
         stopBuffer()
         buffer = key to entry(item).demand(position, Long.MAX_VALUE, Scratch.Priority.BUFFER)
     }
@@ -60,12 +72,20 @@ object DesktopMedia {
         return (start + e.contiguous(start)) * duration / len
     }
 
-    private fun freeBytes(): Long = scratch.dir.apply { mkdirs() }.usableSpace
+    private fun freeBytes(): Long {
+        val dir = scratch.dir
+        dir.mkdirs()
+        return dir.usableSpace
+    }
 
     /** Deletes the oldest entries until within the buffer limit in Settings, keeping 2 GB or 5 % of the disk free, whichever is more. */
     fun evict() {
-        val entries = scratch.keys().map { key -> scratch.entry(key).let { CacheEntry(key, it.bytes(), it.touched(), pinned = false) } }
-        val limit = bufferLimit(App.prefs.cacheLimitGb * 1_000_000_000L, entries.sumOf { it.bytes }, freeBytes(), scratch.dir.totalSpace)
+        val entries = scratch.keys().map { key ->
+            val entry = scratch.entry(key)
+            CacheEntry(key, entry.bytes(), entry.touched(), pinned = false)
+        }
+        val maxBytes = App.prefs.cacheLimitGb * 1_000_000_000L
+        val limit = bufferLimit(maxBytes, entries.sumOf { it.bytes }, freeBytes(), scratch.dir.totalSpace)
         evictionOrder(entries, limit, playing).forEach { scratch.delete(it) }
     }
 }

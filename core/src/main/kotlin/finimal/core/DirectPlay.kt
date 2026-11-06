@@ -31,6 +31,7 @@ fun playsDirectly(video: VideoInfo, limits: DirectPlayLimits, decoders: Decoders
         else -> decoders.fits(video.codec, video.width, video.height, video.fps)
     }
     // The user picked a transcode after dropped frames, so this codec can't keep up at this load or above.
-    val learnedOk = limits.learnedPixelRate?.let { video.pixelRate < it } ?: true
+    val learned = limits.learnedPixelRate
+    val learnedOk = learned == null || video.pixelRate < learned
     return codecOk && sizeOk && learnedOk
 }

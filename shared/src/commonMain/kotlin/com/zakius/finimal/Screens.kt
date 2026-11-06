@@ -132,28 +132,48 @@ private val lastGood = object : LinkedHashMap<List<Any?>, List<BaseItemDto>>(16,
 object ListSnapshots {
     private val json = Json { ignoreUnknownKeys = true }
     private val dir get() = File(App.platform.appCache, "lists")
-    private fun file(key: List<Any?>) = File(dir, MessageDigest.getInstance("SHA-1").digest(key.joinToString("\u0000").toByteArray())
-        .joinToString("") { "%02x".format(it) } + ".json")
+    private fun file(key: List<Any?>): File {
+        val parent = dir
+        val digest = MessageDigest.getInstance("SHA-1").digest(key.joinToString("\u0000").toByteArray())
+        val hex = digest.joinToString("") { byte -> "%02x".format(byte) }
+        return File(parent, "$hex.json")
+    }
 
     fun read(key: List<Any?>): List<BaseItemDto>? = runCatching { json.decodeFromString<List<BaseItemDto>>(file(key).readText()) }.getOrNull()
-    fun write(key: List<Any?>, list: List<BaseItemDto>) { runCatching { dir.mkdirs(); file(key).writeAtomically(json.encodeToString(list)) } }
+
+    fun write(key: List<Any?>, list: List<BaseItemDto>) {
+        runCatching {
+            dir.mkdirs()
+            file(key).writeAtomically(json.encodeToString(list))
+        }
+    }
+
     fun clear() { dir.deleteRecursively() }
 
     /** Reads Libraries, the usual first screen, off the main thread at app start, so the first frame can show it. */
     fun prefetchLibraries() {
         val key = listOf(App.prefs.baseUrl, App.prefs.userId)
-        read(key)?.let { prefetched = key to it }
+        val list = read(key)
+        if (list != null) prefetched = Pair(key, list)
     }
     @Volatile private var prefetched: Pair<List<Any?>, List<BaseItemDto>>? = null
-    fun takePrefetched(key: List<Any?>) = prefetched?.takeIf { it.first == key }?.second?.also { prefetched = null }
+
+    fun takePrefetched(key: List<Any?>): List<BaseItemDto>? {
+        val found = prefetched
+        if (found == null || found.first != key) return null
+        prefetched = null
+        return found.second
+    }
 }
 
 /** The item last focused with the D-pad on this screen, by key, so coming back to the screen puts focus on it again. */
 private val LocalFocusedKey = compositionLocalOf<MutableState<String?>> { mutableStateOf(null) }
 
 @Composable
-fun FocusMemory(content: @Composable () -> Unit) =
-    CompositionLocalProvider(LocalFocusedKey provides rememberSaveable { mutableStateOf<String?>(null) }, content = content)
+fun FocusMemory(content: @Composable () -> Unit) {
+    val focusedKey = rememberSaveable { mutableStateOf<String?>(null) }
+    CompositionLocalProvider(LocalFocusedKey provides focusedKey, content = content)
+}
 
 /** Put before the item's clickable. Records D-pad focus under [key] and takes it back when the item shows again. Touch never focuses. */
 private fun Modifier.focusMemory(key: Any): Modifier = composed {
@@ -161,8 +181,12 @@ private fun Modifier.focusMemory(key: Any): Modifier = composed {
     val requester = remember { FocusRequester() }
     val k = key.toString()
     val shown = LocalShown.current // Root clears focus while another screen covers this one.
-    LaunchedEffect(Unit) { snapshotFlow { shown.value }.collect { if (it && memory.value == k) requester.requestFocus() } }
-    focusRequester(requester).onFocusChanged { if (it.isFocused) memory.value = k }
+    LaunchedEffect(Unit) {
+        snapshotFlow { shown.value }.collect { visible ->
+            if (visible && memory.value == k) requester.requestFocus()
+        }
+    }
+    focusRequester(requester).onFocusChanged { focusState -> if (focusState.isFocused) memory.value = k }
 }
 
 /** A list, plus the refresh error when the list shown is an older copy because the refresh failed. */
@@ -178,31 +202,47 @@ class Load(val result: Result<List<BaseItemDto>>?, val refreshError: Throwable?)
 private fun loadFresh(vararg keys: Any?, refresh: Int, persist: Boolean = true, block: suspend () -> List<BaseItemDto>): Load {
     val k = keys.toList()
     val cacheKey = listOf(App.prefs.baseUrl, App.prefs.userId) + k
-    var last by remember { mutableStateOf((lastGood[cacheKey] ?: ListSnapshots.takePrefetched(cacheKey))?.let { k to Result.success(it) }) }
+    var last by remember {
+        val cached = lastGood[cacheKey] ?: ListSnapshots.takePrefetched(cacheKey)
+        val initial = if (cached != null) Pair(k, Result.success(cached)) else null
+        mutableStateOf(initial)
+    }
     var refreshError by remember { mutableStateOf<Throwable?>(null) }
     val shown = LocalShown.current
-    LaunchedEffect(k, refresh) { snapshotFlow { shown.value }.collectLatest { if (it) coroutineScope {
-        refreshError = null
-        if (last?.second?.isFailure == true) last = null // A retry shows "Loading…" again.
-        if (last?.first != k) (lastGood[cacheKey] ?: if (persist) withContext(Dispatchers.IO) { ListSnapshots.read(cacheKey) } else null)
-            ?.let { last = k to Result.success(it) }
-        val pushed = App.server.flush()
-        // If the flush found the server unreachable, the fetch would only time out a second time.
-        val result = if (pushed != null && unreachable(pushed)) Result.failure(pushed) else runCatching { block() }
-            .onFailure { if (it is InvalidStatusException && it.status == 401) App.server.expire() }
-        ensureActive() // If the screen was covered meanwhile, this isn't a failure; the next visit loads again.
-        val prev = last
-        when {
-            result.isSuccess -> {
-                val list = result.getOrThrow()
-                lastGood[cacheKey] = list
-                if (persist) launch(Dispatchers.IO) { ListSnapshots.write(cacheKey, list) }
-                last = k to result
+    LaunchedEffect(k, refresh) {
+        snapshotFlow { shown.value }.collectLatest { visible ->
+            if (visible) coroutineScope {
+                refreshError = null
+                if (last?.second?.isFailure == true) last = null // A retry shows "Loading…" again.
+                if (last?.first != k) {
+                    var cached = lastGood[cacheKey]
+                    if (cached == null && persist) cached = withContext(Dispatchers.IO) { ListSnapshots.read(cacheKey) }
+                    if (cached != null) last = Pair(k, Result.success(cached))
+                }
+                val pushed = App.server.flush()
+                // If the flush found the server unreachable, the fetch would only time out a second time.
+                val result = if (pushed != null && unreachable(pushed)) {
+                    Result.failure(pushed)
+                } else {
+                    runCatching { block() }.onFailure { e ->
+                        if (e is InvalidStatusException && e.status == 401) App.server.expire()
+                    }
+                }
+                ensureActive() // If the screen was covered meanwhile, this isn't a failure; the next visit loads again.
+                val prev = last
+                when {
+                    result.isSuccess -> {
+                        val list = result.getOrThrow()
+                        lastGood[cacheKey] = list
+                        if (persist) launch(Dispatchers.IO) { ListSnapshots.write(cacheKey, list) }
+                        last = Pair(k, result)
+                    }
+                    prev != null && prev.first == k && prev.second.isSuccess -> refreshError = result.exceptionOrNull()
+                    else -> last = Pair(k, result)
+                }
             }
-            prev != null && prev.first == k && prev.second.isSuccess -> refreshError = result.exceptionOrNull()
-            else -> last = k to result
         }
-    } } }
+    }
     return Load(last?.second, refreshError)
 }
 
@@ -218,7 +258,8 @@ fun rememberDownloadStatuses(): Map<String, DownloadStatus>? {
         snapshotFlow { shown.value }.collectLatest { visible ->
             while (visible) {
                 value = withContext(Dispatchers.IO) { downloads.downloadStatuses() }
-                delay(if (value.orEmpty().values.any { it.fill == Fill.RUNNING }) 1_000 else 5_000)
+                val running = value.orEmpty().values.any { status -> status.fill == Fill.RUNNING }
+                delay(if (running) 1_000 else 5_000)
             }
         }
     }.value
@@ -234,17 +275,28 @@ private suspend fun downloadAll(episodes: List<BaseItemDto>) {
         for (ep in episodes) {
             if (downloads.download(ep.id.toString()) != null) continue
             // Episodes already fetched with sources queue as purely local writes, so leaving the screen can't stop it partway.
-            runCatching { downloads.startDownload(ep.takeIf { it.mediaSources != null } ?: App.server.item(ep.id.toString()), auto = false) }
-                .onSuccess { queued++ }.onFailure { if (it is CancellationException) throw it; failures += it }
+            runCatching {
+                val full = if (ep.mediaSources != null) ep else App.server.item(ep.id.toString())
+                downloads.startDownload(full, auto = false)
+            }
+                .onSuccess { queued++ }
+                .onFailure { e ->
+                    if (e is CancellationException) throw e
+                    failures += e
+                }
         }
     }
-    val text = when {
-        queued == 0 -> failures.firstOrNull()?.let(::loadError) ?: "Nothing new to download"
+    val firstFailure = failures.firstOrNull()
+    var text = when {
+        queued == 0 -> if (firstFailure != null) loadError(firstFailure) else "Nothing new to download"
         queued == 1 -> "Downloading 1 $noun"
         else -> "Downloading $queued ${noun}s"
-    } + if (queued > 0 && failures.isNotEmpty()) ", ${failures.size} failed" else ""
+    }
+    if (queued > 0 && failures.isNotEmpty()) text += ", ${failures.size} failed"
     if (queued > 0) App.platform.askNotifications()
-    toast(text + (downloads.downloadsWaitingFor()?.takeIf { queued > 0 }?.let { " ($it)" } ?: ""))
+    val waitingFor = downloads.downloadsWaitingFor()
+    if (queued > 0 && waitingFor != null) text += " ($waitingFor)"
+    toast(text)
 }
 
 /**
@@ -257,23 +309,40 @@ private fun downloadAllAction(fetch: suspend () -> List<BaseItemDto>): () -> Uni
     var pending by remember { mutableStateOf<List<BaseItemDto>?>(null) }
     val scope = rememberCoroutineScope()
     // If the fetch ends after the screen was covered, the question waits until the screen is back on top.
-    pending?.takeIf { LocalShown.current.value }?.let { eps ->
-        val total = eps.mapNotNull { it.mediaSources?.firstOrNull()?.size }.takeIf { it.size == eps.size }?.sum()
-        Confirm("Download ${eps.size} episode${if (eps.size == 1) "" else "s"}" + (total?.let { ", about ${formatBytes(it)}" } ?: "") + "?", "Download", {
-            busy = true
-            scope.launch { downloadAll(eps); busy = false }
-        }, { pending = null })
+    val eps = pending
+    if (eps != null && LocalShown.current.value) {
+        val sizes = eps.mapNotNull { ep -> ep.mediaSources?.firstOrNull()?.size }
+        val total = if (sizes.size == eps.size) sizes.sum() else null
+        val plural = if (eps.size == 1) "" else "s"
+        val about = if (total != null) ", about ${formatBytes(total)}" else ""
+        Confirm(
+            "Download ${eps.size} episode$plural$about?",
+            "Download",
+            onConfirm = {
+                busy = true
+                scope.launch {
+                    downloadAll(eps)
+                    busy = false
+                }
+            },
+            onDismiss = { pending = null },
+        )
     }
     return action@{
         if (busy) return@action
         busy = true
         scope.launch {
             runCatching { fetch() }
-                .onSuccess { eps ->
-                    val new = withContext(Dispatchers.IO) { eps.filter { App.downloads?.download(it.id.toString()) == null } }
+                .onSuccess { fetched ->
+                    val new = withContext(Dispatchers.IO) {
+                        fetched.filter { ep -> App.downloads?.download(ep.id.toString()) == null }
+                    }
                     if (new.isEmpty()) toast("Nothing new to download") else pending = new
                 }
-                .onFailure { if (it is CancellationException) throw it; toast(loadError(it)) }
+                .onFailure { e ->
+                    if (e is CancellationException) throw e
+                    toast(loadError(e))
+                }
             busy = false
         }
     }
@@ -294,20 +363,32 @@ private fun BarMenu(content: @Composable (close: () -> Unit) -> Unit) {
 private fun markAllAction(onChanged: () -> Unit): (List<BaseItemDto>) -> Unit {
     var asking by remember { mutableStateOf<List<BaseItemDto>?>(null) }
     val scope = rememberCoroutineScope()
-    asking?.let { eps ->
-        val played = !eps.all { it.localState().first?.played == true }
-        Confirm("Mark ${eps.size} episode${if (eps.size == 1) "" else "s"} ${if (played) "played" else "unplayed"}?", "Mark", {
-            scope.launch { App.server.setPlayed(eps.map { it.id.toString() }, played); onChanged() }
-        }, { asking = null })
+    val eps = asking
+    if (eps != null) {
+        val played = !eps.all { ep -> ep.localState().first?.played == true }
+        val plural = if (eps.size == 1) "" else "s"
+        val playedWord = if (played) "played" else "unplayed"
+        Confirm(
+            "Mark ${eps.size} episode$plural $playedWord?",
+            "Mark",
+            onConfirm = {
+                scope.launch {
+                    App.server.setPlayed(eps.map { ep -> ep.id.toString() }, played)
+                    onChanged()
+                }
+            },
+            onDismiss = { asking = null },
+        )
     }
-    return { asking = it }
+    return { list -> asking = list }
 }
 
 /** Where to pick up a series: the unfinished episode last played, else the first unplayed one after it, else the first. Null once all is played. */
 fun upNext(episodes: List<BaseItemDto>): BaseItemDto? {
     val playable = episodes.filter { it.parentIndexNumber != 0 && it.locationType != LocationType.VIRTUAL }
-    val window = keepNextWindow(playable.map { EpisodeRef(it.id.toString(), it.localState().first) }, playable.size).toSet()
-    return playable.firstOrNull { it.id.toString() in window && it.localState().first?.played != true }
+    val refs = playable.map { ep -> EpisodeRef(ep.id.toString(), ep.localState().first) }
+    val window = keepNextWindow(refs, playable.size).toSet()
+    return playable.firstOrNull { ep -> ep.id.toString() in window && ep.localState().first?.played != true }
 }
 
 /** Plays [item] from the start: the position is saved as 0 first, so nothing can resume it later. */
@@ -318,7 +399,12 @@ private suspend fun startOver(item: BaseItemDto, push: (Screen) -> Unit) {
 
 @Composable
 private fun Confirm(text: String, confirmLabel: String, onConfirm: () -> Unit, onDismiss: () -> Unit) = AlertDialog(onDismiss,
-    confirmButton = { TextButton(onClick = { onDismiss(); onConfirm() }) { Text(confirmLabel) } },
+    confirmButton = {
+        TextButton(onClick = {
+            onDismiss()
+            onConfirm()
+        }) { Text(confirmLabel) }
+    },
     dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     text = { Text(text) })
 
@@ -326,9 +412,12 @@ private fun Confirm(text: String, confirmLabel: String, onConfirm: () -> Unit, o
 @Composable
 private fun ConfirmDelete(item: BaseItemDto?, onDismiss: () -> Unit, onDeleted: () -> Unit = {}) {
     val scope = rememberCoroutineScope()
-    item ?: return
+    if (item == null) return
     Confirm("Delete download of ${itemLabel(item)}?", "Delete", {
-        scope.launch { withContext(Dispatchers.IO) { App.downloads?.deleteDownload(item.id.toString()) }; onDeleted() }
+        scope.launch {
+            withContext(Dispatchers.IO) { App.downloads?.deleteDownload(item.id.toString()) }
+            onDeleted()
+        }
     }, onDismiss)
 }
 
@@ -340,7 +429,9 @@ fun formatBytes(b: Long) = if (b >= 1e9) "%.1f GB".format(b / 1e9) else "%.0f MB
 @Composable
 private fun Bar(title: String, onBack: (() -> Unit)?, actions: @Composable () -> Unit = {}) = TopAppBar(
     title = { Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-    navigationIcon = { onBack?.let { IconButton(onClick = it) { Icon(LocalIcons.current.back, "Back") } } },
+    navigationIcon = {
+        if (onBack != null) IconButton(onClick = onBack) { Icon(LocalIcons.current.back, "Back") }
+    },
     actions = { actions() },
 )
 
@@ -355,7 +446,7 @@ fun loadError(e: Throwable) = when {
 @Composable
 fun ErrorText(sentence: String, raw: String?, color: Color = Color.Unspecified) {
     Text(sentence, color = color)
-    raw?.let { Text(it, color = color, style = MaterialTheme.typography.bodySmall) }
+    if (raw != null) Text(raw, color = color, style = MaterialTheme.typography.bodySmall)
 }
 
 @Composable
@@ -363,7 +454,11 @@ private fun Loaded(load: Load, onRetry: () -> Unit, onDownloads: () -> Unit, con
     val result = load.result
     when {
         result == null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
-        result.isFailure -> Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
+        result.isFailure -> Column(
+            Modifier.fillMaxSize().padding(24.dp),
+            verticalArrangement = Arrangement.Center,
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
             val e = result.exceptionOrNull()!!
             if (unreachable(e)) RetryOnNewNetwork(onRetry)
             ErrorText(loadError(e), e.message ?: e.javaClass.simpleName)
@@ -376,10 +471,16 @@ private fun Loaded(load: Load, onRetry: () -> Unit, onDownloads: () -> Unit, con
         // down whatever is under the pointer.
         else -> Column(Modifier.fillMaxSize()) {
             Box(Modifier.weight(1f)) { content(result.getOrThrow()) }
-            load.refreshError?.let { e ->
+            val e = load.refreshError
+            if (e != null) {
                 if (unreachable(e)) RetryOnNewNetwork(onRetry)
-                Row(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceVariant).padding(start = 16.dp),
-                    verticalAlignment = Alignment.CenterVertically) {
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                        .padding(start = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
                     Text("${loadError(e)}. Showing the last list.", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
                     TextButton(onClick = onRetry) { Text("Retry") }
                 }
@@ -422,34 +523,91 @@ fun LoginScreen(modifier: Modifier, onBack: (() -> Unit)? = null, onDone: () -> 
     // The padded modifier already includes the IME inset; scrolling keeps the button reachable above it.
     // A phone-wide form on tablets and desktop windows: full-width fields there are hard to read.
     Box(modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
-    Column(Modifier.widthIn(max = 560.dp).fillMaxHeight().verticalScroll(rememberScrollState()).padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    Column(
+        Modifier
+            .widthIn(max = 560.dp)
+            .fillMaxHeight()
+            .verticalScroll(rememberScrollState())
+            .padding(24.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            onBack?.let { IconButton(onClick = it) { Icon(LocalIcons.current.back, "Back") } }
+            if (onBack != null) IconButton(onClick = onBack) { Icon(LocalIcons.current.back, "Back") }
             Text(if (adding) "Add account" else "finimal", style = MaterialTheme.typography.headlineMedium)
         }
         if (App.sessionExpired && !adding) Text("The server ended this session. Log in again; unsynced progress is kept.")
         // The port has its own field, prefilled from the host. A port typed into the server field wins (see serverCandidates).
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            OutlinedTextField(url, { url = it; error = null; if (!portEdited) defaultPortFor(it)?.let { p -> port = p } }, label = { Text("Server") }, placeholder = { Text("jellyfin.example.com") }, singleLine = true, enabled = !busy && !adding,
-                modifier = Modifier.weight(1f), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Next))
-            OutlinedTextField(port, { port = it.filter(Char::isDigit).take(5); portEdited = true; error = null }, label = { Text("Port") }, singleLine = true, enabled = !busy && !adding,
-                isError = !portOk, modifier = Modifier.width(112.dp),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Next))
+            OutlinedTextField(
+                url,
+                { text ->
+                    url = text
+                    error = null
+                    if (!portEdited) {
+                        val guess = defaultPortFor(text)
+                        if (guess != null) port = guess
+                    }
+                },
+                label = { Text("Server") },
+                placeholder = { Text("jellyfin.example.com") },
+                singleLine = true,
+                enabled = !busy && !adding,
+                modifier = Modifier.weight(1f),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Next),
+            )
+            OutlinedTextField(
+                port,
+                { text ->
+                    port = text.filter(Char::isDigit).take(5)
+                    portEdited = true
+                    error = null
+                },
+                label = { Text("Port") },
+                singleLine = true,
+                enabled = !busy && !adding,
+                isError = !portOk,
+                modifier = Modifier.width(112.dp),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Next),
+            )
         }
         if (!portOk) Text("The port is a number from 1 to 65535, or empty for the default of https or http.", color = MaterialTheme.colorScheme.error,
             style = MaterialTheme.typography.bodySmall)
-        OutlinedTextField(user, { user = it; error = null }, label = { Text("Username") }, singleLine = true, enabled = !busy,
+        OutlinedTextField(
+            user,
+            { text ->
+                user = text
+                error = null
+            },
+            label = { Text("Username") },
+            singleLine = true,
+            enabled = !busy,
             modifier = Modifier.fillMaxWidth().semantics { contentType = ContentType.Username },
-            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next))
-        OutlinedTextField(pass, { pass = it; error = null }, label = { Text("Password") }, singleLine = true, enabled = !busy,
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
+        )
+        OutlinedTextField(
+            pass,
+            { text ->
+                pass = text
+                error = null
+            },
+            label = { Text("Password") },
+            singleLine = true,
+            enabled = !busy,
             modifier = Modifier.fillMaxWidth().semantics { contentType = ContentType.Password },
             visualTransformation = if (showPass) VisualTransformation.None else PasswordVisualTransformation(),
             trailingIcon = { TextButton(onClick = { showPass = !showPass }) { Text(if (showPass) "Hide" else "Show") } },
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = ImeAction.Done),
-            keyboardActions = KeyboardActions(onDone = { submit() }))
-        error?.let { e ->
-            if (e is InvalidStatusException && e.status == 401) Text("Wrong username or password", color = MaterialTheme.colorScheme.error)
-            else ErrorText(loadError(e) + if (unreachable(e)) " at ${serverCandidates(url, port).joinToString(" or ")}" else "", e.message ?: e.javaClass.simpleName, MaterialTheme.colorScheme.error)
+            keyboardActions = KeyboardActions(onDone = { submit() }),
+        )
+        val e = error
+        if (e != null) {
+            if (e is InvalidStatusException && e.status == 401) {
+                Text("Wrong username or password", color = MaterialTheme.colorScheme.error)
+            } else {
+                val message = loadError(e)
+                val where = if (unreachable(e)) " at ${serverCandidates(url, port).joinToString(" or ")}" else ""
+                ErrorText(message + where, e.message ?: e.javaClass.simpleName, MaterialTheme.colorScheme.error)
+            }
         }
         Button(enabled = !busy && canSubmit, onClick = ::submit) {
             if (busy) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp) else Text("Log in")
@@ -465,8 +623,13 @@ fun LibrariesScreen(modifier: Modifier, push: (Screen) -> Unit) {
     var me by remember { mutableStateOf(App.prefs.accounts().firstOrNull { it.userId == App.prefs.userId }) }
     // Accounts migrated from before names were stored have an empty name. Fetch it from the server once.
     LaunchedEffect(Unit) {
-        val m = me?.takeIf { it.name.isEmpty() } ?: return@LaunchedEffect
-        runCatching { App.server.userName() }.getOrNull()?.takeIf { it.isNotEmpty() }?.let { App.prefs.setName(m.userId, it); me = m.copy(name = it) }
+        val m = me
+        if (m == null || m.name.isNotEmpty()) return@LaunchedEffect
+        val name = runCatching { App.server.userName() }.getOrNull()
+        if (!name.isNullOrEmpty()) {
+            App.prefs.setName(m.userId, name)
+            me = m.copy(name = name)
+        }
     }
     Column(modifier.fillMaxSize()) {
         Bar("finimal", null) {
@@ -479,8 +642,15 @@ fun LibrariesScreen(modifier: Modifier, push: (Screen) -> Unit) {
             if (list.isEmpty()) Empty("No movie or TV libraries on this server")
             else LazyColumn {
                 items(list, key = { it.id }) { lib ->
-                    Text(lib.name.orEmpty(), style = MaterialTheme.typography.titleLarge,
-                        modifier = Modifier.fillMaxWidth().focusMemory(lib.id).combinedClickable(onClick = { push(Screen.Library(lib.id.toString(), lib.name.orEmpty())) }).padding(20.dp))
+                    Text(
+                        lib.name.orEmpty(),
+                        style = MaterialTheme.typography.titleLarge,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .focusMemory(lib.id)
+                            .combinedClickable(onClick = { push(Screen.Library(lib.id.toString(), lib.name.orEmpty())) })
+                            .padding(20.dp),
+                    )
                     HorizontalDivider()
                 }
             }
@@ -496,21 +666,39 @@ fun LibraryScreen(modifier: Modifier, screen: Screen.Library, push: (Screen) -> 
     var search by rememberSaveable { mutableStateOf("") }
     var query by rememberSaveable { mutableStateOf("") }
     var refresh by remember { mutableIntStateOf(0) }
-    LaunchedEffect(search) { delay(400); query = search }
+    LaunchedEffect(search) {
+        delay(400)
+        query = search
+    }
     val searchOnly = screen.id == null
     val focus = remember { FocusRequester() }
     val keyboard = LocalSoftwareKeyboardController.current
     var focusedOnce by rememberSaveable { mutableStateOf(false) } // Don't grab focus again when coming back.
-    LaunchedEffect(Unit) { if (searchOnly && !focusedOnce) { focusedOnce = true; focus.requestFocus(); keyboard?.show() } }
-    val items = if (searchOnly && query.isBlank()) Load(Result.success(emptyList()), null)
-        else loadFresh(screen.id, sort, unplayed, query, refresh = refresh, persist = query.isBlank()) { App.server.items(screen.id, sort, unplayed, query) }
+    LaunchedEffect(Unit) {
+        if (searchOnly && !focusedOnce) {
+            focusedOnce = true
+            focus.requestFocus()
+            keyboard?.show()
+        }
+    }
+    val items = if (searchOnly && query.isBlank()) {
+        Load(Result.success(emptyList()), null)
+    } else {
+        loadFresh(screen.id, sort, unplayed, query, refresh = refresh, persist = query.isBlank()) { App.server.items(screen.id, sort, unplayed, query) }
+    }
     Column(modifier.fillMaxSize()) {
         Bar(screen.name, pop)
         OutlinedTextField(search, { search = it }, label = { Text("Search") }, singleLine = true,
             modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp).focusRequester(focus),
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-            keyboardActions = KeyboardActions(onSearch = { query = search; keyboard?.hide() }))
-        if (!searchOnly) Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            keyboardActions = KeyboardActions(onSearch = {
+                query = search
+                keyboard?.hide()
+            }))
+        if (!searchOnly) Row(
+            Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
             // The server orders search results by how well they match, whatever the sort.
             Sort.entries.forEach { s -> FilterChip(sort == s, { sort = s }, { Text(s.label) }, enabled = query.isBlank()) }
             FilterChip(unplayed, { unplayed = !unplayed }, { Text("Unplayed") })
@@ -526,14 +714,26 @@ fun LibraryScreen(modifier: Modifier, screen: Screen.Library, push: (Screen) -> 
                 unplayed -> "Nothing unplayed here"
                 else -> "This library is empty"
             })
-            else LazyVerticalGrid(GridCells.Adaptive(if (App.tv) 150.dp else if (smallestWidthDp() >= 600) 140.dp else 110.dp), Modifier.fillMaxSize().padding(8.dp), gridState,
-                horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                items(list, key = { it.id }) { item ->
-                    if (item.type == BaseItemKind.SERIES) Poster(item, null, onClick = { push(Screen.Series(item.id.toString(), item.name.orEmpty())) })
-                    else Poster(item, statuses?.get(item.id.toString()),
-                        onClick = { push(Screen.Play(item.id.toString())) },
-                        onStartOver = { scope.launch { startOver(item, push) } },
-                        onChanged = { refresh++ })
+            else {
+                val cellWidth = when {
+                    App.tv -> 150.dp
+                    smallestWidthDp() >= 600 -> 140.dp
+                    else -> 110.dp
+                }
+                LazyVerticalGrid(
+                    GridCells.Adaptive(cellWidth),
+                    Modifier.fillMaxSize().padding(8.dp),
+                    gridState,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    items(list, key = { it.id }) { item ->
+                        if (item.type == BaseItemKind.SERIES) Poster(item, null, onClick = { push(Screen.Series(item.id.toString(), item.name.orEmpty())) })
+                        else Poster(item, statuses?.get(item.id.toString()),
+                            onClick = { push(Screen.Play(item.id.toString())) },
+                            onStartOver = { scope.launch { startOver(item, push) } },
+                            onChanged = { refresh++ })
+                    }
                 }
             }
         }
@@ -555,30 +755,54 @@ private fun Poster(
     var menu by remember { mutableStateOf(false) }
     // The focus highlight doesn't show over artwork; a border does.
     var focused by remember { mutableStateOf(false) }
-    Column(Modifier.focusMemory(item.id).onFocusChanged { focused = it.isFocused }
-        .onSecondaryClick(onChanged?.let { { menu = true } })
-        .combinedClickable(onClick = onClick, onLongClickLabel = "Actions", onLongClick = onChanged?.let { { menu = true } })) {
+    var openMenu: (() -> Unit)? = null
+    if (onChanged != null) openMenu = { menu = true }
+    Column(
+        Modifier
+            .focusMemory(item.id)
+            .onFocusChanged { focusState -> focused = focusState.isFocused }
+            .onSecondaryClick(openMenu)
+            .combinedClickable(onClick = onClick, onLongClickLabel = "Actions", onLongClick = openMenu)
+    ) {
         Box(if (focused) Modifier.border(3.dp, MaterialTheme.colorScheme.primary) else Modifier) {
             AsyncImage(App.server.imageUrl(item), null, contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxWidth().aspectRatio(2f / 3).background(Color.DarkGray))
-            download?.let {
-                Text(if (it.fill == Fill.DONE) "↓" else "${it.percent}%", color = Color.White,
-                    modifier = Modifier.align(Alignment.TopStart).background(Color(0xAA000000)).padding(horizontal = 6.dp)
-                        .semantics { contentDescription = if (it.fill == Fill.DONE) "Downloaded" else "Downloaded ${it.percent}%" })
+            if (download != null) {
+                Text(
+                    if (download.fill == Fill.DONE) "↓" else "${download.percent}%",
+                    color = Color.White,
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .background(Color(0xAA000000))
+                        .padding(horizontal = 6.dp)
+                        .semantics {
+                            contentDescription = if (download.fill == Fill.DONE) "Downloaded" else "Downloaded ${download.percent}%"
+                        },
+                )
             }
+            val unplayedCount = item.userData?.unplayedItemCount ?: 0
             val badge = when {
                 state?.played == true -> "✓"
-                (item.userData?.unplayedItemCount ?: 0) > 0 -> item.userData!!.unplayedItemCount.toString()
+                unplayedCount > 0 -> unplayedCount.toString()
                 else -> null
             }
-            badge?.let {
-                Text(it, color = Color.White, modifier = Modifier.align(Alignment.TopEnd).background(Color(0xAA000000)).padding(horizontal = 6.dp)
-                    .semantics { contentDescription = if (it == "✓") "Played" else "$it unplayed" })
+            if (badge != null) {
+                Text(
+                    badge,
+                    color = Color.White,
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .background(Color(0xAA000000))
+                        .padding(horizontal = 6.dp)
+                        .semantics { contentDescription = if (badge == "✓") "Played" else "$badge unplayed" },
+                )
             }
             if (unsynced) Text("not synced", color = Color.White, style = MaterialTheme.typography.labelSmall,
                 modifier = Modifier.align(Alignment.BottomStart).padding(bottom = if (focused) 7.dp else 4.dp).background(Color(0xAA000000)))
             ProgressBar(item, state, Modifier.align(Alignment.BottomStart).padding(if (focused) 3.dp else 0.dp)) // Stays inside the focus border.
-            onChanged?.let { ItemMenu(item, state?.played == true, unsynced, menu, { menu = false }, download != null, onStartOver, it) }
+            if (onChanged != null) {
+                ItemMenu(item, state?.played == true, unsynced, menu, { menu = false }, download != null, onStartOver, onChanged)
+            }
         }
         Text(item.name.orEmpty(), maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall)
     }
@@ -597,21 +821,40 @@ fun SeriesScreen(modifier: Modifier, screen: Screen.Series, push: (Screen) -> Un
     val markAll = markAllAction { refresh++ }
     val all = episodes.result?.getOrNull()
     val onlySeason = seasons.result?.getOrNull()?.singleOrNull()
-    val shownEpisodes = onlySeason?.let { s -> all?.filter { it.seasonId == s.id } }
+    val shownEpisodes = if (onlySeason != null) {
+        all?.filter { ep -> ep.seasonId == onlySeason.id }
+    } else {
+        null
+    }
     // With one season, "all" means its episodes as shown. With several, it means every episode outside the specials.
-    val markable = (shownEpisodes ?: all?.filter { it.parentIndexNumber != 0 && it.locationType != LocationType.VIRTUAL })?.takeIf { it.isNotEmpty() }
+    val markCandidates = shownEpisodes ?: all?.filter { ep -> ep.parentIndexNumber != 0 && ep.locationType != LocationType.VIRTUAL }
+    val markable = if (markCandidates.isNullOrEmpty()) null else markCandidates
     Column(modifier.fillMaxSize()) {
         Bar(screen.name, pop) {
             if (App.downloads != null || markable != null) BarMenu { close ->
-                if (App.downloads != null) DropdownMenuItem({ Text("Download all") }, { close(); downloadAll() })
-                markable?.let { eps ->
-                    val played = eps.all { it.localState().first?.played == true }
-                    DropdownMenuItem({ Text(if (played) "Mark all unplayed" else "Mark all played") }, { close(); markAll(eps) })
+                if (App.downloads != null) {
+                    DropdownMenuItem({ Text("Download all") }, {
+                        close()
+                        downloadAll()
+                    })
+                }
+                if (markable != null) {
+                    val played = markable.all { ep -> ep.localState().first?.played == true }
+                    DropdownMenuItem({ Text(if (played) "Mark all unplayed" else "Mark all played") }, {
+                        close()
+                        markAll(markable)
+                    })
                 }
             }
         }
-        all?.let(::upNext)?.let { ep -> ContinueButton(ep) { push(Screen.Play(ep.id.toString())) } }
-        if (App.downloads != null) Stepper("Keep next episodes downloaded:", keepNext, (0..20).toList(), { if (it == 0) "off" else "$it" }) { n ->
+        val next = if (all != null) upNext(all) else null
+        if (next != null) ContinueButton(next) { push(Screen.Play(next.id.toString())) }
+        if (App.downloads != null) Stepper(
+            "Keep next episodes downloaded:",
+            keepNext,
+            (0..20).toList(),
+            { count -> if (count == 0) "off" else "$count" },
+        ) { n ->
             if (keepNext == 0) App.platform.askNotifications()
             keepNext = n
             App.prefs.setKeepNext(screen.id, n)
@@ -633,9 +876,15 @@ fun SeriesScreen(modifier: Modifier, screen: Screen.Series, push: (Screen) -> Un
             }
             else LazyColumn(state = listState) {
                 items(list, key = { it.id }) { season ->
-                    Row(Modifier.fillMaxWidth().focusMemory(season.id).combinedClickable(onClick = {
-                        push(Screen.Season(screen.id, season.id.toString(), "${screen.name} · ${season.name}"))
-                    }).padding(16.dp)) {
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .focusMemory(season.id)
+                            .combinedClickable(onClick = {
+                                push(Screen.Season(screen.id, season.id.toString(), "${screen.name} · ${season.name}"))
+                            })
+                            .padding(16.dp)
+                    ) {
                         Text(season.name.orEmpty(), Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
                         val left = season.userData?.unplayedItemCount ?: 0
                         // This count comes from the server, so it lags local plays until the next sync. Episode rows show local state.
@@ -659,19 +908,30 @@ fun SeasonScreen(modifier: Modifier, screen: Screen.Season, push: (Screen) -> Un
     val markAll = markAllAction { refresh++ }
     val list = episodes.result?.getOrNull()
     // Only highlight up-next within a season someone has started; an untouched season has nothing to point at.
-    val next = list?.takeIf { l -> l.any { it.localState().first?.lastPlayedMs != null } }?.let(::upNext)
+    val next = if (list != null && list.any { ep -> ep.localState().first?.lastPlayedMs != null }) upNext(list) else null
     var scrolled by rememberSaveable { mutableStateOf(false) } // Scroll to up-next only once; coming back keeps the user's scroll.
     LaunchedEffect(next != null) {
         val i = list.orEmpty().indexOf(next)
-        if (!scrolled && i > 0) { scrolled = true; listState.scrollToItem(i - 1) }
+        if (!scrolled && i > 0) {
+            scrolled = true
+            listState.scrollToItem(i - 1)
+        }
     }
     Column(modifier.fillMaxSize()) {
         Bar(screen.name, pop) {
             if (App.downloads != null || !list.isNullOrEmpty()) BarMenu { close ->
-                if (App.downloads != null) DropdownMenuItem({ Text("Download season") }, { close(); downloadAll() })
-                list?.takeIf { it.isNotEmpty() }?.let { eps ->
-                    val played = eps.all { it.localState().first?.played == true }
-                    DropdownMenuItem({ Text(if (played) "Mark season unplayed" else "Mark season played") }, { close(); markAll(eps) })
+                if (App.downloads != null) {
+                    DropdownMenuItem({ Text("Download season") }, {
+                        close()
+                        downloadAll()
+                    })
+                }
+                if (!list.isNullOrEmpty()) {
+                    val played = list.all { ep -> ep.localState().first?.played == true }
+                    DropdownMenuItem({ Text(if (played) "Mark season unplayed" else "Mark season played") }, {
+                        close()
+                        markAll(list)
+                    })
                 }
             }
         }
@@ -697,11 +957,13 @@ fun SeasonScreen(modifier: Modifier, screen: Screen.Season, push: (Screen) -> Un
 @Composable
 private fun ContinueButton(ep: BaseItemDto, onClick: () -> Unit) {
     val position = ep.localState().first?.positionTicks ?: 0
-    val left = ep.runTimeTicks?.takeIf { position > 0 }?.let { (it - position) / TICKS_PER_MS / 60_000 }
+    val runtime = ep.runTimeTicks
+    val minutesLeft = if (runtime != null && position > 0) (runtime - position) / TICKS_PER_MS / 60_000 else null
     Button(onClick, Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
         Icon(LocalIcons.current.play, null)
-        Text((if (position > 0) "Continue " else "Play ") + episodeLabel(ep) + (left?.let { " · ${it.coerceAtLeast(1)} min left" } ?: ""),
-            Modifier.padding(start = 8.dp), maxLines = 1, overflow = TextOverflow.Ellipsis)
+        val verb = if (position > 0) "Continue " else "Play "
+        val timeLeft = if (minutesLeft != null) " · ${minutesLeft.coerceAtLeast(1)} min left" else ""
+        Text(verb + episodeLabel(ep) + timeLeft, Modifier.padding(start = 8.dp), maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 
@@ -734,12 +996,15 @@ fun EpisodeRow(
             ProgressBar(ep, state, Modifier.align(Alignment.BottomStart))
         }
         Column(Modifier.weight(1f)) {
-            Text(listOfNotNull(ep.indexNumber?.let { "$it." }, ep.name).joinToString(" "), style = MaterialTheme.typography.titleSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            val number = ep.indexNumber
+            val title = listOfNotNull(if (number != null) "$number." else null, ep.name).joinToString(" ")
+            Text(title, style = MaterialTheme.typography.titleSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            val runtime = ep.runTimeTicks
             val bits = listOfNotNull(
-                ep.runTimeTicks?.let { formatMs(it / TICKS_PER_MS) },
-                "✓ played".takeIf { state?.played == true },
+                if (runtime != null) formatMs(runtime / TICKS_PER_MS) else null,
+                if (state?.played == true) "✓ played" else null,
                 download?.label,
-                "not synced".takeIf { unsynced },
+                if (unsynced) "not synced" else null,
             )
             Text(bits.joinToString(" · "), style = MaterialTheme.typography.labelSmall)
         }
@@ -764,15 +1029,27 @@ private fun ItemMenu(item: BaseItemDto, played: Boolean, unsynced: Boolean, expa
     val id = item.id.toString()
     val scope = rememberCoroutineScope()
     var confirm by remember { mutableStateOf(false) }
-    ConfirmDelete(item.takeIf { confirm }, { confirm = false }, onChanged)
+    ConfirmDelete(if (confirm) item else null, { confirm = false }, onChanged)
     DropdownMenu(expanded, onDismiss) {
-        onStartOver?.let { DropdownMenuItem({ Text("Start over") }, { onDismiss(); it() }) }
+        if (onStartOver != null) {
+            DropdownMenuItem({ Text("Start over") }, {
+                onDismiss()
+                onStartOver()
+            })
+        }
         DropdownMenuItem({ Text(if (played) "Mark unplayed" else "Mark played") }, {
             onDismiss()
-            scope.launch { App.server.setPlayed(listOf(id), !played); onChanged() }
+            scope.launch {
+                App.server.setPlayed(listOf(id), !played)
+                onChanged()
+            }
         })
-        if (App.downloads != null && downloaded) DropdownMenuItem({ Text("Delete download") }, { onDismiss(); confirm = true })
-        else if (App.downloads != null) DropdownMenuItem({ Text("Download") }, {
+        if (App.downloads != null && downloaded) {
+            DropdownMenuItem({ Text("Delete download") }, {
+                onDismiss()
+                confirm = true
+            })
+        } else if (App.downloads != null) DropdownMenuItem({ Text("Download") }, {
             onDismiss()
             scope.launch { downloadAll(listOf(item)) }
         })
@@ -783,7 +1060,7 @@ private fun ItemMenu(item: BaseItemDto, played: Boolean, unsynced: Boolean, expa
                 onDismiss()
                 scope.launch {
                     val failure = App.server.flush()
-                    toast(failure?.let(::loadError) ?: "Synced")
+                    toast(if (failure != null) loadError(failure) else "Synced")
                     onChanged()
                 }
             })
@@ -797,16 +1074,28 @@ fun DownloadsScreen(modifier: Modifier, push: (Screen) -> Unit, pop: () -> Unit)
     val statuses = rememberDownloadStatuses()
     // Triples of (header key, header, status): unfinished first in queue order, then finished by series, with movies last.
     val downloads = remember(statuses) {
-        val (done, queue) = statuses.orEmpty().values.partition { it.fill == Fill.DONE }
-        queue.sortedWith(compareBy(queueOrder) { it.download }).map { Triple("h-queue", "Queue", it) } +
-            done.sortedWith(compareBy(shelfOrder) { it.download })
-                .map { s -> s.download.item.seriesId?.let { Triple("h-$it", s.download.item.seriesName.orEmpty(), s) } ?: Triple("h-movies", "Movies", s) }
+        val (done, queue) = statuses.orEmpty().values.partition { status -> status.fill == Fill.DONE }
+        val queueRows = queue
+            .sortedWith(compareBy(queueOrder) { status -> status.download })
+            .map { status -> Triple("h-queue", "Queue", status) }
+        val doneRows = done
+            .sortedWith(compareBy(shelfOrder) { status -> status.download })
+            .map { status ->
+                val seriesId = status.download.item.seriesId
+                if (seriesId != null) Triple("h-$seriesId", status.download.item.seriesName.orEmpty(), status)
+                else Triple("h-movies", "Movies", status)
+            }
+        queueRows + doneRows
     }
     val storage by produceState("", statuses) {
-        val (buffered, free, others) = withContext(Dispatchers.IO) { Triple(media.bufferedBytes(), media.freeBytes(), media.otherAccountsBytes()) }
-        value = "Downloads ${formatBytes(statuses.orEmpty().values.sumOf { it.bytes })}" +
-            (if (others > 0) " · other accounts ${formatBytes(others)}" else "") +
-            " · buffer ${formatBytes(buffered)} of ${App.prefs.cacheLimitGb} GB · ${formatBytes(free)} free"
+        val (buffered, free, others) = withContext(Dispatchers.IO) {
+            Triple(media.bufferedBytes(), media.freeBytes(), media.otherAccountsBytes())
+        }
+        val downloaded = statuses.orEmpty().values.sumOf { status -> status.bytes }
+        var text = "Downloads ${formatBytes(downloaded)}"
+        if (others > 0) text += " · other accounts ${formatBytes(others)}"
+        text += " · buffer ${formatBytes(buffered)} of ${App.prefs.cacheLimitGb} GB · ${formatBytes(free)} free"
+        value = text
     }
     val scope = rememberCoroutineScope()
     var deleting by remember { mutableStateOf<BaseItemDto?>(null) }
@@ -822,31 +1111,53 @@ fun DownloadsScreen(modifier: Modifier, push: (Screen) -> Unit, pop: () -> Unit)
             for ((group, title, status) in downloads) {
                 if (group != lastGroup) {
                     lastGroup = group
-                    val seriesId = status.download.item.seriesId?.takeIf { status.fill == Fill.DONE }
+                    val seriesId = if (status.fill == Fill.DONE) status.download.item.seriesId else null
                     item(key = group) {
-                        Text(title, style = MaterialTheme.typography.titleMedium, modifier = Modifier.fillMaxWidth()
-                            .then(if (seriesId != null) Modifier.clickable { push(Screen.Series(seriesId.toString(), title)) } else Modifier)
-                            .padding(16.dp, 12.dp, 16.dp, 4.dp))
+                        Text(
+                            title,
+                            style = MaterialTheme.typography.titleMedium,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .then(if (seriesId != null) Modifier.clickable { push(Screen.Series(seriesId.toString(), title)) } else Modifier)
+                                .padding(16.dp, 12.dp, 16.dp, 4.dp),
+                        )
                     }
                 }
                 val d = status.download
                 item(key = d.item.id) {
                     val id = d.item.id.toString()
                     val (state, unsynced) = d.item.localState()
-                    Row(Modifier.fillMaxWidth().focusMemory(id).combinedClickable(onClick = { push(Screen.Play(id)) }).padding(horizontal = 16.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically) {
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .focusMemory(id)
+                            .combinedClickable(onClick = { push(Screen.Play(id)) })
+                            .padding(horizontal = 16.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
                         Column(Modifier.weight(1f)) {
                             Text(itemLabel(d.item))
-                            val size = status.bytes.takeIf { it > 0 }?.let { " · ${formatBytes(it)}" } ?: ""
-                            Text(listOfNotNull(status.label + size, "kept by keep-next".takeIf { d.auto }, "✓ played".takeIf { state?.played == true },
-                                "not synced".takeIf { unsynced }).joinToString(" · "), style = MaterialTheme.typography.labelSmall)
+                            val size = if (status.bytes > 0) " · ${formatBytes(status.bytes)}" else ""
+                            val bits = listOfNotNull(
+                                status.label + size,
+                                if (d.auto) "kept by keep-next" else null,
+                                if (state?.played == true) "✓ played" else null,
+                                if (unsynced) "not synced" else null,
+                            )
+                            Text(bits.joinToString(" · "), style = MaterialTheme.typography.labelSmall)
                             if (status.fill != Fill.DONE) LinearProgressIndicator({ status.percent / 100f }, Modifier.fillMaxWidth().padding(top = 4.dp))
                             else ProgressBar(d.item, state)
                         }
                         when (status.fill) {
-                            Fill.RUNNING, Fill.QUEUED -> TextButton(onClick = { scope.launch(Dispatchers.IO) { media.pauseDownload(id) } }) { Text("Pause") }
+                            Fill.RUNNING, Fill.QUEUED -> TextButton(onClick = {
+                                scope.launch(Dispatchers.IO) { media.pauseDownload(id) }
+                            }) { Text("Pause") }
                             Fill.PAUSED -> TextButton(onClick = {
-                                scope.launch(Dispatchers.IO) { media.startDownload(runCatching { App.server.item(id) }.getOrDefault(d.item), d.auto) }
+                                scope.launch(Dispatchers.IO) {
+                                    // A fresh copy of the item when the server answers, else the one saved with the download.
+                                    val fresh = runCatching { App.server.item(id) }.getOrDefault(d.item)
+                                    media.startDownload(fresh, d.auto)
+                                }
                             }) { Text(if (d.failed) "Retry" else "Resume") }
                             Fill.DONE -> {}
                         }
@@ -864,7 +1175,13 @@ fun SettingsScreen(modifier: Modifier, pop: () -> Unit, onAccounts: () -> Unit, 
     var refresh by remember { mutableIntStateOf(0) } // Bumped to redraw after a pref changes.
     @Composable
     fun toggle(label: String, value: Boolean, enabled: Boolean = true, set: (Boolean) -> Unit) = Row(
-        Modifier.fillMaxWidth().toggleable(value, enabled = enabled, role = Role.Switch) { set(it); refresh++ }.padding(horizontal = 16.dp, vertical = 4.dp),
+        Modifier
+            .fillMaxWidth()
+            .toggleable(value, enabled = enabled, role = Role.Switch) { checked ->
+                set(checked)
+                refresh++
+            }
+            .padding(horizontal = 16.dp, vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(label, Modifier.weight(1f), color = if (enabled) Color.Unspecified else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f))
@@ -873,70 +1190,113 @@ fun SettingsScreen(modifier: Modifier, pop: () -> Unit, onAccounts: () -> Unit, 
     val scope = rememberCoroutineScope()
     var moveTo by remember { mutableStateOf<Int?>(null) }
     var moving by remember { mutableStateOf(false) }
-    moveTo?.let { target ->
+    val target = moveTo
+    if (target != null) {
         val count = remember { App.downloads?.downloads()?.size ?: 0 }
         val where = if (target > 0) "the SD card" else "internal storage"
-        Confirm("Store on $where? This " + (if (count == 0) "" else "deletes your $count download${if (count == 1) "" else "s"} and ") +
-            "clears the buffer cache; nothing is moved.", "Switch", {
+        val plural = if (count == 1) "" else "s"
+        val deletes = if (count == 0) "" else "deletes your $count download$plural and "
+        Confirm("Store on $where? This " + deletes + "clears the buffer cache; nothing is moved.", "Switch", {
             moving = true
-            scope.launch { withContext(Dispatchers.IO) { App.downloads?.switchStorage(target) }; moving = false; refresh++ }
+            scope.launch {
+                withContext(Dispatchers.IO) { App.downloads?.switchStorage(target) }
+                moving = false
+                refresh++
+            }
         }, { moveTo = null })
     }
     var confirmLogout by remember { mutableStateOf(false) }
     if (confirmLogout) {
         val unsynced = App.pending.all().size
-        Confirm("Log out?" + if (unsynced == 0) "" else
-            " $unsynced item${if (unsynced == 1) " has" else "s have"} progress not synced yet. It is sent after you log back in to the same server.",
-            "Log out", { App.server.logout(); onLoggedOut() }, { confirmLogout = false })
+        val itemsHave = if (unsynced == 1) "item has" else "items have"
+        val note = if (unsynced == 0) "" else " $unsynced $itemsHave progress not synced yet. It is sent after you log back in to the same server."
+        Confirm("Log out?$note", "Log out", {
+            App.server.logout()
+            onLoggedOut()
+        }, { confirmLogout = false })
     }
     Column(modifier.fillMaxSize()) {
         Bar("Settings", pop)
         // A readable width on tablets and desktop windows, where a label and its control would sit a screen apart.
-        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).wrapContentWidth(Alignment.Start).widthIn(max = 720.dp)) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+                .wrapContentWidth(Alignment.Start)
+                .widthIn(max = 720.dp)
+        ) {
             key(refresh) {
                 val android = App.platform.android
                 val downloads = App.downloads
                 Text("Network", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(16.dp))
                 if (android) toggle("Buffer to end on metered networks", p.bufferOnMetered) { p.bufferOnMetered = it }
-                if (android && downloads != null) toggle("Download on metered networks", p.downloadOnMetered) { p.downloadOnMetered = it; downloads.kickDownloads(restart = true) }
-                Stepper("Buffer cache limit (GB)", p.cacheLimitGb, listOf(1, 2, 5, 10, 20, 50, 100)) { p.cacheLimitGb = it; refresh++ }
+                if (android && downloads != null) toggle("Download on metered networks", p.downloadOnMetered) { on ->
+                    p.downloadOnMetered = on
+                    downloads.kickDownloads(restart = true)
+                }
+                Stepper("Buffer cache limit (GB)", p.cacheLimitGb, listOf(1, 2, 5, 10, 20, 50, 100)) { gb ->
+                    p.cacheLimitGb = gb
+                    refresh++
+                }
                 if (downloads != null && (downloads.storageRoots().size > 1 || downloads.storageMissing)) { // When the card is missing, switching back to internal storage is the way out.
-                    toggle("Store on SD card (switching deletes downloads and the buffer)", p.storageIndex > 0, enabled = !moving) {
-                        moveTo = if (it) 1 else 0
+                    toggle("Store on SD card (switching deletes downloads and the buffer)", p.storageIndex > 0, enabled = !moving) { on ->
+                        moveTo = if (on) 1 else 0
                     }
                 }
 
                 Text("Playback", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(16.dp))
                 // Android applies the delay only while a wireless output is connected. The desktop can't tell, so it always applies it.
-                Stepper(if (android) "Wireless audio delay (ms), for Bluetooth headphones and speakers" else "Audio delay (ms)", p.audioDelayMs, AUDIO_DELAYS_MS) { App.platform.setAudioDelay(it); refresh++ }
-                Stepper("Skip step (s)", p.doubleTapSeconds, (5..60 step 5).toList()) { p.doubleTapSeconds = it; refresh++ }
+                val audioDelayLabel = if (android) "Wireless audio delay (ms), for Bluetooth headphones and speakers" else "Audio delay (ms)"
+                Stepper(audioDelayLabel, p.audioDelayMs, AUDIO_DELAYS_MS) { ms ->
+                    App.platform.setAudioDelay(ms)
+                    refresh++
+                }
+                Stepper("Skip step (s)", p.doubleTapSeconds, (5..60 step 5).toList()) { seconds ->
+                    p.doubleTapSeconds = seconds
+                    refresh++
+                }
                 // Files past these limits start as a transcode. Auto asks the hardware decoders per file.
-                remember { App.platform.decoderSummary() }?.let {
-                    Text("Hardware decoders: $it", Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.labelSmall)
+                val decoders = remember { App.platform.decoderSummary() }
+                if (decoders != null) {
+                    Text("Hardware decoders: $decoders", Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.labelSmall)
                 }
                 Text("Direct play up to", Modifier.padding(16.dp, 8.dp, 16.dp, 0.dp))
                 Row(Modifier.padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf(0 to "Auto", 2160 to "4K", 1080 to "1080p", 720 to "720p").forEach { (h, label) ->
-                        FilterChip(p.maxHeight == h, { p.maxHeight = h; refresh++ }, { Text(label) })
+                    listOf(Pair(0, "Auto"), Pair(2160, "4K"), Pair(1080, "1080p"), Pair(720, "720p")).forEach { (h, label) ->
+                        FilterChip(p.maxHeight == h, {
+                            p.maxHeight = h
+                            refresh++
+                        }, { Text(label) })
                     }
                 }
                 // The desktop player decodes every codec, so there the height limit above only serves bandwidth.
                 if (android) Text("Direct play codecs", Modifier.padding(16.dp, 8.dp, 16.dp, 0.dp))
                 if (android) Row(Modifier.padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     listOf("Auto", "H.264 only", "All").forEachIndexed { i, label ->
-                        FilterChip(p.codecs == i, { p.codecs = i; refresh++ }, { Text(label) })
+                        FilterChip(p.codecs == i, {
+                            p.codecs = i
+                            refresh++
+                        }, { Text(label) })
                     }
                 }
                 if (android && p.learnedCodecs().isNotEmpty()) {
-                    Text("Transcoding sooner for ${p.learnedCodecs().joinToString { it.uppercase() }} after choppy playback",
+                    val codecs = p.learnedCodecs().joinToString { codec -> codec.uppercase() }
+                    Text("Transcoding sooner for $codecs after choppy playback",
                         Modifier.padding(16.dp, 8.dp, 16.dp, 0.dp), style = MaterialTheme.typography.labelSmall)
-                    TextButton(onClick = { p.forgetLearned(); refresh++ }, Modifier.padding(horizontal = 8.dp)) { Text("Forget") }
+                    TextButton(onClick = {
+                        p.forgetLearned()
+                        refresh++
+                    }, Modifier.padding(horizontal = 8.dp)) { Text("Forget") }
                 }
 
                 if (android) Text("Interface", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(16.dp))
                 if (android) Row(Modifier.padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf("Auto (${if (App.autoTv) "TV" else "touch"})", "Touch", "TV").forEachIndexed { i, label ->
-                        FilterChip(p.interfaceMode == i, { p.interfaceMode = i; refresh++ }, { Text(label) })
+                    val autoLabel = if (App.autoTv) "Auto (TV)" else "Auto (touch)"
+                    listOf(autoLabel, "Touch", "TV").forEachIndexed { i, label ->
+                        FilterChip(p.interfaceMode == i, {
+                            p.interfaceMode = i
+                            refresh++
+                        }, { Text(label) })
                     }
                 }
 
@@ -952,8 +1312,10 @@ fun SettingsScreen(modifier: Modifier, pop: () -> Unit, onAccounts: () -> Unit, 
                 }
 
                 Text("Account", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(16.dp))
-                val me = p.accounts().firstOrNull { it.userId == p.userId }
-                Text(listOfNotNull(me?.name?.ifEmpty { null }, p.baseUrl).joinToString(" · "), Modifier.padding(horizontal = 16.dp))
+                val me = p.accounts().firstOrNull { account -> account.userId == p.userId }
+                val myName = me?.name
+                val shownName = if (myName.isNullOrEmpty()) null else myName
+                Text(listOfNotNull(shownName, p.baseUrl).joinToString(" · "), Modifier.padding(horizontal = 16.dp))
                 Row(Modifier.padding(horizontal = 8.dp)) {
                     TextButton(onClick = onAccounts) { Text("Accounts and PIN") }
                     TextButton(onClick = { confirmLogout = true }) { Text("Log out") }
@@ -970,7 +1332,10 @@ private fun Modifier.onSecondaryClick(action: (() -> Unit)?): Modifier = if (act
     awaitPointerEventScope {
         while (true) {
             val e = awaitPointerEvent()
-            if (e.type == PointerEventType.Press && e.buttons.isSecondaryPressed) { e.changes.forEach { it.consume() }; action() }
+            if (e.type == PointerEventType.Press && e.buttons.isSecondaryPressed) {
+                e.changes.forEach { change -> change.consume() }
+                action()
+            }
         }
     }
 }
@@ -979,12 +1344,16 @@ private fun Modifier.onSecondaryClick(action: (() -> Unit)?): Modifier = if (act
 @Composable
 private fun Stepper(label: String, value: Int, options: List<Int>, show: (Int) -> String = Int::toString, set: (Int) -> Unit) =
     Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-        val i = options.indices.minBy { abs(options[it] - value) }
+        val i = options.indices.minBy { index -> abs(options[index] - value) }
         Text(label, Modifier.weight(1f))
-        TextButton(onClick = { set(options[i - 1]) }, enabled = i > 0) { Text("−", Modifier.semantics { contentDescription = "Decrease $label, now ${show(options[i])}" }) }
+        TextButton(onClick = { set(options[i - 1]) }, enabled = i > 0) {
+            Text("−", Modifier.semantics { contentDescription = "Decrease $label, now ${show(options[i])}" })
+        }
         // A fixed width, so "−" doesn't move under the pointer when the value gets a digit longer.
         Text(show(options[i]), Modifier.widthIn(min = 48.dp), textAlign = TextAlign.Center, maxLines = 1)
-        TextButton(onClick = { set(options[i + 1]) }, enabled = i < options.lastIndex) { Text("+", Modifier.semantics { contentDescription = "Increase $label, now ${show(options[i])}" }) }
+        TextButton(onClick = { set(options[i + 1]) }, enabled = i < options.lastIndex) {
+            Text("+", Modifier.semantics { contentDescription = "Increase $label, now ${show(options[i])}" })
+        }
     }
 
 /** Draws chapter starts as marks under a seek bar laid over them. The bar's ends sit [inset] in from its sides. */
@@ -994,16 +1363,24 @@ fun ChapterMarks(chapters: List<Chapter>, durationMs: Long, modifier: Modifier, 
         if (durationMs <= 0) return@Canvas
         val left = inset.toPx()
         val half = 5.dp.toPx()
-        chapters.filter { it.startMs in 1 until durationMs }.forEach {
-            val x = left + (size.width - 2 * left) * it.startMs / durationMs
-            drawLine(Color.White, androidx.compose.ui.geometry.Offset(x, center.y - half), androidx.compose.ui.geometry.Offset(x, center.y + half), 2.dp.toPx())
+        for (chapter in chapters) {
+            if (chapter.startMs < 1 || chapter.startMs >= durationMs) continue
+            val x = left + (size.width - 2 * left) * chapter.startMs / durationMs
+            val top = androidx.compose.ui.geometry.Offset(x, center.y - half)
+            val bottom = androidx.compose.ui.geometry.Offset(x, center.y + half)
+            drawLine(Color.White, top, bottom, 2.dp.toPx())
         }
     }
 
 /** The account's initial in a circle. */
 @Composable
 private fun Avatar(name: String, modifier: Modifier = Modifier) =
-    Box(modifier.size(32.dp).background(MaterialTheme.colorScheme.primaryContainer, androidx.compose.foundation.shape.CircleShape), contentAlignment = Alignment.Center) {
+    Box(
+        modifier
+            .size(32.dp)
+            .background(MaterialTheme.colorScheme.primaryContainer, androidx.compose.foundation.shape.CircleShape),
+        contentAlignment = Alignment.Center,
+    ) {
         Text(name.firstOrNull()?.uppercase() ?: "?", color = MaterialTheme.colorScheme.onPrimaryContainer, style = MaterialTheme.typography.titleSmall)
     }
 
@@ -1023,31 +1400,59 @@ fun AccountsScreen(modifier: Modifier, pop: (() -> Unit)?, onSwitched: () -> Uni
         if (a.userId != p.userId) App.server.switchTo(a)
         onSwitched()
     }
-    asking?.let { a ->
-        PinDialog("PIN for ${a.name.ifEmpty { "this account" }}", { asking = null }) { pin -> p.pinMatches(a, pin).also { if (it) { asking = null; open(a) } } }
+    val askingFor = asking
+    if (askingFor != null) {
+        PinDialog("PIN for ${askingFor.name.ifEmpty { "this account" }}", { asking = null }) { pin ->
+            val matches = p.pinMatches(askingFor, pin)
+            if (matches) {
+                asking = null
+                open(askingFor)
+            }
+            matches
+        }
     }
-    if (settingPin) PinDialog("New PIN", { settingPin = false }) { pin -> p.setPin(p.userId!!, pin); settingPin = false; refresh++; true }
+    if (settingPin) PinDialog("New PIN", { settingPin = false }) { pin ->
+        p.setPin(p.userId!!, pin)
+        settingPin = false
+        refresh++
+        true
+    }
     Column(modifier.fillMaxSize()) {
         Bar(if (picking) "Who's watching?" else "Accounts", pop)
         Column(Modifier.widthIn(max = 720.dp).verticalScroll(rememberScrollState())) {
             accounts.forEach { a ->
                 val current = a.userId == p.userId && !picking
-                Row(Modifier.fillMaxWidth().focusMemory(a.userId).clickable { if (a.pin != null && !current) asking = a else open(a) }.padding(16.dp),
-                    verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .focusMemory(a.userId)
+                        .clickable {
+                            if (a.pin != null && !current) asking = a else open(a)
+                        }
+                        .padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(16.dp),
+                ) {
                     Avatar(a.name)
-                    Text(a.name.ifEmpty { "Account" } + if (current) " (current)" else "", Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
+                    val suffix = if (current) " (current)" else ""
+                    Text(a.name.ifEmpty { "Account" } + suffix, Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
                     if (a.pin != null) Text("PIN", style = MaterialTheme.typography.labelSmall)
                 }
             }
             TextButton(onClick = onAdd, Modifier.padding(horizontal = 8.dp)) { Text("Add account") }
             if (!picking) {
-                val me = accounts.firstOrNull { it.userId == p.userId }
+                val me = accounts.firstOrNull { account -> account.userId == p.userId }
                 HorizontalDivider()
                 Text("Your PIN is asked when switching to your account. It keeps your titles and history from others on this device.",
                     Modifier.padding(16.dp), style = MaterialTheme.typography.bodySmall)
                 Row(Modifier.padding(horizontal = 8.dp)) {
                     TextButton(onClick = { settingPin = true }) { Text(if (me?.pin == null) "Set PIN" else "Change PIN") }
-                    if (me?.pin != null) TextButton(onClick = { p.setPin(me.userId, null); refresh++ }) { Text("Remove PIN") }
+                    if (me?.pin != null) {
+                        TextButton(onClick = {
+                            p.setPin(me.userId, null)
+                            refresh++
+                        }) { Text("Remove PIN") }
+                    }
                 }
             }
         }
@@ -1064,15 +1469,31 @@ private fun PinDialog(title: String, onDismiss: () -> Unit, onPin: (String) -> B
     val focus = remember { FocusRequester() }
     LaunchedEffect(Unit) { focus.requestFocus() }
     // A wrong PIN clears the field, and focus goes back to it, because the now disabled OK button can't keep focus.
-    fun submit() { if (!onPin(pin)) { wrong = true; pin = ""; focus.requestFocus() } }
+    fun submit() {
+        if (!onPin(pin)) {
+            wrong = true
+            pin = ""
+            focus.requestFocus()
+        }
+    }
     AlertDialog(onDismiss,
         title = { Text(title) },
         text = {
-            OutlinedTextField(pin, { pin = it.filter(Char::isDigit).take(8); wrong = false }, singleLine = true, isError = wrong,
-                label = { Text("PIN") }, supportingText = { Text(if (wrong) "Wrong PIN" else "4 to 8 digits") }, modifier = Modifier.focusRequester(focus),
+            OutlinedTextField(
+                pin,
+                { text ->
+                    pin = text.filter(Char::isDigit).take(8)
+                    wrong = false
+                },
+                singleLine = true,
+                isError = wrong,
+                label = { Text("PIN") },
+                supportingText = { Text(if (wrong) "Wrong PIN" else "4 to 8 digits") },
+                modifier = Modifier.focusRequester(focus),
                 visualTransformation = PasswordVisualTransformation(),
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword, imeAction = ImeAction.Done),
-                keyboardActions = KeyboardActions(onDone = { if (ok) submit() }))
+                keyboardActions = KeyboardActions(onDone = { if (ok) submit() }),
+            )
         },
         confirmButton = { TextButton(onClick = ::submit, enabled = ok) { Text("OK") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })

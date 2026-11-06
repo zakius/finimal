@@ -39,7 +39,10 @@ object AudioDelay {
         am.registerAudioDeviceCallback(object : AudioDeviceCallback() {
             fun update() {
                 val now = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS).any { it.type in wirelessTypes }
-                if (now != wireless) { wireless = now; onWirelessChanged?.invoke() }
+                if (now != wireless) {
+                    wireless = now
+                    onWirelessChanged?.invoke()
+                }
             }
             override fun onAudioDevicesAdded(added: Array<out AudioDeviceInfo>) = update()
             override fun onAudioDevicesRemoved(removed: Array<out AudioDeviceInfo>) = update()
@@ -55,14 +58,14 @@ object AudioDelay {
 
     /** Renderers whose audio clock runs [us] behind. */
     fun renderers(context: Context) = object : DefaultRenderersFactory(context) {
-        override fun buildAudioSink(context: Context, enableFloatOutput: Boolean, enableAudioTrackPlaybackParams: Boolean): AudioSink? =
-            super.buildAudioSink(context, enableFloatOutput, enableAudioTrackPlaybackParams)?.let { sink ->
-                object : ForwardingAudioSink(sink) {
-                    override fun getCurrentPositionUs(sourceEnded: Boolean): Long {
-                        val position = super.getCurrentPositionUs(sourceEnded)
-                        return if (position == AudioSink.CURRENT_POSITION_NOT_SET) position else position - us
-                    }
+        override fun buildAudioSink(context: Context, enableFloatOutput: Boolean, enableAudioTrackPlaybackParams: Boolean): AudioSink? {
+            val sink = super.buildAudioSink(context, enableFloatOutput, enableAudioTrackPlaybackParams) ?: return null
+            return object : ForwardingAudioSink(sink) {
+                override fun getCurrentPositionUs(sourceEnded: Boolean): Long {
+                    val position = super.getCurrentPositionUs(sourceEnded)
+                    return if (position == AudioSink.CURRENT_POSITION_NOT_SET) position else position - us
                 }
             }
+        }
     }
 }

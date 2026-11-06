@@ -35,7 +35,14 @@ data class DownloadStatus(val download: Download, val percent: Int, val fill: Fi
         Fill.DONE -> if (download.transcoded) "downloaded, transcoded" else "downloaded"
         Fill.RUNNING -> "${waitingFor ?: "downloading"} · $percent%"
         Fill.QUEUED -> "${waitingFor ?: "queued #$position"} · $percent%"
-        Fill.PAUSED -> "${if (download.failed) "failed" else if (download.storageFull) "storage full" else "paused"} · $percent%"
+        Fill.PAUSED -> {
+            val reason = when {
+                download.failed -> "failed"
+                download.storageFull -> "storage full"
+                else -> "paused"
+            }
+            "$reason · $percent%"
+        }
     }
 }
 
@@ -45,7 +52,8 @@ data class DownloadStatus(val download: Download, val percent: Int, val fill: Fi
  */
 fun scratchKey(item: BaseItemDto): String {
     val source = item.mediaSources?.firstOrNull()
-    return "${item.id}-${source?.eTag ?: source?.size ?: 0}"
+    val version = source?.eTag ?: source?.size ?: 0
+    return "${item.id}-$version"
 }
 
 /**

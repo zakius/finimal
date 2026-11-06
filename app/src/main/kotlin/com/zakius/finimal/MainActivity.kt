@@ -71,7 +71,13 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         // A recreated activity restores its back stack, so don't push Downloads again.
         if (savedInstanceState == null) openDownloads = intent.getBooleanExtra(EXTRA_DOWNLOADS, false)
-        setContent { Theme { Root(openDownloads, { openDownloads = false }) { id, onBack, onPlay -> PlayerScreen(id, onBack, onPlay) } } }
+        setContent {
+            Theme {
+                Root(openDownloads, { openDownloads = false }) { id, onBack, onPlay ->
+                    PlayerScreen(id, onBack, onPlay)
+                }
+            }
+        }
         val decor = window.decorView
         decor.viewTreeObserver.addOnDrawListener(object : ViewTreeObserver.OnDrawListener {
             override fun onDraw() {

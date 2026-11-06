@@ -36,7 +36,8 @@ class AndroidApp : Application(), Platform, SingletonImageLoader.Factory, Config
         thread(name = "warm-up") {
             // Load ICU's locale-key data now; otherwise the first line break loads it during the first frame (10 ms).
             // This avoids laying out text, which would race the font swap above.
-            java.util.Locale.forLanguageTag(java.util.Locale.getDefault().toLanguageTag() + "-u-lb-normal").displayName
+            val lineBreakTag = java.util.Locale.getDefault().toLanguageTag() + "-u-lb-normal"
+            java.util.Locale.forLanguageTag(lineBreakTag).displayName
             if (App.prefs.loggedIn) ListSnapshots.prefetchLibraries()
             App.server // Built now because the first list load needs it right after the first frame.
         }
@@ -66,13 +67,21 @@ class AndroidApp : Application(), Platform, SingletonImageLoader.Factory, Config
     // The only fetcher is added by hand, which skips a ServiceLoader scan of the APK on the first image.
     override fun newImageLoader(context: PlatformContext) = ImageLoader.Builder(context)
         .serviceLoaderEnabled(false)
-        .components { add(OkHttpNetworkFetcherFactory(callFactory = { App.http.newBuilder().dispatcher(Dispatcher()).build() })) }
+        .components {
+            add(OkHttpNetworkFetcherFactory(callFactory = {
+                App.http.newBuilder().dispatcher(Dispatcher()).build()
+            }))
+        }
         .build()
 
     /** The first codec-list query in a process takes up to a few hundred ms; Media3 caches it, so the first play skips that. */
     @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
-    private fun warmDecoders() = listOf(MimeTypes.VIDEO_H264, MimeTypes.VIDEO_H265, MimeTypes.VIDEO_AV1, MimeTypes.AUDIO_AAC)
-        .forEach { runCatching { MediaCodecUtil.getDecoderInfos(it, false, false) } }
+    private fun warmDecoders() {
+        val mimeTypes = listOf(MimeTypes.VIDEO_H264, MimeTypes.VIDEO_H265, MimeTypes.VIDEO_AV1, MimeTypes.AUDIO_AAC)
+        for (mimeType in mimeTypes) {
+            runCatching { MediaCodecUtil.getDecoderInfos(mimeType, false, false) }
+        }
+    }
 
     override val versionName: String get() = BuildConfig.VERSION_NAME
     override val appFiles: File get() = filesDir

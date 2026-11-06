@@ -60,19 +60,32 @@ fun main(args: Array<String>) {
         val control = remember { WindowControl.restore() }
         LaunchedEffect(control) {
             // Save a moment after the window settles, not on every pixel of a drag.
-            snapshotFlow { Triple(control.state.placement, control.state.position, control.state.size) }.collectLatest { delay(500); control.save() }
+            snapshotFlow { Triple(control.state.placement, control.state.position, control.state.size) }.collectLatest {
+                delay(500)
+                control.save()
+            }
         }
-        Window(::exitApplication, control.state, title = control.title, icon = remember { appIcon() },
-            onPreviewKeyEvent = { control.keys?.invoke(it) ?: false }) {
-            Theme { CompositionLocalProvider(LocalWindow provides control) {
-                Box(Modifier.fillMaxSize().onPointerEvent(PointerEventType.Press) { e ->
-                    // The mouse's back button acts like Esc.
-                    if (e.button == PointerButton.Back) pressEscape()
-                }) {
-                    Root(openDownloads = false, openedDownloads = {}) { id, onBack, onPlay -> PlayerScreen(id, onBack, onPlay) }
-                    ToastHost(Modifier.align(Alignment.BottomCenter))
+        Window(
+            ::exitApplication,
+            control.state,
+            title = control.title,
+            icon = remember { appIcon() },
+            onPreviewKeyEvent = { event ->
+                val handler = control.keys
+                if (handler != null) handler(event) else false
+            },
+        ) {
+            Theme {
+                CompositionLocalProvider(LocalWindow provides control) {
+                    Box(Modifier.fillMaxSize().onPointerEvent(PointerEventType.Press) { e ->
+                        // The mouse's back button acts like Esc.
+                        if (e.button == PointerButton.Back) pressEscape()
+                    }) {
+                        Root(openDownloads = false, openedDownloads = {}) { id, onBack, onPlay -> PlayerScreen(id, onBack, onPlay) }
+                        ToastHost(Modifier.align(Alignment.BottomCenter))
+                    }
                 }
-            } }
+            }
         }
     }
 }
@@ -91,8 +104,10 @@ private fun scaleFromXftDpi() {
         val display = x11.XOpenDisplay(null) ?: return
         try { x11.XResourceManagerString(display) } finally { x11.XCloseDisplay(display) }
     }.getOrNull() ?: return
-    val dpi = Regex("""^Xft\.dpi:\s*([\d.]+)""", RegexOption.MULTILINE).find(resources)?.groupValues?.get(1)?.toDoubleOrNull() ?: return
-    System.setProperty("sun.java2d.uiScale", maxOf(1, Math.round(dpi / 96).toInt()).toString())
+    val match = Regex("""^Xft\.dpi:\s*([\d.]+)""", RegexOption.MULTILINE).find(resources) ?: return
+    val dpi = match.groupValues[1].toDoubleOrNull() ?: return
+    val scale = maxOf(1, Math.round(dpi / 96).toInt())
+    System.setProperty("sun.java2d.uiScale", scale.toString())
 }
 
 @Suppress("FunctionName")
@@ -124,10 +139,22 @@ private fun pressEscape() {
 private fun ToastHost(modifier: Modifier) {
     val toast = Toasts.current
     var shown by remember { mutableStateOf<Pair<Int, String>?>(null) }
-    LaunchedEffect(toast) { shown = toast; delay(3_000); shown = null }
-    shown?.let { (_, text) ->
-        Text(text, modifier.padding(32.dp).background(MaterialTheme.colorScheme.inverseSurface, MaterialTheme.shapes.small).padding(horizontal = 16.dp, vertical = 10.dp),
-            color = MaterialTheme.colorScheme.inverseOnSurface)
+    LaunchedEffect(toast) {
+        shown = toast
+        delay(3_000)
+        shown = null
+    }
+    val current = shown
+    if (current != null) {
+        val (_, text) = current
+        Text(
+            text,
+            modifier
+                .padding(32.dp)
+                .background(MaterialTheme.colorScheme.inverseSurface, MaterialTheme.shapes.small)
+                .padding(horizontal = 16.dp, vertical = 10.dp),
+            color = MaterialTheme.colorScheme.inverseOnSurface,
+        )
     }
 }
 
@@ -141,8 +168,14 @@ private fun checkPlayer(): Int = try {
     listOf("com.sun.security.auth.module.UnixSystem", "javax.naming.directory.InitialDirContext", "sun.misc.Unsafe",
         "sun.security.ec.ECKeyFactory").forEach { Class.forName(it) }
     // Build the image loader as the app does and decode the bundled icon. In a ProGuard build it once loaded nothing.
-    val icon = File.createTempFile("finimal-check", ".png").apply { deleteOnExit(); writeBytes(object {}.javaClass.getResource("/finimal.png")!!.readBytes()) }
-    val image = runBlocking { imageLoader(PlatformContext.INSTANCE).execute(ImageRequest.Builder(PlatformContext.INSTANCE).data(icon).build()) }
+    val icon = File.createTempFile("finimal-check", ".png")
+    icon.deleteOnExit()
+    icon.writeBytes(object {}.javaClass.getResource("/finimal.png")!!.readBytes())
+    val image = runBlocking {
+        val loader = imageLoader(PlatformContext.INSTANCE)
+        val request = ImageRequest.Builder(PlatformContext.INSTANCE).data(icon).build()
+        loader.execute(request)
+    }
     check(image is SuccessResult) { "images don't load: ${(image as? ErrorResult)?.throwable}" }
     ScreenSaver.checkWindows()
     val mpv = Mpv(mapOf("ao" to "null"))
@@ -160,6 +193,8 @@ private fun checkPlayer(): Int = try {
     1
 }
 
-private fun appIcon() = BitmapPainter(
-    Image.makeFromEncoded(Thread.currentThread().contextClassLoader.getResourceAsStream("finimal.png")!!.use { it.readAllBytes() })
-        .toComposeImageBitmap())
+private fun appIcon(): BitmapPainter {
+    val stream = Thread.currentThread().contextClassLoader.getResourceAsStream("finimal.png")!!
+    val bytes = stream.use { it.readAllBytes() }
+    return BitmapPainter(Image.makeFromEncoded(bytes).toComposeImageBitmap())
+}

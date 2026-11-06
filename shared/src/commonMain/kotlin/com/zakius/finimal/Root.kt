@@ -75,7 +75,9 @@ fun Theme(content: @Composable () -> Unit) {
     // Material's default 10% focus highlight can't be seen from a sofa, and it is the only sign of where D-pad focus is.
     val ripple = RippleConfiguration(rippleAlpha = RippleAlpha(draggedAlpha = 0.16f, focusedAlpha = 0.35f, hoveredAlpha = 0.08f, pressedAlpha = 0.1f))
     MaterialTheme(colorScheme = colors) {
-        CompositionLocalProvider(LocalRippleConfiguration provides ripple) { Surface(Modifier.fillMaxSize(), content = content) }
+        CompositionLocalProvider(LocalRippleConfiguration provides ripple) {
+            Surface(Modifier.fillMaxSize(), content = content)
+        }
     }
 }
 
@@ -87,8 +89,8 @@ fun Theme(content: @Composable () -> Unit) {
 fun Root(openDownloads: Boolean, openedDownloads: () -> Unit, player: @Composable (itemId: String, onBack: () -> Unit, onPlay: (String) -> Unit) -> Unit) {
     val stack = rememberSaveable(
         saver = listSaver(
-            save = { list -> list.map { Json.encodeToString(Screen.serializer(), it) } },
-            restore = { saved -> saved.map { Json.decodeFromString(Screen.serializer(), it) }.toMutableStateList() },
+            save = { list -> list.map { screen -> Json.encodeToString(Screen.serializer(), screen) } },
+            restore = { saved -> saved.map { text -> Json.decodeFromString(Screen.serializer(), text) }.toMutableStateList() },
         )
     ) { listOf(startScreen()).toMutableStateList() }
 
@@ -98,8 +100,18 @@ fun Root(openDownloads: Boolean, openedDownloads: () -> Unit, player: @Composabl
     var epoch by rememberSaveable { mutableIntStateOf(0) }
     fun keyOf(i: Int) = "$epoch:$i:${stack[i]}"
     fun push(s: Screen) = stack.add(s)
-    fun pop() { if (stack.size > 1) { saved.removeState(keyOf(stack.lastIndex)); stack.removeAt(stack.lastIndex) } }
-    fun reset(s: Screen) { stack.indices.forEach { saved.removeState(keyOf(it)) }; epoch++; stack.clear(); stack.add(s) }
+    fun pop() {
+        if (stack.size > 1) {
+            saved.removeState(keyOf(stack.lastIndex))
+            stack.removeAt(stack.lastIndex)
+        }
+    }
+    fun reset(s: Screen) {
+        for (i in stack.indices) saved.removeState(keyOf(i))
+        epoch++
+        stack.clear()
+        stack.add(s)
+    }
 
     NavigationBackHandler(rememberNavigationEventState(NavigationEventInfo.None), isBackEnabled = stack.size > 1, onBackCompleted = ::pop)
     LaunchedEffect(openDownloads) {
@@ -117,7 +129,8 @@ fun Root(openDownloads: Boolean, openedDownloads: () -> Unit, player: @Composabl
     val focus = LocalFocusManager.current
     LaunchedEffect(topKey) { focus.clearFocus(force = true) }
     // TVs may crop the picture's edges (overscan). These are Android TV's recommended margins, which keep the UI inside.
-    val padded = Modifier.safeDrawingPadding().then(if (App.tv) Modifier.padding(horizontal = 48.dp, vertical = 27.dp) else Modifier)
+    val overscan = if (App.tv) Modifier.padding(horizontal = 48.dp, vertical = 27.dp) else Modifier
+    val padded = Modifier.safeDrawingPadding().then(overscan)
     val back = rememberVectorPainter(Icons.AutoMirrored.Filled.ArrowBack)
     val more = rememberVectorPainter(Icons.Default.MoreVert)
     val settings = rememberVectorPainter(Icons.Default.Settings)
@@ -126,26 +139,39 @@ fun Root(openDownloads: Boolean, openedDownloads: () -> Unit, player: @Composabl
     // Covered screens stay composed so that going back only lays out and draws. Rebuilding the poster grid cost about
     // 13 ms of main-thread time on a phone. Screens read LocalShown to pause their own work while covered.
     // key() gives each entry its own state, so the next episode never inherits the previous player's state.
-    CompositionLocalProvider(LocalIcons provides icons) { stack.forEachIndexed { i, screen -> key(keyOf(i)) {
-        val shown = i == stack.lastIndex
-        // Passed as a State rather than a value: screens watch it from their effects, so covering or uncovering a screen recomposes nothing.
-        val shownState = rememberUpdatedState(shown)
-        Box(if (shown) Modifier.fillMaxSize() else Modifier.hidden(), propagateMinConstraints = true) {
-            CompositionLocalProvider(LocalShown provides shownState) { saved.SaveableStateProvider(keyOf(i)) { FocusMemory { when (screen) {
-                Screen.Login -> LoginScreen(padded) { reset(Screen.Libraries) }
-                Screen.AddAccount -> LoginScreen(padded, onBack = ::pop) { reset(Screen.Libraries) }
-                Screen.Accounts -> AccountsScreen(padded, if (i == 0) null else ::pop, { reset(Screen.Libraries) }) { push(Screen.AddAccount) }
-                Screen.Libraries -> LibrariesScreen(padded, ::push)
-                Screen.Downloads -> DownloadsScreen(padded, ::push, ::pop)
-                Screen.Settings -> SettingsScreen(padded, ::pop, { push(Screen.Accounts) }) { reset(startScreen()) }
-                is Screen.Library -> LibraryScreen(padded, screen, ::push, ::pop)
-                is Screen.Series -> SeriesScreen(padded, screen, ::push, ::pop)
-                is Screen.Season -> SeasonScreen(padded, screen, ::push, ::pop)
-                // "Play next" replaces the player instead of stacking players.
-                is Screen.Play -> player(screen.itemId, ::pop) { next -> pop(); push(Screen.Play(next)) }
-            } } } }
+    CompositionLocalProvider(LocalIcons provides icons) {
+        stack.forEachIndexed { i, screen ->
+            key(keyOf(i)) {
+                val shown = i == stack.lastIndex
+                // Passed as a State rather than a value: screens watch it from their effects, so covering or uncovering a screen recomposes nothing.
+                val shownState = rememberUpdatedState(shown)
+                Box(if (shown) Modifier.fillMaxSize() else Modifier.hidden(), propagateMinConstraints = true) {
+                    CompositionLocalProvider(LocalShown provides shownState) {
+                        saved.SaveableStateProvider(keyOf(i)) {
+                            FocusMemory {
+                                when (screen) {
+                                    Screen.Login -> LoginScreen(padded) { reset(Screen.Libraries) }
+                                    Screen.AddAccount -> LoginScreen(padded, onBack = ::pop) { reset(Screen.Libraries) }
+                                    Screen.Accounts -> AccountsScreen(padded, if (i == 0) null else ::pop, { reset(Screen.Libraries) }) { push(Screen.AddAccount) }
+                                    Screen.Libraries -> LibrariesScreen(padded, ::push)
+                                    Screen.Downloads -> DownloadsScreen(padded, ::push, ::pop)
+                                    Screen.Settings -> SettingsScreen(padded, ::pop, { push(Screen.Accounts) }) { reset(startScreen()) }
+                                    is Screen.Library -> LibraryScreen(padded, screen, ::push, ::pop)
+                                    is Screen.Series -> SeriesScreen(padded, screen, ::push, ::pop)
+                                    is Screen.Season -> SeasonScreen(padded, screen, ::push, ::pop)
+                                    // "Play next" replaces the player instead of stacking players.
+                                    is Screen.Play -> player(screen.itemId, ::pop) { next ->
+                                        pop()
+                                        push(Screen.Play(next))
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
-    } } }
+    }
 }
 
 /**
@@ -153,7 +179,7 @@ fun Root(openDownloads: Boolean, openedDownloads: () -> Unit, player: @Composabl
  * logged out with saved accounts left, the picker shows too, because one of them may have a PIN.
  */
 private fun startScreen() = when {
-    App.prefs.accounts().size > 1 || !App.prefs.loggedIn && App.prefs.accounts().isNotEmpty() -> Screen.Accounts
+    App.prefs.accounts().size > 1 || (!App.prefs.loggedIn && App.prefs.accounts().isNotEmpty()) -> Screen.Accounts
     App.prefs.loggedIn -> Screen.Libraries
     else -> Screen.Login
 }
@@ -170,19 +196,24 @@ val LocalIcons = staticCompositionLocalOf<ListIcons> { error("provided by Root")
 val LocalShown = staticCompositionLocalOf<State<Boolean>> { mutableStateOf(true) }
 
 // Composed but laid out at zero size and never placed, so it is not drawn, gets no touches, and exposes no semantics to accessibility services.
-private fun Modifier.hidden() = clearAndSetSemantics {}.layout { _, c -> layout(c.minWidth, c.minHeight) {} }
+private fun Modifier.hidden() = clearAndSetSemantics {}.layout { _, constraints ->
+    layout(constraints.minWidth, constraints.minHeight) {}
+}
 
 fun episodeLabel(ep: BaseItemDto) = "S${ep.parentIndexNumber ?: "?"}E${ep.indexNumber ?: "?"} · ${ep.name.orEmpty()}"
 
 fun formatMs(ms: Long): String {
     val s = (ms / 1000).coerceAtLeast(0)
-    return if (s >= 3600) "%d:%02d:%02d".format(s / 3600, s / 60 % 60, s % 60) else "%d:%02d".format(s / 60, s % 60)
+    if (s >= 3600) return "%d:%02d:%02d".format(s / 3600, s / 60 % 60, s % 60)
+    return "%d:%02d".format(s / 60, s % 60)
 }
 
 /** The next episode in season order, never the server's Next Up. Specials and missing episodes are skipped. */
 fun nextEpisode(item: BaseItemDto, siblings: List<BaseItemDto>): BaseItemDto? {
     val playable = siblings.filter { it.parentIndexNumber != 0 && it.locationType != LocationType.VIRTUAL }
-    return playable.getOrNull(playable.indexOfFirst { it.id == item.id } + 1)?.takeIf { playable.any { p -> p.id == item.id } }
+    val index = playable.indexOfFirst { it.id == item.id }
+    if (index == -1) return null
+    return playable.getOrNull(index + 1)
 }
 
 fun playerTitle(item: BaseItemDto) =
@@ -193,30 +224,39 @@ fun audioIndex(source: MediaSourceInfo, lang: String) =
     source.mediaStreams?.firstOrNull { it.type == MediaStreamType.AUDIO && sameLanguage(it.language, lang) }?.index
 
 /** Players use short codes ("ja") while the server keeps three letters ("jpn"). */
-fun sameLanguage(a: String?, b: String?) = a != null && b != null &&
-    runCatching { Locale.forLanguageTag(a).isO3Language == Locale.forLanguageTag(b).isO3Language }.getOrDefault(a == b)
+fun sameLanguage(a: String?, b: String?): Boolean {
+    if (a == null || b == null) return false
+    // isO3Language throws for a code it doesn't know; then only the same text counts as the same language.
+    val sameCode = runCatching { Locale.forLanguageTag(a).isO3Language == Locale.forLanguageTag(b).isO3Language }
+    return sameCode.getOrDefault(a == b)
+}
 
 /**
  * Subtitle streams that players add by URL or from a fetched copy: the server's external files and, for a [transcode],
  * the embedded text ones, which the server extracts with their styling. A transcode drops embedded subtitles.
  */
-fun sideloadedSubs(item: BaseItemDto, transcode: Boolean): List<MediaStream> =
-    item.mediaSources?.firstOrNull()?.mediaStreams.orEmpty()
-        .filter { it.type == MediaStreamType.SUBTITLE && (it.isExternal || transcode && it.isTextSubtitleStream) }
+fun sideloadedSubs(item: BaseItemDto, transcode: Boolean): List<MediaStream> {
+    val streams = item.mediaSources?.firstOrNull()?.mediaStreams.orEmpty()
+    return streams.filter { it.type == MediaStreamType.SUBTITLE && (it.isExternal || (transcode && it.isTextSubtitleStream)) }
+}
 
 /** For a transcode: a picture subtitle (PGS, VobSub) in [lang] to burn into the video, when no text one is in that language. */
 fun burnInIndex(source: MediaSourceInfo, lang: String?): Int? {
     // "" means subtitles off. Without this check it would match streams of undetermined language ("und").
     if (lang.isNullOrEmpty()) return null
     val subs = source.mediaStreams.orEmpty().filter { it.type == MediaStreamType.SUBTITLE && sameLanguage(it.language, lang) }
-    return subs.firstOrNull()?.takeIf { subs.none { s -> s.isTextSubtitleStream } }?.index
+    if (subs.any { it.isTextSubtitleStream }) return null
+    return subs.firstOrNull()?.index
 }
 
 class Chapter(val name: String, val startMs: Long)
 
 /** The file's chapters, from the server. A single chapter counts as no chapters at all. */
-fun chapters(item: BaseItemDto): List<Chapter> =
-    item.chapters.orEmpty().map { Chapter(it.name.orEmpty(), it.startPositionTicks / TICKS_PER_MS) }.takeIf { it.size > 1 }.orEmpty()
+fun chapters(item: BaseItemDto): List<Chapter> {
+    val all = item.chapters.orEmpty().map { Chapter(it.name.orEmpty(), it.startPositionTicks / TICKS_PER_MS) }
+    if (all.size > 1) return all
+    return emptyList()
+}
 
 /** Choices for the wireless audio delay; negative values are for audio that arrives early. */
 val AUDIO_DELAYS_MS = (-200..500 step 50).toList()

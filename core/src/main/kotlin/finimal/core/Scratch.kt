@@ -47,21 +47,27 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
     }
 
     /** Keys with anything on disk. */
-    fun keys(): List<String> = dir.list().orEmpty().filter { File(dir, it).isDirectory }
+    fun keys(): List<String> = dir.list().orEmpty().filter { name -> File(dir, name).isDirectory }
 
     /** Removes [key]'s bytes and returns true, unless a reader, buffer or download has it open. */
     fun delete(key: String): Boolean {
         val e = synchronized(this) { entries[key] }
         if (e != null && !e.release()) return false
         // Delete under the lock, so a concurrent entry() for this key can't count the chunks being deleted as present.
-        synchronized(this) { entries.remove(key); File(dir, key).deleteRecursively() }
+        synchronized(this) {
+            entries.remove(key)
+            File(dir, key).deleteRecursively()
+        }
         return true
     }
 
     /** Stops every filler and reader but keeps the files. Used when switching storage location. */
     fun close() {
-        val all = synchronized(this) { closed = true; entries.values.toList() }
-        all.forEach { it.shutDown() }
+        val all = synchronized(this) {
+            closed = true
+            entries.values.toList()
+        }
+        for (entry in all) entry.shutDown()
     }
 
     enum class Priority { READ, BUFFER, DOWNLOAD }
@@ -85,7 +91,11 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
     inner class Entry internal constructor(val key: String, private val folder: File) {
         // Everything below is guarded by this entry's monitor.
         /** Total bytes; -1 until the server says. */
-        var length = File(folder, "length").takeIf { it.exists() }?.readText()?.trim()?.toLongOrNull() ?: -1L
+        var length: Long = run {
+            val file = File(folder, "length")
+            val saved = if (file.exists()) file.readText().trim().toLongOrNull() else null
+            saved ?: -1L
+        }
             private set
         private val present = BitSet()
         /** The chunk the filler is writing, and how many of its bytes are on disk. */
@@ -108,7 +118,11 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
         init {
             for (f in folder.listFiles().orEmpty()) {
                 val i = f.name.toIntOrNull()
-                if (i != null) present.set(i) else if (f.name.endsWith(".part") || f.name.endsWith(".import")) f.delete()
+                if (i != null) {
+                    present.set(i)
+                } else if (f.name.endsWith(".part") || f.name.endsWith(".import")) {
+                    f.delete()
+                }
             }
         }
 
@@ -121,7 +135,7 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
         @Synchronized
         fun source(url: () -> String, size: Long?) {
             this.url = url
-            expectedSize = size?.takeIf { it > 0 }
+            expectedSize = if (size != null && size > 0) size else null
         }
 
         @get:Synchronized val complete get() = length >= 0 && present.cardinality() == chunks()
@@ -132,7 +146,10 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
             if (length < 0) return 0
             var sum = 0L
             var i = present.nextSetBit(0)
-            while (i >= 0) { sum += chunkLength(i); i = present.nextSetBit(i + 1) }
+            while (i >= 0) {
+                sum += chunkLength(i)
+                i = present.nextSetBit(i + 1)
+            }
             return sum
         }
 
@@ -145,7 +162,10 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
             if (length < 0 || from >= length) return 0
             var i = (from / chunkSize).toInt()
             var end = i.toLong() * chunkSize
-            while (i < chunks() && present[i]) end += chunkLength(i++)
+            while (i < chunks() && present[i]) {
+                end += chunkLength(i)
+                i++
+            }
             if (i < chunks() && writing == i) end += written
             return (minOf(end, length) - from).coerceAtLeast(0)
         }
@@ -211,11 +231,19 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
 
         /** Stores the whole chunk [i] without going through the filler. */
         fun putChunk(i: Int, bytes: ByteArray) {
-            synchronized(this) { require(bytes.size.toLong() == chunkLength(i)) { "chunk $i is ${chunkLength(i)} bytes, not ${bytes.size}" } }
+            synchronized(this) {
+                require(bytes.size.toLong() == chunkLength(i)) { "chunk $i is ${chunkLength(i)} bytes, not ${bytes.size}" }
+            }
             val part = File(folder, "$i.import")
-            FileOutputStream(part).use { it.write(bytes); it.fd.sync() }
+            FileOutputStream(part).use { out ->
+                out.write(bytes)
+                out.fd.sync()
+            }
             if (!part.renameTo(chunkFile(i))) throw IOException("rename failed")
-            synchronized(this) { present.set(i); (this as Object).notifyAll() }
+            synchronized(this) {
+                present.set(i)
+                (this as Object).notifyAll()
+            }
         }
 
         /**
@@ -240,18 +268,24 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
                             error != null && writing != i -> throw InterruptedIOException("no data: ${error!!.message}")
                         }
                         val wait = deadline - System.currentTimeMillis()
-                        if (wait <= 0) throw error?.let { InterruptedIOException("no data: ${it.message}") } ?: InterruptedIOException("no data")
+                        if (wait <= 0) {
+                            val lastError = error
+                            if (lastError != null) throw InterruptedIOException("no data: ${lastError.message}")
+                            throw InterruptedIOException("no data")
+                        }
                         (this as Object).wait(wait)
                     }
                     @Suppress("UNREACHABLE_CODE") error("unreachable")
                 }
                 // On Windows, only a FileChannel (not a RandomAccessFile) lets the filler rename the part while it is open.
+                val count = minOf(len.toLong(), available).toInt()
                 val n = try {
-                    FileChannel.open(file.toPath()).use { it.read(ByteBuffer.wrap(buf, off, minOf(len.toLong(), available).toInt()), inChunk) }
+                    FileChannel.open(file.toPath()).use { channel -> channel.read(ByteBuffer.wrap(buf, off, count), inChunk) }
                 } catch (e: IOException) {
                     // Between the check above and this open, the filler may have renamed the part to its chunk, or
                     // deleted it to start over. Windows reports a part being deleted as AccessDenied. Retry until the deadline.
-                    if (e !is NoSuchFileException && e !is AccessDeniedException || System.currentTimeMillis() > deadline) throw e
+                    val partMoved = e is NoSuchFileException || e is AccessDeniedException
+                    if (!partMoved || System.currentTimeMillis() > deadline) throw e
                     continue
                 }
                 if (n <= 0) continue
@@ -266,7 +300,8 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
             while (length < 0) {
                 if (gone) throw InterruptedIOException("closed")
                 if (fatal) throw error!!
-                error?.let { throw InterruptedIOException("no answer: ${it.message}") }
+                val lastError = error
+                if (lastError != null) throw InterruptedIOException("no answer: ${lastError.message}")
                 val wait = deadline - System.currentTimeMillis()
                 if (wait <= 0) throw InterruptedIOException("no answer")
                 (this as Object).wait(wait)
@@ -291,9 +326,14 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
                         bytes() to length
                     }
                     val now = System.currentTimeMillis()
-                    if (bytes != lastBytes) { lastBytes = bytes; lastProgress = now; onProgress(bytes, total) }
+                    if (bytes != lastBytes) {
+                        lastBytes = bytes
+                        lastProgress = now
+                        onProgress(bytes, total)
+                    }
                     synchronized(this) {
-                        error?.let { if (now - lastProgress > stallMs) throw it }
+                        val lastError = error
+                        if (lastError != null && now - lastProgress > stallMs) throw lastError
                         if (!complete) (this as Object).wait(1_000)
                     }
                 }
@@ -303,20 +343,30 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
         private fun touch() {
             val now = System.currentTimeMillis()
             // Update the folder's mtime at most once a minute, to keep disk writes rare.
-            if (now - touched > 60_000) { touched = now; folder.setLastModified(now) }
+            if (now - touched > 60_000) {
+                touched = now
+                folder.setLastModified(now)
+            }
         }
 
         /** The next chunk to fetch: the first missing one in the most pressing demand's range. Among readers, the newest goes first. */
         private fun target(): Int? {
             if (gone || fatal) return null
-            val order = demands.filter { !lowSpace || it.priority == Priority.READ }
-                .sortedWith(compareBy<Demand> { it.priority }.thenByDescending { it.seq })
-            if (length < 0) return order.firstOrNull()?.let { (it.position / chunkSize).toInt() }
+            val eligible = demands.filter { d -> !lowSpace || d.priority == Priority.READ }
+            val order = eligible.sortedWith(compareBy<Demand> { d -> d.priority }.thenByDescending { d -> d.seq })
+            if (length < 0) {
+                val first = order.firstOrNull() ?: return null
+                return (first.position / chunkSize).toInt()
+            }
             for (d in order) {
                 if (d.position >= length) continue
                 val first = (d.position / chunkSize).toInt()
-                val last = if (d.ahead == Long.MAX_VALUE) chunks() - 1
-                    else (minOf(length, d.position + d.ahead).minus(1) / chunkSize).toInt()
+                val last = if (d.ahead == Long.MAX_VALUE) {
+                    chunks() - 1
+                } else {
+                    val end = minOf(length, d.position + d.ahead)
+                    ((end - 1) / chunkSize).toInt()
+                }
                 val i = present.nextClearBit(first)
                 if (i <= last) return i
             }
@@ -330,7 +380,10 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
                     while (true) {
                         val t = target()
                         if (t != null) return@synchronized t
-                        if (demands.isEmpty() || gone) { filler = null; return }
+                        if (demands.isEmpty() || gone) {
+                            filler = null
+                            return
+                        }
                         (this as Object).wait()
                     }
                     @Suppress("UNREACHABLE_CODE") error("unreachable")
@@ -341,55 +394,93 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
                     if (onStorageFull()) continue
                     synchronized(this) {
                         // Buffering and downloading stop, but a reader still gets its chunks written while there is room.
-                        if (lowSpace || demands.none { it.priority == Priority.READ }) { error = e; fatal = true } else lowSpace = true
+                        if (lowSpace || demands.none { d -> d.priority == Priority.READ }) {
+                            error = e
+                            fatal = true
+                        } else {
+                            lowSpace = true
+                        }
                         (this as Object).notifyAll()
                     }
                 } catch (e: WrongFile) {
                     fail(e)
                 } catch (e: HttpStatus) {
                     // A 4xx stays refused. A 401 (stale token) and a 5xx (server trouble) are worth waiting out.
-                    if (e.code in 400..499 && e.code != 401) fail(e) else backOff(e, attempt++)
+                    if (e.code in 400..499 && e.code != 401) {
+                        fail(e)
+                    } else {
+                        backOff(e, attempt++)
+                    }
                 } catch (e: IOException) {
-                    if (synchronized(this) { call?.isCanceled() == true }) continue
+                    val cancelled = synchronized(this) { call?.isCanceled() == true }
+                    if (cancelled) continue
                     backOff(e, attempt++)
                 } finally {
                     synchronized(this) {
                         call = null
                         // Once gone, the folder may belong to a new entry, so leave the part. That entry's init deletes leftovers.
-                        if (writing >= 0) { if (!gone) partFile(writing).delete(); writing = -1; written = 0 }
+                        if (writing >= 0) {
+                            if (!gone) partFile(writing).delete()
+                            writing = -1
+                            written = 0
+                        }
                     }
                 }
             }
         }
 
-        private fun fail(e: IOException) = synchronized(this) { error = e; fatal = true; (this as Object).notifyAll() }
+        private fun fail(e: IOException) = synchronized(this) {
+            error = e
+            fatal = true
+            (this as Object).notifyAll()
+        }
 
         private fun backOff(e: IOException, attempt: Int) = synchronized(this) {
             error = e
             (this as Object).notifyAll()
             // A new demand, such as a seek or a retry, ends the wait early.
-            if (!gone && demands.isNotEmpty()) (this as Object).wait(longArrayOf(1_000, 2_000, 4_000, 8_000, 16_000, 30_000)[minOf(attempt, 5)])
+            if (!gone && demands.isNotEmpty()) {
+                val delays = longArrayOf(1_000, 2_000, 4_000, 8_000, 16_000, 30_000)
+                (this as Object).wait(delays[minOf(attempt, 5)])
+            }
         }
 
         /** Fetches from chunk [start] on while the demands want what comes next. Returns whether a chunk was stored. */
         private fun fetch(start: Int): Boolean {
             val from = start.toLong() * chunkSize
             val c = synchronized(this) {
-                http.newCall(Request.Builder().url(url!!()).header("Range", "bytes=$from-").build()).also { call = it }
+                val request = Request.Builder().url(url!!()).header("Range", "bytes=$from-").build()
+                val newCall = http.newCall(request)
+                call = newCall
+                newCall
             }
             var stored = false
             c.execute().use { r ->
                 if (!r.isSuccessful) throw HttpStatus(r.code)
                 val ranged = r.code == 206
                 val range = r.header("Content-Range")
-                val begin = if (ranged) range?.substringAfter("bytes ")?.substringBefore('-')?.toLongOrNull() else 0L
-                if (begin != (if (ranged) from else 0L)) throw IOException("unexpected range $range")
-                val total = if (ranged) range!!.substringAfter('/').toLongOrNull() ?: -1 else r.body.contentLength()
+                val begin: Long? = when {
+                    !ranged -> 0L
+                    range == null -> null
+                    else -> range.substringAfter("bytes ").substringBefore('-').toLongOrNull()
+                }
+                val expectedBegin = if (ranged) from else 0L
+                if (begin != expectedBegin) throw IOException("unexpected range $range")
+                val total = if (ranged) {
+                    range!!.substringAfter('/').toLongOrNull() ?: -1L
+                } else {
+                    r.body.contentLength()
+                }
                 synchronized(this) {
                     val expected = if (length >= 0) length else expectedSize
                     if (total < 0 || expected != null && total != expected) throw WrongFile("$total bytes, expected $expected")
                     if (length < 0) {
-                        try { folder.mkdirs(); File(folder, "length").writeAtomically("$total") } catch (e: IOException) { throw StorageError(e) }
+                        try {
+                            folder.mkdirs()
+                            File(folder, "length").writeAtomically("$total")
+                        } catch (e: IOException) {
+                            throw StorageError(e)
+                        }
                         length = total
                         (this as Object).notifyAll()
                     }
@@ -401,26 +492,43 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
                     val i = (pos / chunkSize).toInt()
                     val end = i.toLong() * chunkSize + chunkLength(i)
                     val have = synchronized(this) {
+                        val next = target()
                         when {
                             present[i] -> true
-                            target() == i -> { writing = i; written = 0; false }
+                            next == i -> {
+                                writing = i
+                                written = 0
+                                false
+                            }
                             // A server that ignores the range sends from byte 0. Skip ahead to the wanted chunk rather than request again at once.
-                            !ranged && target().let { it != null && i < it } -> true
+                            !ranged && next != null && i < next -> true
                             else -> return stored
                         }
                     }
                     if (have) {
                         // Only a server that ignores the range sends a chunk that is already here or not wanted. Skip it, since later ones may be wanted.
                         if (ranged) return stored
-                        while (pos < end) pos += input.read(buf, 0, minOf(buf.size.toLong(), end - pos).toInt()).also { if (it < 0) throw IOException("ended at $pos") }
+                        while (pos < end) {
+                            val n = input.read(buf, 0, minOf(buf.size.toLong(), end - pos).toInt())
+                            if (n < 0) throw IOException("ended at $pos")
+                            pos += n
+                        }
                         continue
                     }
-                    val out = try { FileOutputStream(partFile(i)) } catch (e: IOException) { throw StorageError(e) }
+                    val out = try {
+                        FileOutputStream(partFile(i))
+                    } catch (e: IOException) {
+                        throw StorageError(e)
+                    }
                     out.use {
                         while (pos < end) {
                             val n = input.read(buf, 0, minOf(buf.size.toLong(), end - pos).toInt())
                             if (n < 0) throw IOException("ended at $pos of $length bytes")
-                            try { out.write(buf, 0, n) } catch (e: IOException) { throw StorageError(e) }
+                            try {
+                                out.write(buf, 0, n)
+                            } catch (e: IOException) {
+                                throw StorageError(e)
+                            }
                             pos += n
                             synchronized(this) {
                                 written += n
@@ -429,7 +537,11 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
                                 if (target() != i) return stored
                             }
                         }
-                        try { out.fd.sync() } catch (e: IOException) { throw StorageError(e) }
+                        try {
+                            out.fd.sync()
+                        } catch (e: IOException) {
+                            throw StorageError(e)
+                        }
                     }
                     synchronized(this) {
                         // Once gone, the folder may belong to a new entry, and this part to that entry's filler.

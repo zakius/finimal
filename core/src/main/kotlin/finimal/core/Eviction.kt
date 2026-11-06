@@ -7,7 +7,8 @@ fun evictionOrder(entries: List<CacheEntry>, limitBytes: Long, protectedKey: Str
     val buffer = entries.filter { !it.pinned }
     var total = buffer.sumOf { it.bytes }
     val out = mutableListOf<String>()
-    for (e in buffer.filter { it.key != protectedKey }.sortedBy { it.lastAccessMs }) {
+    val candidates = buffer.filter { it.key != protectedKey }
+    for (e in candidates.sortedBy { it.lastAccessMs }) {
         if (total <= limitBytes) break
         out += e.key
         total -= e.bytes
@@ -19,5 +20,8 @@ fun evictionOrder(entries: List<CacheEntry>, limitBytes: Long, protectedKey: Str
  * The buffer limit, lowered so the volume keeps 2 GB or 5 % free, whichever is more. A full disk breaks
  * downloads, play-state writes and other apps, and the setting alone can't know how much room is left.
  */
-fun bufferLimit(limitBytes: Long, bufferedBytes: Long, freeBytes: Long, volumeBytes: Long): Long =
-    minOf(limitBytes, bufferedBytes + freeBytes - maxOf(2_000_000_000L, volumeBytes * 5 / 100)).coerceAtLeast(0)
+fun bufferLimit(limitBytes: Long, bufferedBytes: Long, freeBytes: Long, volumeBytes: Long): Long {
+    val reserve = maxOf(2_000_000_000L, volumeBytes * 5 / 100)
+    val room = bufferedBytes + freeBytes - reserve
+    return minOf(limitBytes, room).coerceAtLeast(0)
+}

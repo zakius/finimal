@@ -30,7 +30,11 @@ class WindowControl(val state: WindowState) {
 
     fun setFullscreen(on: Boolean) {
         if (on == fullscreen) return
-        if (on) { beforeFullscreen = state.placement; state.placement = WindowPlacement.Fullscreen; return }
+        if (on) {
+            beforeFullscreen = state.placement
+            state.placement = WindowPlacement.Fullscreen
+            return
+        }
         // Return to maximized if it was maximized, not to the older floating size. Go through floating first, because
         // on X11 a fullscreen window told to maximize stays fullscreen.
         state.placement = WindowPlacement.Floating
@@ -55,15 +59,15 @@ class WindowControl(val state: WindowState) {
                 val ge = GraphicsEnvironment.getLocalGraphicsEnvironment()
                 val screens = ge.screenDevices.map { it.defaultConfiguration }.map { c ->
                     val i = Toolkit.getDefaultToolkit().getScreenInsets(c)
-                    c.bounds.run { Rectangle(x + i.left, y + i.top, width - i.left - i.right, height - i.top - i.bottom) }
+                    val b = c.bounds
+                    Rectangle(b.x + i.left, b.y + i.top, b.width - i.left - i.right, b.height - i.top - i.bottom)
                 }
                 fit(saved, int("window.x") != null && int("window.y") != null, ge.maximumWindowBounds, screens)
             }.getOrNull() // Fails when headless.
-            return WindowControl(WindowState(
-                placement = if (store["window.maximized"] == true) WindowPlacement.Maximized else WindowPlacement.Floating,
-                position = bounds?.let { WindowPosition(it.x.dp, it.y.dp) } ?: WindowPosition(Alignment.Center),
-                size = (bounds ?: saved).let { DpSize(it.width.dp, it.height.dp) },
-            ))
+            val placement = if (store["window.maximized"] == true) WindowPlacement.Maximized else WindowPlacement.Floating
+            val position = if (bounds != null) WindowPosition(bounds.x.dp, bounds.y.dp) else WindowPosition(Alignment.Center)
+            val size = bounds ?: saved
+            return WindowControl(WindowState(placement = placement, position = position, size = DpSize(size.width.dp, size.height.dp)))
         }
 
         /**
@@ -77,7 +81,9 @@ class WindowControl(val state: WindowState) {
             val w = saved.width.coerceAtMost(area.width)
             val h = saved.height.coerceAtMost(area.height)
             if (screen == null) return Rectangle(area.x + (area.width - w) / 2, area.y + (area.height - h) / 2, w, h)
-            return Rectangle(saved.x.coerceIn(area.x, area.x + area.width - w), saved.y.coerceIn(area.y, area.y + area.height - h), w, h)
+            val x = saved.x.coerceIn(area.x, area.x + area.width - w)
+            val y = saved.y.coerceIn(area.y, area.y + area.height - h)
+            return Rectangle(x, y, w, h)
         }
     }
 
@@ -91,7 +97,11 @@ class WindowControl(val state: WindowState) {
                     put("window.maximized", false)
                     put("window.width", s.size.width.value.toInt())
                     put("window.height", s.size.height.value.toInt())
-                    (s.position as? WindowPosition.Absolute)?.let { put("window.x", it.x.value.toInt()); put("window.y", it.y.value.toInt()) }
+                    val position = s.position
+                    if (position is WindowPosition.Absolute) {
+                        put("window.x", position.x.value.toInt())
+                        put("window.y", position.y.value.toInt())
+                    }
                 }
                 WindowPlacement.Fullscreen -> {}
             }

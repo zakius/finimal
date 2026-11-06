@@ -16,12 +16,18 @@ import kotlinx.serialization.json.Json
 class PendingStore(private val file: File) {
     private val json = Json { ignoreUnknownKeys = true }
     private val states: MutableMap<String, PlayState> =
-        if (!file.exists()) mutableMapOf()
-        else runCatching { json.decodeFromString<Map<String, PlayState>>(file.readText()) }
-            // Kept aside rather than overwritten by the next save: it may be the only copy of offline progress.
-            .onFailure { file.renameTo(File(file.path + ".corrupt")) }
-            .getOrDefault(emptyMap())
-            .toMutableMap()
+        if (!file.exists()) {
+            mutableMapOf()
+        } else {
+            val saved: Map<String, PlayState> = try {
+                json.decodeFromString<Map<String, PlayState>>(file.readText())
+            } catch (e: Throwable) {
+                // Kept aside rather than overwritten by the next save: it may be the only copy of offline progress.
+                file.renameTo(File(file.path + ".corrupt"))
+                emptyMap()
+            }
+            saved.toMutableMap()
+        }
 
     @Synchronized fun get(itemId: String): PlayState? = states[itemId]
 
@@ -40,7 +46,12 @@ class PendingStore(private val file: File) {
     }
 
     // On a full disk the states stay in memory, and the next put writes them all.
-    private fun save() = try { file.writeAtomically(json.encodeToString(states.toMap())) } catch (e: IOException) {}
+    private fun save() {
+        try {
+            file.writeAtomically(json.encodeToString(states.toMap()))
+        } catch (e: IOException) {
+        }
+    }
 }
 
 /**
@@ -49,6 +60,9 @@ class PendingStore(private val file: File) {
  */
 fun File.writeAtomically(text: String) {
     val tmp = File("$path.tmp")
-    FileOutputStream(tmp).use { it.write(text.toByteArray()); it.fd.sync() }
+    FileOutputStream(tmp).use { out ->
+        out.write(text.toByteArray())
+        out.fd.sync()
+    }
     Files.move(tmp.toPath(), toPath(), REPLACE_EXISTING, ATOMIC_MOVE)
 }

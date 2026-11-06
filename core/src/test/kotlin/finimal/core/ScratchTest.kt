@@ -17,6 +17,7 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.Response
 
 class ScratchTest {
     private val chunk = 64 * 1024
@@ -36,22 +37,36 @@ class ScratchTest {
         executor = Executors.newCachedThreadPool()
         createContext("/f") { ex ->
             try {
-                val from = ex.requestHeaders.getFirst("Range")?.removePrefix("bytes=")?.substringBefore('-')?.toLong()
+                val rangeHeader = ex.requestHeaders.getFirst("Range")
+                val from = if (rangeHeader != null) rangeHeader.removePrefix("bytes=").substringBefore('-').toLong() else null
                 starts += from ?: 0
                 if (hang) Thread.sleep(60_000)
-                if (failFirst > 0) { failFirst--; ex.sendResponseHeaders(503, -1); return@createContext }
-                if (status != 200) { ex.sendResponseHeaders(status, -1); return@createContext }
+                if (failFirst > 0) {
+                    failFirst--
+                    ex.sendResponseHeaders(503, -1)
+                    return@createContext
+                }
+                if (status != 200) {
+                    ex.sendResponseHeaders(status, -1)
+                    return@createContext
+                }
                 val start = if (from != null && honorRange) from.toInt() else 0
                 if (from != null && honorRange) {
                     ex.responseHeaders.add("Content-Range", "bytes $start-${content.size - 1}/${content.size}")
                     ex.sendResponseHeaders(206, (content.size - start).toLong())
-                } else ex.sendResponseHeaders(200, content.size.toLong())
-                val drop = dropAfter.also { dropAfter = -1 }
+                } else {
+                    ex.sendResponseHeaders(200, content.size.toLong())
+                }
+                val drop = dropAfter
+                dropAfter = -1
                 var pos = start
                 val began = System.nanoTime()
                 while (pos < content.size) {
                     val n = minOf(8192, content.size - pos)
-                    if (drop >= 0 && pos - start >= drop) { ex.close(); return@createContext } // cut mid-body
+                    if (drop >= 0 && pos - start >= drop) { // cut mid-body
+                        ex.close()
+                        return@createContext
+                    }
                     ex.responseBody.write(content, pos, n)
                     ex.responseBody.flush()
                     pos += n
@@ -62,7 +77,9 @@ class ScratchTest {
                 }
             } catch (e: IOException) {
                 // The client went away: a seek, or a cancelled fetch.
-            } finally { ex.close() }
+            } finally {
+                ex.close()
+            }
         }
         start()
     }
@@ -73,18 +90,29 @@ class ScratchTest {
     private var server = ScratchServer({ scratch }, ahead = 4L * chunk, waitMs = 5_000)
 
     @AfterTest fun stop() {
-        server.close(); scratch.close(); origin.stop(0); dir.deleteRecursively()
+        server.close()
+        scratch.close()
+        origin.stop(0)
+        dir.deleteRecursively()
     }
 
-    private fun entry(key: String = "k", size: Long? = content.size.toLong()) = scratch.entry(key).apply { source({ url }, size) }
+    private fun entry(key: String = "k", size: Long? = content.size.toLong()): Scratch.Entry {
+        val e = scratch.entry(key)
+        e.source({ url }, size)
+        return e
+    }
 
-    private fun get(key: String = "k", range: String? = null) =
-        http.newCall(Request.Builder().url(server.url(key)).apply { range?.let { header("Range", it) } }.build()).execute()
+    private fun get(key: String = "k", range: String? = null): Response {
+        val request = Request.Builder().url(server.url(key))
+        if (range != null) request.header("Range", range)
+        return http.newCall(request.build()).execute()
+    }
 
     private fun slice(from: Int, to: Int = content.size) = content.copyOfRange(from, to)
 
     private fun reopen() {
-        server.close(); scratch.close()
+        server.close()
+        scratch.close()
         scratch = Scratch(dir, http, chunk)
         server = ScratchServer({ scratch }, ahead = 4L * chunk, waitMs = 5_000)
     }
@@ -177,7 +205,8 @@ class ScratchTest {
     }
 
     @Test fun leftoverPartIsDroppedAndFetchedAgain() {
-        val folder = File(dir, "k").apply { mkdirs() }
+        val folder = File(dir, "k")
+        folder.mkdirs()
         File(folder, "length").writeText("${content.size}")
         File(folder, "0").writeBytes(slice(0, chunk))
         File(folder, "1.part").writeBytes(ByteArray(500) { 9 })
@@ -228,7 +257,11 @@ class ScratchTest {
         val got = java.io.ByteArrayOutputStream()
         e.demand(from.toLong(), Long.MAX_VALUE, Scratch.Priority.BUFFER).use {
             val buf = ByteArray(8192)
-            while (true) { val n = e.read((from + got.size()).toLong(), buf, 0, buf.size, 5_000); if (n < 0) break; got.write(buf, 0, n) }
+            while (true) {
+                val n = e.read((from + got.size()).toLong(), buf, 0, buf.size, 5_000)
+                if (n < 0) break
+                got.write(buf, 0, n)
+            }
         }
         assertContentEquals(slice(from), got.toByteArray())
         assertEquals(1, starts.size)
@@ -256,7 +289,8 @@ class ScratchTest {
         // The network comes back: the player's next request gets the file.
         val back = HttpServer.create(InetSocketAddress("127.0.0.1", port), 0).apply {
             createContext("/f") { ex ->
-                val from = ex.requestHeaders.getFirst("Range")?.removePrefix("bytes=")?.substringBefore('-')?.toInt() ?: 0
+                val rangeHeader = ex.requestHeaders.getFirst("Range")
+                val from = if (rangeHeader != null) rangeHeader.removePrefix("bytes=").substringBefore('-').toInt() else 0
                 ex.responseHeaders.add("Content-Range", "bytes $from-${content.size - 1}/${content.size}")
                 ex.sendResponseHeaders(206, (content.size - from).toLong())
                 ex.responseBody.write(content, from, content.size - from)
@@ -266,7 +300,9 @@ class ScratchTest {
         }
         try {
             get().use { r -> assertContentEquals(content, r.body.bytes()) }
-        } finally { back.stop(0) }
+        } finally {
+            back.stop(0)
+        }
     }
 
     @Test fun deleteWaitsUntilNobodyHasItOpen() {
@@ -292,13 +328,16 @@ class ScratchTest {
             bytesPerSecond = Long.MAX_VALUE
             get(range = "bytes=1000-").use { r -> assertContentEquals(slice(1000), r.body.bytes()) }
             assertEquals(emptyList(), escaped.toList())
-        } finally { Thread.setDefaultUncaughtExceptionHandler(before) }
+        } finally {
+            Thread.setDefaultUncaughtExceptionHandler(before)
+        }
     }
 
     @Test fun unknownKeyAndWrongTokenAre404() {
         get("nope").use { r -> assertEquals(404, r.code) }
-        http.newCall(Request.Builder().url(server.url("k").replaceAfterLast(':', "1/x/k").let { server.url("k").substringBeforeLast('/').substringBeforeLast('/') + "/x/k" }).build())
-            .execute().use { r -> assertEquals(404, r.code) }
+        val base = server.url("k").substringBeforeLast('/').substringBeforeLast('/')
+        val wrongToken = Request.Builder().url("$base/x/k").build()
+        http.newCall(wrongToken).execute().use { r -> assertEquals(404, r.code) }
     }
 
     @Test fun contiguousCountsWholeChunksFromAPosition() {

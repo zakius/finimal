@@ -57,7 +57,11 @@ object App {
     val http by lazy { OkHttpClient() }
     val downloads get() = platform.downloads
     /** The remote-first interface: no touch-only controls, D-pad keys in the player, TV-safe margins. */
-    val tv get() = when (prefs.interfaceMode) { 1 -> false; 2 -> true; else -> platform.autoTv }
+    val tv get() = when (prefs.interfaceMode) {
+        1 -> false
+        2 -> true
+        else -> platform.autoTv
+    }
     val autoTv get() = platform.autoTv
 
     /**
@@ -73,17 +77,23 @@ object App {
      */
     val pending: PendingStore get() = synchronized(this) {
         // After a session expires, stops that are still being recorded belong to the account that just left.
-        if (prefs.userId == null) pendingStore?.let { return it }
-        val account = prefs.baseUrl to prefs.userId
-        pendingStore?.takeIf { pendingAccount == account } ?: run {
-            val name = java.security.MessageDigest.getInstance("SHA-1").digest("${account.first}\u0000${account.second}".toByteArray())
-                .take(8).joinToString("") { "%02x".format(it) }
-            val file = File(platform.appFiles, "pending-$name.json")
-            // Older versions kept one pending.json for everyone. It goes to the next account that logs in.
-            val legacy = File(platform.appFiles, "pending.json")
-            if (account.second != null && legacy.exists() && !file.exists()) legacy.renameTo(file)
-            PendingStore(file).also { pendingStore = it; pendingAccount = account }
+        if (prefs.userId == null) {
+            val kept = pendingStore
+            if (kept != null) return kept
         }
+        val account = prefs.baseUrl to prefs.userId
+        val current = pendingStore
+        if (current != null && pendingAccount == account) return current
+        val hash = java.security.MessageDigest.getInstance("SHA-1").digest("${account.first}\u0000${account.second}".toByteArray())
+        val name = hash.take(8).joinToString("") { "%02x".format(it) }
+        val file = File(platform.appFiles, "pending-$name.json")
+        // Older versions kept one pending.json for everyone. It goes to the next account that logs in.
+        val legacy = File(platform.appFiles, "pending.json")
+        if (account.second != null && legacy.exists() && !file.exists()) legacy.renameTo(file)
+        val store = PendingStore(file)
+        pendingStore = store
+        pendingAccount = account
+        store
     }
     private var pendingStore: PendingStore? = null
     private var pendingAccount: Pair<String?, String?>? = null

@@ -49,7 +49,9 @@ internal actual fun RetryOnNewNetwork(onRetry: () -> Unit) {
         val initial = cm.activeNetwork
         val main = Handler(Looper.getMainLooper())
         val callback = object : ConnectivityManager.NetworkCallback() {
-            override fun onAvailable(network: Network) { if (network != initial) main.post { retry() } }
+            override fun onAvailable(network: Network) {
+                if (network != initial) main.post { retry() }
+            }
         }
         cm.registerDefaultNetworkCallback(callback)
         onDispose { cm.unregisterNetworkCallback(callback) }
@@ -62,13 +64,15 @@ class PrefsStore(private val p: SharedPreferences) : KeyValueStore {
     override fun edit(block: MutableMap<String, Any?>.() -> Unit) {
         val changes = LinkedHashMap<String, Any?>().apply(block)
         val e = p.edit()
-        for ((k, v) in changes) when (v) {
-            null -> e.remove(k)
-            is String -> e.putString(k, v)
-            is Boolean -> e.putBoolean(k, v)
-            is Int -> e.putInt(k, v)
-            is Long -> e.putLong(k, v)
-            else -> error("unsupported $k: $v")
+        for ((k, v) in changes) {
+            when (v) {
+                null -> e.remove(k)
+                is String -> e.putString(k, v)
+                is Boolean -> e.putBoolean(k, v)
+                is Int -> e.putInt(k, v)
+                is Long -> e.putLong(k, v)
+                else -> error("unsupported $k: $v")
+            }
         }
         e.apply()
     }

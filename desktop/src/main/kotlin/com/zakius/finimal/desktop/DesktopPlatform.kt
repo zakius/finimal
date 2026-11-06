@@ -17,8 +17,16 @@ private object Dirs {
     private val windows = System.getProperty("os.name").startsWith("Windows")
     private val home = System.getProperty("user.home")
     private fun env(name: String) = System.getenv(name)?.takeIf { it.isNotBlank() }
-    val config = File(if (windows) env("APPDATA") ?: "$home/AppData/Roaming" else env("XDG_CONFIG_HOME") ?: "$home/.config", "finimal")
-    val data = File(if (windows) env("LOCALAPPDATA") ?: "$home/AppData/Local" else env("XDG_DATA_HOME") ?: "$home/.local/share", "finimal")
+    val config = if (windows) {
+        File(env("APPDATA") ?: "$home/AppData/Roaming", "finimal")
+    } else {
+        File(env("XDG_CONFIG_HOME") ?: "$home/.config", "finimal")
+    }
+    val data = if (windows) {
+        File(env("LOCALAPPDATA") ?: "$home/AppData/Local", "finimal")
+    } else {
+        File(env("XDG_DATA_HOME") ?: "$home/.local/share", "finimal")
+    }
     val cache = if (windows) File(data, "cache") else File(env("XDG_CACHE_HOME") ?: "$home/.cache", "finimal")
 }
 
@@ -35,10 +43,22 @@ object DesktopPlatform : Platform {
     override val downloads = null
 
     override fun configure(options: JellyfinOptions.Builder) {
-        val id = store["deviceId"] as String? ?: UUID.randomUUID().toString().also { id -> store.edit { put("deviceId", id) } }
+        val savedId = store["deviceId"] as String?
+        val id = if (savedId != null) {
+            savedId
+        } else {
+            val newId = UUID.randomUUID().toString()
+            store.edit { put("deviceId", newId) }
+            newId
+        }
         // Not InetAddress.getLocalHost(), which resolves the name and can stall for seconds where that fails, as in a sandbox.
-        val name = System.getenv("COMPUTERNAME") ?: runCatching { File("/proc/sys/kernel/hostname").readText().trim() }.getOrNull()
-            ?.takeIf { it.isNotEmpty() } ?: "Desktop"
+        val computerName: String? = System.getenv("COMPUTERNAME")
+        val name = if (computerName != null) {
+            computerName
+        } else {
+            val hostname = runCatching { File("/proc/sys/kernel/hostname").readText().trim() }.getOrNull()
+            if (hostname.isNullOrEmpty()) "Desktop" else hostname
+        }
         options.deviceInfo = DeviceInfo(id, name)
     }
 
