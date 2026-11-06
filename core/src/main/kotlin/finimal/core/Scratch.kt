@@ -33,7 +33,7 @@ class StorageError(cause: IOException) : IOException(cause.message, cause)
  * One filler thread per entry fetches what its open [Demand]s ask for. Readers never fetch: they wait for the
  * filler and read the chunk it is writing as the bytes land.
  */
-class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int = 4 shl 20) {
+class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int = 4 * 1024 * 1024) {
     private val entries = HashMap<String, Entry>()
     @Volatile private var closed = false
 
@@ -368,7 +368,7 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
             error = e
             (this as Object).notifyAll()
             // A new demand (a seek, a retry) wakes it early.
-            if (!gone && demands.isNotEmpty()) (this as Object).wait(minOf(30_000L, 1_000L shl minOf(attempt, 5)))
+            if (!gone && demands.isNotEmpty()) (this as Object).wait(longArrayOf(1_000, 2_000, 4_000, 8_000, 16_000, 30_000)[minOf(attempt, 5)])
         }
 
         /** Fetches from chunk [start] on while the demands want what comes next. Returns whether a chunk was stored. */
@@ -395,7 +395,7 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
                     }
                 }
                 val input = r.body.byteStream()
-                val buf = ByteArray(1 shl 16)
+                val buf = ByteArray(64 * 1024)
                 var pos = begin!!
                 while (pos < length) {
                     val i = (pos / chunkSize).toInt()

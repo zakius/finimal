@@ -8,4 +8,4 @@ const val RECONNECT_WINDOW_MS = 60_000L
  * [RECONNECT_WINDOW_MS] has passed since [firstFailureMs]: time to tell the user.
  */
 fun reconnectDelayMs(attempt: Int, firstFailureMs: Long, nowMs: Long): Long? =
-    if (nowMs - firstFailureMs >= RECONNECT_WINDOW_MS) null else minOf(1_000L shl minOf(attempt, 4), 10_000L)
+    if (nowMs - firstFailureMs >= RECONNECT_WINDOW_MS) null else longArrayOf(1_000, 2_000, 4_000, 8_000, 10_000)[minOf(attempt, 4)]

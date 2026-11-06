@@ -57,15 +57,15 @@ object ScreenSaver {
     private fun hold(): (() -> Unit)? {
         if (System.getProperty("os.name").startsWith("Windows")) {
             val kernel = com.sun.jna.Native.load("kernel32", Kernel32::class.java)
-            // ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED; ES_CONTINUOUS alone clears them.
-            check(kernel.SetThreadExecutionState(0x80000000.toInt() or 0x2 or 0x1) != 0) { "SetThreadExecutionState failed" }
-            return { kernel.SetThreadExecutionState(0x80000000.toInt()) }
+            // ES_CONTINUOUS alone clears the other flags.
+            check(kernel.SetThreadExecutionState(ES_CONTINUOUS or ES_DISPLAY_REQUIRED or ES_SYSTEM_REQUIRED) != 0) { "SetThreadExecutionState failed" }
+            return { kernel.SetThreadExecutionState(ES_CONTINUOUS) }
         }
         val conn = bus ?: DBusConnectionBuilder.forSessionBus().build().also { bus = it }
         return runCatching {
             val portal = conn.getRemoteObject("org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop", PortalInhibit::class.java)
-            // 8: idle. The inhibition lasts until its request object is closed.
-            val request = portal.Inhibit("", UInt32(8), mapOf("reason" to Variant("Playing a video")))
+            // The inhibition lasts until its request object is closed.
+            val request = portal.Inhibit("", UInt32(INHIBIT_IDLE), mapOf("reason" to Variant("Playing a video")))
             val handle = conn.getRemoteObject("org.freedesktop.portal.Desktop", request.path, PortalRequest::class.java)
             ({ handle.Close() })
         }.getOrElse {
@@ -75,3 +75,8 @@ object ScreenSaver {
         }
     }
 }
+
+private const val ES_CONTINUOUS = 0x80000000.toInt()
+private const val ES_DISPLAY_REQUIRED = 0x2
+private const val ES_SYSTEM_REQUIRED = 0x1
+private const val INHIBIT_IDLE = 8

@@ -13,7 +13,7 @@ import kotlin.concurrent.thread
  * Each request is a reader [Scratch.Demand]: the filler fetches [ahead] bytes in front of what was sent. The path
  * carries a random token: other apps on the device can reach a loopback port too.
  */
-class ScratchServer(private val scratch: () -> Scratch, private val ahead: Long = 64L shl 20, private val waitMs: Long = 20_000) : Closeable {
+class ScratchServer(private val scratch: () -> Scratch, private val ahead: Long = 64L * 1024 * 1024, private val waitMs: Long = 20_000) : Closeable {
     // Not getLoopbackAddress(): on Android that can be ::1, which the 127.0.0.1 in [url] doesn't reach.
     private val socket = ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"))
     private val token = UUID.randomUUID().toString()
@@ -66,7 +66,7 @@ class ScratchServer(private val scratch: () -> Scratch, private val ahead: Long 
             if (range != null) respond("206 Partial Content", "Content-Range: bytes $from-$to/$length", *common)
             else respond("200 OK", *common)
             if (method == "HEAD") return
-            val buf = ByteArray(1 shl 18)
+            val buf = ByteArray(256 * 1024)
             var pos = from
             // A failure after the headers can only cut the body short; the player sees that and reconnects.
             while (pos <= to) {
