@@ -74,9 +74,12 @@ class Server {
     private val jellyfin = createJellyfin {
         clientInfo = ClientInfo("finimal", App.platform.versionName)
         App.platform.configure(this)
-        // One connection pool for API, images and streams. API answers also set the server clock.
+        // One connection pool for API, images and streams. Every API response also updates the server clock offset.
         apiClientFactory = OkHttpFactory(App.http.newBuilder().addNetworkInterceptor { chain ->
-            chain.proceed(chain.request()).also { r -> r.headers.getDate("Date")?.let { setClock(it.time) } }
+            val response = chain.proceed(chain.request())
+            val date = response.headers.getDate("Date")
+            if (date != null) setClock(date.time)
+            response
         }.build())
     }
     val api = jellyfin.createApi(prefs.baseUrl, prefs.token)
@@ -95,20 +98,26 @@ class Server {
         val base = prefs.baseUrl ?: return null
         val token = prefs.token ?: return null
         val user = prefs.userId ?: return null
-        Owner(UUID.fromString(user), playApis.getOrPut(base to token) { jellyfin.createApi(base, token) }, App.pending)
+        val ownerId = UUID.fromString(user)
+        val playApi = playApis.getOrPut(base to token) { jellyfin.createApi(base, token) }
+        Owner(ownerId, playApi, App.pending)
     }
 
     @Volatile private var clockOffsetMs = prefs.clockOffsetMs
 
-    // The header has whole seconds and the answer took time to arrive; smaller moves are noise.
+    // The Date header has whole-second precision and the response took time to arrive, so smaller changes are noise.
     private fun setClock(serverMs: Long) {
         val offset = serverMs - System.currentTimeMillis()
-        if (abs(offset - clockOffsetMs) > 2_000) { clockOffsetMs = offset; prefs.clockOffsetMs = offset }
+        if (abs(offset - clockOffsetMs) > CLOCK_NOISE_MS) {
+            clockOffsetMs = offset
+            prefs.clockOffsetMs = offset
+        }
     }
 
     /**
-     * Now on the server's clock, kept across restarts for offline plays. Play dates are compared with
-     * dates other devices sent; a phone clock an hour fast would otherwise beat a later play elsewhere.
+     * The current time on the server's clock. The offset is kept across restarts for offline plays. Play dates
+     * are compared with dates other devices sent, so a phone clock an hour fast would otherwise beat a later
+     * play elsewhere.
      */
     fun now() = System.currentTimeMillis() + clockOffsetMs
 
@@ -121,25 +130,36 @@ class Server {
     val loggedIn get() = prefs.loggedIn
     private val userId get() = UUID.fromString(prefs.userId)
 
-    /** Tries the addresses [serverCandidates] makes of the form's fields in turn, the next only if one can't connect. */
+    /** Tries each address [serverCandidates] builds from the form fields, moving to the next only when one can't connect. */
     suspend fun login(server: String, port: String, username: String, password: String) {
         val credentials = AuthenticateUserByName(username, password)
         val tries = serverCandidates(server, port)
         require(tries.isNotEmpty()) { "No server address" }
         for ((i, base) in tries.withIndex()) {
-            try { return login(base, credentials) }
-            // A certificate problem is not a server without https: falling back would send the password in clear text.
-            catch (e: Exception) { if (i == tries.lastIndex || !unreachable(e) || untrustedCertificate(e)) throw e }
+            try {
+                return login(base, credentials)
+            } catch (e: Exception) {
+                // A certificate problem does not mean the server lacks https. Falling back to http would send the password in clear text.
+                if (i == tries.lastIndex || !unreachable(e) || untrustedCertificate(e)) throw e
+            }
         }
     }
 
     private suspend fun login(base: String, credentials: AuthenticateUserByName) {
         api.update(baseUrl = base, accessToken = null)
-        // Adding an account that fails leaves the current one working.
-        val auth = try { io { api.authenticationApi.authenticateUserByName(credentials).content } }
-            catch (e: Exception) { api.update(baseUrl = prefs.baseUrl, accessToken = prefs.token); throw e }
+        // If adding an account fails, restore the current account's client so it keeps working.
+        val auth = try {
+            io { api.authenticationApi.authenticateUserByName(credentials).content }
+        } catch (e: Exception) {
+            api.update(baseUrl = prefs.baseUrl, accessToken = prefs.token)
+            throw e
+        }
         recorded.clear()
-        synchronized(App) { prefs.login(base, auth.accessToken!!, auth.user!!.id.toString(), auth.user!!.name.orEmpty()) }
+        synchronized(App) {
+            val token = auth.accessToken!!
+            val user = auth.user!!
+            prefs.login(base, token, user.id.toString(), user.name.orEmpty())
+        }
         api.update(baseUrl = base, accessToken = auth.accessToken)
         App.downloads?.accountChanged()
         App.sessionExpired = false
@@ -157,7 +177,7 @@ class Server {
     /** Removes the current account; [keepAccount] only ends its session, keeping its name and PIN for the next login. */
     fun logout(keepAccount: Boolean = false) {
         recorded.clear()
-        ListSnapshots.clear() // another account's lists must not show, even briefly
+        ListSnapshots.clear() // Another account's lists must not show, even briefly.
         synchronized(App) { if (keepAccount) prefs.endSession() else prefs.logout() }
         api.update(accessToken = null)
         App.downloads?.accountChanged()
@@ -177,7 +197,7 @@ class Server {
     suspend fun items(parentId: String?, sort: Sort, unplayedOnly: Boolean, search: String): List<BaseItemDto> =
         io { api.libraryApi.getItems(
             userId = userId,
-            parentId = parentId?.let(UUID::fromString),
+            parentId = if (parentId != null) UUID.fromString(parentId) else null,
             recursive = true,
             includeItemTypes = listOf(BaseItemKind.MOVIE, BaseItemKind.SERIES),
             sortBy = listOf(sort.by, ItemSortBy.SORT_NAME),
@@ -199,14 +219,23 @@ class Server {
         val uuid = UUID.fromString(id)
         val dto = async { api.libraryApi.getItem(uuid, userId).content }
         val data = if (flushFirst) {
-            flush()?.takeIf(::unreachable)?.let { dto.cancel(); throw it }
+            val failure = flush()
+            if (failure != null && unreachable(failure)) {
+                dto.cancel()
+                throw failure
+            }
             userData(uuid)
-        } else async { userData(uuid) }.await()
-        dto.await().copy(userData = data).also {
-            // The server has caught up, or changed it since (another device): its state is the one to build on.
-            val server = data.toPlayState()?.lastPlayedMs
-            if (server != null && server >= (recorded[id]?.lastPlayedMs ?: Long.MAX_VALUE)) recorded.remove(id)
+        } else {
+            async { userData(uuid) }.await()
         }
+        val full = dto.await().copy(userData = data)
+        // The server has caught up with our recorded state, or another device changed it since. Either way the server's state wins.
+        val server = data.toPlayState()?.lastPlayedMs
+        if (server != null) {
+            val local = recorded[id]?.lastPlayedMs ?: Long.MAX_VALUE
+            if (server >= local) recorded.remove(id)
+        }
+        full
     }
 
     /**
@@ -217,94 +246,112 @@ class Server {
      */
     private suspend fun userData(id: UUID) = userData(listOf(id))[id]
 
-    /** In chunks: every ID goes in the query string, and servers and proxies cap its length around 8 KB. */
+    /** Fetches in chunks because every ID goes in the query string, and servers and proxies cap its length at around 8 KB. */
     suspend fun userData(ids: List<UUID>): Map<UUID, UserItemDataDto?> = userData(api, userId, ids)
 
     private suspend fun userData(api: ApiClient, userId: UUID, ids: List<UUID>): Map<UUID, UserItemDataDto?> = io {
         ids.chunked(100).flatMap { chunk ->
-            api.libraryApi.getItems(userId = userId, ids = chunk, enableUserData = true, enableImages = false).content.items.map { it.id to it.userData }
+            val items = api.libraryApi.getItems(userId = userId, ids = chunk, enableUserData = true, enableImages = false).content.items
+            items.map { item -> item.id to item.userData }
         }.toMap()
     }
 
     suspend fun seasons(seriesId: String): List<BaseItemDto> =
         io { api.showApi.getSeasons(UUID.fromString(seriesId), userId, enableUserData = true).content.items }
 
-    /** All episodes of a series in season order, or only one season's. [sources] adds media sources (file sizes) and the overview, for stored downloads. */
+    /**
+     * All episodes of a series in season order, or only one season's. [sources] adds media sources (with file sizes)
+     * and the overview, which stored downloads need.
+     */
     suspend fun episodes(seriesId: String, seasonId: String? = null, sources: Boolean = false): List<BaseItemDto> =
         io { api.showApi.getEpisodes(
             UUID.fromString(seriesId),
             userId,
             fields = if (sources) listOf(ItemFields.OVERVIEW, ItemFields.MEDIA_SOURCES) else emptyList(),
-            seasonId = seasonId?.let(UUID::fromString),
+            seasonId = if (seasonId != null) UUID.fromString(seasonId) else null,
             enableUserData = true,
         ).content.items }
 
-    /** The server answers at all: a failure while it does is the file's, not the network's. */
-    suspend fun reachable(): Boolean = io { runCatching { api.systemApi.getPublicSystemInfo() }.exceptionOrNull()?.let { !transient(it) } ?: true }
+    /** True when the server answers at all. If it does, a playback failure lies with the file, not the network. */
+    suspend fun reachable(): Boolean = io {
+        val error = runCatching { api.systemApi.getPublicSystemInfo() }.exceptionOrNull()
+        if (error == null) true else !transient(error)
+    }
 
     /** Intro, recap and credits, where a server plugin has detected them. */
     suspend fun segments(id: String): List<MediaSegmentDto> = io {
         api.mediaSegmentApi.getItemSegments(UUID.fromString(id), listOf(MediaSegmentType.INTRO, MediaSegmentType.RECAP, MediaSegmentType.OUTRO)).content.items
     }
 
-    /** Null when the item has no such image, so no request is made. The tag changes with the image, keeping caches fresh. */
-    fun imageUrl(item: BaseItemDto, type: ImageType = ImageType.PRIMARY, width: Int = 400) =
-        item.imageTags?.get(type)?.let { tag ->
-            api.imageApi.getItemImageUrl(item.id, type, maxWidth = width, tag = tag, format = ImageFormat.WEBP, quality = 80)
-        }
+    /** Null when the item has no such image, so no request is made. The tag changes with the image, which keeps caches fresh. */
+    fun imageUrl(item: BaseItemDto, type: ImageType = ImageType.PRIMARY, width: Int = 400): String? {
+        val tag = item.imageTags?.get(type) ?: return null
+        return api.imageApi.getItemImageUrl(item.id, type, maxWidth = width, tag = tag, format = ImageFormat.WEBP, quality = 80)
+    }
 
     fun streamUrl(id: String, mediaSourceId: String) =
         "${prefs.baseUrl}/Videos/$id/stream?static=true&mediaSourceId=$mediaSourceId&ApiKey=${prefs.token}"
 
-    // ponytail: fixed h264/aac at 8 Mbps, no taller than direct play allows. The server drops embedded subtitles: players
-    // load the text ones separately ([sideloadedSubs]), and a picture one ([burnInIndex]) is burned in.
-    // [playSession] goes in the stop report too, so leaving ends the server's ffmpeg job at once.
-    fun transcodeUrl(id: String, mediaSourceId: String, audioIndex: Int?, burnInIndex: Int?, playSession: String) =
-        "${prefs.baseUrl}/Videos/$id/master.m3u8?mediaSourceId=$mediaSourceId&videoCodec=h264&audioCodec=aac" +
-            "&maxAudioChannels=2&maxHeight=${prefs.maxHeight.takeIf { it > 0 } ?: App.platform.transcodeHeight}&videoBitrate=8000000&audioBitrate=192000&playSessionId=$playSession" +
-            (audioIndex?.let { "&audioStreamIndex=$it" } ?: "") +
-            (burnInIndex?.let { "&subtitleStreamIndex=$it&subtitleMethod=Encode" } ?: "") + "&ApiKey=${prefs.token}"
+    // A fixed H.264/AAC transcode at 8 Mbps, no taller than direct play allows. The server drops embedded subtitles, so
+    // players load text subtitles separately ([sideloadedSubs]) and a picture subtitle ([burnInIndex]) is burned in.
+    // [playSession] also goes in the stop report, so leaving the player ends the server's ffmpeg job at once.
+    fun transcodeUrl(id: String, mediaSourceId: String, audioIndex: Int?, burnInIndex: Int?, playSession: String): String {
+        val base = prefs.baseUrl
+        val maxHeight = prefs.maxHeight
+        val height = if (maxHeight > 0) maxHeight else App.platform.transcodeHeight
+        val audio = if (audioIndex != null) "&audioStreamIndex=$audioIndex" else ""
+        val burnIn = if (burnInIndex != null) "&subtitleStreamIndex=$burnInIndex&subtitleMethod=Encode" else ""
+        return "$base/Videos/$id/master.m3u8?mediaSourceId=$mediaSourceId&videoCodec=h264&audioCodec=aac" +
+            "&maxAudioChannels=2&maxHeight=$height&videoBitrate=8000000&audioBitrate=192000&playSessionId=$playSession" +
+            audio + burnIn + "&ApiKey=${prefs.token}"
+    }
 
     fun subtitleUrl(id: String, mediaSourceId: String, stream: MediaStream) =
         "${prefs.baseUrl}/Videos/$id/$mediaSourceId/Subtitles/${stream.index}/0/Stream.${subtitleExt(stream)}?ApiKey=${prefs.token}"
 
-    // --- play state ---------------------------------------------------------------------------
-
-    suspend fun reportStart(id: String, mediaSourceId: String, positionTicks: Long, transcoding: Boolean, playSession: String) = io { reports.withLock { runCatching {
-        api.sessionApi.reportPlaybackStart(
-            PlaybackStartInfo(
-                itemId = UUID.fromString(id), mediaSourceId = mediaSourceId, positionTicks = positionTicks,
-                canSeek = true, isPaused = false, isMuted = false,
-                playMethod = if (transcoding) PlayMethod.TRANSCODE else PlayMethod.DIRECT_PLAY,
-                repeatMode = RepeatMode.REPEAT_NONE, playbackOrder = PlaybackOrder.DEFAULT, playSessionId = playSession,
-            )
-        )
-    } } }
+    suspend fun reportStart(id: String, mediaSourceId: String, positionTicks: Long, transcoding: Boolean, playSession: String) = io {
+        reports.withLock {
+            runCatching {
+                api.sessionApi.reportPlaybackStart(
+                    PlaybackStartInfo(
+                        itemId = UUID.fromString(id), mediaSourceId = mediaSourceId, positionTicks = positionTicks,
+                        canSeek = true, isPaused = false, isMuted = false,
+                        playMethod = if (transcoding) PlayMethod.TRANSCODE else PlayMethod.DIRECT_PLAY,
+                        repeatMode = RepeatMode.REPEAT_NONE, playbackOrder = PlaybackOrder.DEFAULT, playSessionId = playSession,
+                    )
+                )
+            }
+        }
+    }
 
     /**
      * Saves locally first, then tells the server. A failed report leaves the local entry for [flush].
-     * A report whose state a newer local change replaced while it waited for [reports] is not sent:
-     * the server dates a report on arrival, so it would beat that change.
+     * If a newer local change replaced this state while the report waited for [reports], the report is
+     * skipped: the server dates a report on arrival, so the stale report would beat that newer change.
      */
     suspend fun reportProgress(id: String, mediaSourceId: String, positionTicks: Long, paused: Boolean, transcoding: Boolean, serverPlayed: Boolean, playSession: String) = io {
         val played = knownPlayed(id, serverPlayed)
         val state = PlayState(positionTicks, played, now())
         val owner = record(id, state) ?: return@io
-        reports.withLock { if (owner.pending.get(id) == state) runCatching {
-            owner.api.sessionApi.reportPlaybackProgress(
-                PlaybackProgressInfo(
-                    itemId = UUID.fromString(id), mediaSourceId = mediaSourceId, positionTicks = positionTicks,
-                    canSeek = true, isPaused = paused, isMuted = false,
-                    playMethod = if (transcoding) PlayMethod.TRANSCODE else PlayMethod.DIRECT_PLAY,
-                    repeatMode = RepeatMode.REPEAT_NONE, playbackOrder = PlaybackOrder.DEFAULT, playSessionId = playSession,
-                )
-            )
-        }.onSuccess { confirm(owner, id, state) } }
+        reports.withLock {
+            if (owner.pending.get(id) == state) {
+                runCatching {
+                    owner.api.sessionApi.reportPlaybackProgress(
+                        PlaybackProgressInfo(
+                            itemId = UUID.fromString(id), mediaSourceId = mediaSourceId, positionTicks = positionTicks,
+                            canSeek = true, isPaused = paused, isMuted = false,
+                            playMethod = if (transcoding) PlayMethod.TRANSCODE else PlayMethod.DIRECT_PLAY,
+                            repeatMode = RepeatMode.REPEAT_NONE, playbackOrder = PlaybackOrder.DEFAULT, playSessionId = playSession,
+                        )
+                    )
+                }.onSuccess { confirm(owner, id, state) }
+            }
+        }
     }
 
     /**
-     * Queues the local save on [App.disk] before returning, so a list opened right after flushes it,
-     * then reports the stop. Always sends a position: without one the server marks the item played at 0.
+     * Queues the local save on [App.disk] before returning, so a list opened right after this flushes it,
+     * then reports the stop. It always sends a position, because without one the server marks the item played at 0.
      */
     fun reportStop(id: String, mediaSourceId: String, positionTicks: Long, runtimeTicks: Long?, serverPlayed: Boolean, playSession: String) {
         App.platform.scope.launch(App.disk) {
@@ -312,12 +359,18 @@ class Server {
             val state = ResumeRules.onStop(PlayState(0, previous, null), positionTicks, runtimeTicks, now())
             val owner = record(id, state)
             io {
-                // Not sent when superseded, as in reportProgress; the server ends the session on its own.
-                if (owner != null) reports.withLock { if (owner.pending.get(id) == state) runCatching {
-                    owner.api.sessionApi.reportPlaybackStopped(
-                        PlaybackStopInfo(itemId = UUID.fromString(id), mediaSourceId = mediaSourceId, positionTicks = positionTicks, playSessionId = playSession, failed = false)
-                    )
-                }.onSuccess { confirm(owner, id, state) } }
+                // Skipped when superseded, as in reportProgress. The server then ends the playback session on its own.
+                if (owner != null) {
+                    reports.withLock {
+                        if (owner.pending.get(id) == state) {
+                            runCatching {
+                                owner.api.sessionApi.reportPlaybackStopped(
+                                    PlaybackStopInfo(itemId = UUID.fromString(id), mediaSourceId = mediaSourceId, positionTicks = positionTicks, playSessionId = playSession, failed = false)
+                                )
+                            }.onSuccess { confirm(owner, id, state) }
+                        }
+                    }
+                }
                 App.platform.scheduleHousekeeping()
             }
         }
@@ -328,19 +381,26 @@ class Server {
         private set
 
     /**
-     * Last state recorded this session, kept after the server confirms it: a player loaded before
-     * "Mark played" would otherwise report its stale load-time flag and un-mark the item.
+     * The last state recorded this session, kept even after the server confirms it. Otherwise a player loaded
+     * before "Mark played" would report its stale load-time flag and un-mark the item.
      */
     private val recorded = java.util.concurrent.ConcurrentHashMap<String, PlayState>()
 
-    private fun knownPlayed(id: String, serverPlayed: Boolean) = (App.pending.get(id) ?: recorded[id])?.played ?: serverPlayed
+    private fun knownPlayed(id: String, serverPlayed: Boolean): Boolean {
+        val latest = App.pending.get(id) ?: recorded[id]
+        return latest?.played ?: serverPlayed
+    }
 
-    /** Every local play-state change: queued for the server and kept with the download for offline resume. */
-    /** Returns the account [state] was queued for, null when logged out (it waits in the last account's file). */
+    /**
+     * Every local play-state change goes through here: it is queued for the server and kept with the download
+     * for offline resume. Returns the account [state] was queued for, or null when logged out, in which case
+     * the state waits in the last account's file.
+     */
     private suspend fun record(id: String, state: PlayState): Owner? = withContext(App.disk) {
         val owner = owner()
         recorded[id] = state
-        (owner?.pending ?: App.pending).put(id, state)
+        val pending = owner?.pending ?: App.pending
+        pending.put(id, state)
         App.downloads?.rememberState(id, state)
         localChanges++
         owner
@@ -349,83 +409,120 @@ class Server {
     /** "Start over" as a saved position of 0, so a restored back stack never restarts the item a second time. */
     suspend fun startOver(item: BaseItemDto) {
         val id = item.id.toString()
-        record(id, PlayState(0, knownPlayed(id, item.userData?.played ?: false), now()))
+        val serverPlayed = item.userData?.played ?: false
+        val played = knownPlayed(id, serverPlayed)
+        record(id, PlayState(0, played, now()))
     }
 
-    /** The server has [state]; rows drop their "not synced" at once rather than at the next local change. */
+    /** Marks [state] as stored on the server. Bumping [localChanges] makes rows drop their "not synced" mark at once. */
     private fun confirm(owner: Owner, id: String, state: PlayState) {
         owner.pending.confirm(id, state)
         localChanges++
     }
 
     /**
-     * [ids] in season order. Each gets its own date, a millisecond apart, so the newest is where a
+     * Takes [ids] in season order. Each gets its own date, a millisecond apart, so the newest one is where a
      * viewer would pick up: the last one marked played, or the first one marked unplayed.
      */
     suspend fun setPlayed(ids: List<String>, played: Boolean) {
         val now = now()
-        ids.forEachIndexed { i, id -> record(id, PlayState(0, played, now - if (played) ids.lastIndex - i else i)) }
+        ids.forEachIndexed { i, id ->
+            val stepsBack = if (played) ids.lastIndex - i else i
+            record(id, PlayState(0, played, now - stepsBack))
+        }
         flush()
     }
 
     /**
      * Pushes pending states; the newer LastPlayedDate wins. One failing item doesn't hold up the
-     * rest: an item the server doesn't have (deleted, or from a server logged into before) is
+     * rest. An item the server doesn't have (deleted, or from a server logged into before) is
      * dropped, and a rejected token ends the session. An unreachable server stops the whole flush
      * rather than timing out once per item. Returns the first failure, null when all went through.
      */
-    suspend fun flush(): Throwable? = io { flushing.withLock {
-        val (owner, pending) = withContext(App.disk) { owner()?.let { it to it.pending.all() } } ?: return@withLock null
-        if (pending.isEmpty()) return@withLock null
-        // A 401 for an account switched away from must not end the session of the one switched to.
-        fun expireOwner() { if (owner()?.api === owner.api) expire() }
-        // One request for every item's server state; an item the server lacks is absent and its push 404s.
-        val serverStates = try { userData(owner.api, owner.userId, pending.keys.map(UUID::fromString)) } catch (e: Exception) {
-            if ((e as? InvalidStatusException)?.status == 401) expireOwner()
-            return@withLock e
-        }
-        var failure: Throwable? = null
-        for ((id, local) in pending) {
-            // Under [reports], and only while [local] is still pending: a report that landed after
-            // serverStates was fetched is newer than both, and pushing [local] would overwrite it.
-            runCatching { reports.withLock {
-                val uuid = UUID.fromString(id)
-                if (owner.pending.get(id) == local && shouldPush(local, serverStates[uuid].toPlayState())) {
-                    owner.api.userDataApi.updateItemUserData(
-                        uuid, owner.userId,
-                        UpdateUserItemDataDto(
-                            playbackPositionTicks = local.positionTicks,
-                            played = local.played,
-                            lastPlayedDate = local.lastPlayedMs?.let { LocalDateTime.ofInstant(Instant.ofEpochMilli(it), ZoneId.systemDefault()) },
-                        ),
-                    )
-                }
-            } }.onSuccess { confirm(owner, id, local) }.onFailure { e ->
-                when ((e as? InvalidStatusException)?.status) {
-                    404 -> confirm(owner, id, local)
-                    401 -> { expireOwner(); return@withLock e }
-                    else -> { failure = failure ?: e; if (unreachable(e)) return@withLock e }
+    suspend fun flush(): Throwable? = io {
+        flushing.withLock {
+            val snapshot = withContext(App.disk) {
+                val current = owner()
+                if (current == null) null else current to current.pending.all()
+            }
+            if (snapshot == null) return@withLock null
+            val (owner, pending) = snapshot
+            if (pending.isEmpty()) return@withLock null
+            // A 401 for an account we have switched away from must not end the session of the account switched to.
+            fun expireOwner() {
+                if (owner()?.api === owner.api) expire()
+            }
+            // One request fetches every item's server state. An item the server lacks is absent here, and its push returns 404.
+            val serverStates = try {
+                userData(owner.api, owner.userId, pending.keys.map(UUID::fromString))
+            } catch (e: Exception) {
+                if (e is InvalidStatusException && e.status == 401) expireOwner()
+                return@withLock e
+            }
+            var failure: Throwable? = null
+            for ((id, local) in pending) {
+                // Push under [reports], and only while [local] is still pending. A report that landed after
+                // serverStates was fetched is newer than both, and pushing [local] would overwrite it.
+                runCatching {
+                    reports.withLock {
+                        val uuid = UUID.fromString(id)
+                        if (owner.pending.get(id) == local && shouldPush(local, serverStates[uuid].toPlayState())) {
+                            val lastPlayedMs = local.lastPlayedMs
+                            val lastPlayedDate = if (lastPlayedMs == null) null else LocalDateTime.ofInstant(Instant.ofEpochMilli(lastPlayedMs), ZoneId.systemDefault())
+                            owner.api.userDataApi.updateItemUserData(
+                                uuid, owner.userId,
+                                UpdateUserItemDataDto(
+                                    playbackPositionTicks = local.positionTicks,
+                                    played = local.played,
+                                    lastPlayedDate = lastPlayedDate,
+                                ),
+                            )
+                        }
+                    }
+                }.onSuccess {
+                    confirm(owner, id, local)
+                }.onFailure { e ->
+                    val status = (e as? InvalidStatusException)?.status
+                    when (status) {
+                        404 -> confirm(owner, id, local)
+                        401 -> {
+                            expireOwner()
+                            return@withLock e
+                        }
+                        else -> {
+                            if (failure == null) failure = e
+                            if (unreachable(e)) return@withLock e
+                        }
+                    }
                 }
             }
+            failure
         }
-        failure
-    } }
+    }
 
-    /** One flush at a time: two overlapping ones could push an older state after a newer one. */
+    /** One flush at a time, because two overlapping ones could push an older state after a newer one. */
     private val flushing = Mutex()
+
+    private companion object {
+        const val CLOCK_NOISE_MS = 2_000L
+    }
 }
 
-// The SDK's LocalDateTime is in the device's zone, not UTC; reading it as UTC shifts every date
-// by the zone offset and breaks the newer-wins rule.
-fun UserItemDataDto?.toPlayState(): PlayState? = this?.let {
-    PlayState(it.playbackPositionTicks, it.played, it.lastPlayedDate?.atZone(ZoneId.systemDefault())?.toInstant()?.toEpochMilli())
+// The SDK's LocalDateTime is in the device's time zone, not UTC. Reading it as UTC would shift every date
+// by the zone offset and break the newer-wins rule.
+fun UserItemDataDto?.toPlayState(): PlayState? {
+    if (this == null) return null
+    val date = lastPlayedDate
+    val lastPlayedMs = if (date == null) null else date.atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
+    return PlayState(playbackPositionTicks, played, lastPlayedMs)
 }
 
-/** Server state with any unsynced local state on top. The flag marks items that differ from the server. */
+/** The server state with any unsynced local state on top. The Boolean is true when the local state differs from the server's. */
 fun BaseItemDto.localState(): Pair<PlayState?, Boolean> {
-    App.server.localChanges // a composable caller redraws on the next local change
+    App.server.localChanges // Reading this makes a composable caller redraw on the next local change.
     val local = App.pending.get(id.toString())
-    return (local ?: userData.toPlayState()) to (local != null)
+    val state = local ?: userData.toPlayState()
+    return Pair(state, local != null)
 }
 
 fun subtitleExt(stream: MediaStream) = when (val c = stream.codec?.lowercase()) {
@@ -434,12 +531,12 @@ fun subtitleExt(stream: MediaStream) = when (val c = stream.codec?.lowercase()) 
     else -> c
 }
 
-/** No HTTP answer: timeout, unknown host, refused connection or failed TLS. */
-/** An https server whose certificate isn't trusted, expired, or for another name. */
+/** An https server whose certificate isn't trusted, has expired, or is for another name. */
 fun untrustedCertificate(e: Throwable) = generateSequence(e) { it.cause }
     .any { it is java.security.cert.CertificateException || it is java.security.cert.CertPathValidatorException || it is javax.net.ssl.SSLPeerUnverifiedException }
 
+/** No HTTP answer: a timeout, unknown host, refused connection or failed TLS. */
 fun unreachable(e: Throwable) = e is TimeoutException || generateSequence(e) { it.cause }.any { it is IOException }
 
-/** Worth retrying later: no answer, or a server-side error. */
-fun transient(e: Throwable) = unreachable(e) || (e as? InvalidStatusException)?.status?.let { it >= 500 } == true
+/** Worth retrying later: there was no answer, or the server had an internal error. */
+fun transient(e: Throwable) = unreachable(e) || (e is InvalidStatusException && e.status >= 500)

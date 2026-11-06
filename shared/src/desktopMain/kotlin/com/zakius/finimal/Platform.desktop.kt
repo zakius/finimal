@@ -24,28 +24,37 @@ internal actual fun platformColors(dark: Boolean): ColorScheme = if (dark) darkC
 @Composable
 internal actual fun smallestWidthDp(): Int {
     val size = LocalWindowInfo.current.containerSize
-    return with(LocalDensity.current) { minOf(size.width, size.height).toDp().value.toInt() }
+    val density = LocalDensity.current
+    val smallestPx = minOf(size.width, size.height)
+    return with(density) { smallestPx.toDp().value.toInt() }
 }
 
-/** The latest [toast], which the window shows for a few seconds; [seq] tells a repeat of the same text from the last. */
+/**
+ * The latest [toast], which the window shows for a few seconds. The sequence number lets the window
+ * tell a repeated toast with the same text apart from the one already showing.
+ */
 object Toasts {
     var current by mutableStateOf<Pair<Int, String>?>(null)
         private set
     private var seq = 0
-    fun show(text: String) { current = ++seq to text }
+    fun show(text: String) {
+        seq++
+        current = Pair(seq, text)
+    }
 }
 
 actual fun toast(text: String) = Toasts.show(text)
 
-/** The desktop has no network-change events to listen to; Retry is on screen. */
+/** The desktop has no network-change events to listen to, so the user presses the on-screen Retry instead. */
 @Composable
 internal actual fun RetryOnNewNetwork(onRetry: () -> Unit) {}
 
-/** [KeyValueStore] in one JSON file, rewritten whole on each edit: settings are a few dozen keys. */
+/** [KeyValueStore] in one JSON file. Rewriting the whole file on each edit is fine for a few dozen settings. */
 class JsonFileStore(private val file: File) : KeyValueStore {
-    private val values: MutableMap<String, Any?> = runCatching {
-        Json.parseToJsonElement(file.readText()) as JsonObject
-    }.getOrDefault(JsonObject(emptyMap())).mapValues { (_, v) -> decode(v) }.toMutableMap()
+    private val values: MutableMap<String, Any?> = runCatching { Json.parseToJsonElement(file.readText()) as JsonObject }
+        .getOrDefault(JsonObject(emptyMap()))
+        .mapValues { (_, v) -> decode(v) }
+        .toMutableMap()
 
     @Synchronized override fun get(key: String): Any? = values[key]
     @Synchronized override fun keys(): Set<String> = values.keys.toSet()
@@ -53,7 +62,9 @@ class JsonFileStore(private val file: File) : KeyValueStore {
     @Synchronized
     override fun edit(block: MutableMap<String, Any?>.() -> Unit) {
         val changes = LinkedHashMap<String, Any?>().apply(block)
-        for ((k, v) in changes) if (v == null) values.remove(k) else values[k] = v
+        for ((k, v) in changes) {
+            if (v == null) values.remove(k) else values[k] = v
+        }
         file.parentFile?.mkdirs()
         file.writeAtomically(JsonObject(values.mapValues { (_, v) -> encode(v) }).toString())
     }
@@ -65,7 +76,9 @@ class JsonFileStore(private val file: File) : KeyValueStore {
         else -> error("unsupported $v")
     }
 
-    private fun decode(e: JsonElement): Any? = (e as? JsonPrimitive)?.let { p ->
-        if (p.isString) p.content else p.booleanOrNull ?: p.longOrNull
+    private fun decode(e: JsonElement): Any? {
+        if (e !is JsonPrimitive) return null
+        if (e.isString) return e.content
+        return e.booleanOrNull ?: e.longOrNull
     }
 }

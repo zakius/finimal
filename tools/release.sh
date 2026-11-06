@@ -1,9 +1,9 @@
 #!/bin/bash
-# Signed release APKs, one per ABI: dist/finimal-<version>-<abi>.apk.
-# Each gets AGP's baseline profile embedded at assets/art-profile/baseline.prof, where ART (Android 15+) reads it when
-# the APK is installed and compiles the profiled code. Without it a sideloaded install runs uncompiled until the
-# device's idle-time dexopt, and every update resets that: AGP only writes assets/dexopt/, which ProfileInstaller
-# handles after the first launch.
+# Builds signed release APKs, one per ABI: dist/finimal-<version>-<abi>.apk.
+# Each APK gets AGP's baseline profile at assets/art-profile/baseline.prof, where ART (Android 15+) reads it at install
+# time and compiles the profiled code. Without it, a sideloaded install runs uncompiled until the device's idle-time
+# dexopt, and every update resets that. AGP only writes assets/dexopt/, which ProfileInstaller applies after the first
+# launch.
 # The key comes from keystore.properties (storeFile, storePassword, keyAlias, keyPassword), or KEYSTORE_PROPERTIES.
 # Usage: tools/release.sh [--no-build]
 set -euo pipefail
@@ -19,8 +19,8 @@ trap 'rm -rf "$tmp"' EXIT
 mkdir -p dist
 for apk in "$built"/app-*-release-unsigned.apk; do
   abi=${apk#"$built"/app-}; abi=${abi%-release-unsigned.apk}
-  # The profile for API 31+ from the .dm AGP writes next to the APK. It names the dex files by checksum; adding a
-  # stored entry leaves their bytes as they are.
+  # Take the API 31+ profile from the .dm file AGP writes next to the APK. The profile refers to the dex files by
+  # checksum, and adding an uncompressed entry leaves their bytes unchanged.
   dm=$(python3 -c 'import json, sys; m = json.load(open(sys.argv[1])); print(next(f for p in m["baselineProfiles"] if p["minApi"] >= 31 for f in p["baselineProfiles"] if "-" + sys.argv[2] + "-" in f))' "$built/output-metadata.json" "$abi")
   mkdir -p "$tmp/$abi/assets/art-profile"
   unzip -q -p "$built/$dm" primary.prof > "$tmp/$abi/assets/art-profile/baseline.prof"

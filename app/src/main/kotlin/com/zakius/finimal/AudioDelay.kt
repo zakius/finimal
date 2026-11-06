@@ -29,16 +29,20 @@ object AudioDelay {
     /** Called on the main thread when a wireless output connects or disconnects. */
     var onWirelessChanged: (() -> Unit)? = null
 
-    /** Starts tracking outputs once; the callback reports the current ones at once. */
+    /** Starts tracking outputs, once per process. The callback reports the outputs present at registration right away. */
     fun watch(context: Context) {
         ms = App.prefs.audioDelayMs
         if (watching) return
         watching = true
-        val am = context.applicationContext.getSystemService(AudioManager::class.java) // registered for good: never an activity
+        // The callback is never unregistered, so register it on the application context rather than an activity.
+        val am = context.applicationContext.getSystemService(AudioManager::class.java)
         am.registerAudioDeviceCallback(object : AudioDeviceCallback() {
             fun update() {
                 val now = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS).any { it.type in wirelessTypes }
-                if (now != wireless) { wireless = now; onWirelessChanged?.invoke() }
+                if (now != wireless) {
+                    wireless = now
+                    onWirelessChanged?.invoke()
+                }
             }
             override fun onAudioDevicesAdded(added: Array<out AudioDeviceInfo>) = update()
             override fun onAudioDevicesRemoved(removed: Array<out AudioDeviceInfo>) = update()
@@ -54,14 +58,14 @@ object AudioDelay {
 
     /** Renderers whose audio clock runs [us] behind. */
     fun renderers(context: Context) = object : DefaultRenderersFactory(context) {
-        override fun buildAudioSink(context: Context, enableFloatOutput: Boolean, enableAudioTrackPlaybackParams: Boolean): AudioSink? =
-            super.buildAudioSink(context, enableFloatOutput, enableAudioTrackPlaybackParams)?.let { sink ->
-                object : ForwardingAudioSink(sink) {
-                    override fun getCurrentPositionUs(sourceEnded: Boolean): Long {
-                        val position = super.getCurrentPositionUs(sourceEnded)
-                        return if (position == AudioSink.CURRENT_POSITION_NOT_SET) position else position - us
-                    }
+        override fun buildAudioSink(context: Context, enableFloatOutput: Boolean, enableAudioTrackPlaybackParams: Boolean): AudioSink? {
+            val sink = super.buildAudioSink(context, enableFloatOutput, enableAudioTrackPlaybackParams) ?: return null
+            return object : ForwardingAudioSink(sink) {
+                override fun getCurrentPositionUs(sourceEnded: Boolean): Long {
+                    val position = super.getCurrentPositionUs(sourceEnded)
+                    return if (position == AudioSink.CURRENT_POSITION_NOT_SET) position else position - us
                 }
             }
+        }
     }
 }

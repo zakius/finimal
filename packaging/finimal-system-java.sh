@@ -1,9 +1,9 @@
 #!/bin/sh
-# Starts finimal from @APPDIR@ (/opt/finimal in the deb and rpm) on the distribution's Java: the newest installed
-# Java 21 or later with the desktop (X11) part, whatever its folder is called, whichever `java` the PATH has (a CI
-# machine's default was 17). The options match jpackage's launcher (desktop/build.gradle.kts).
-# The app's classes go into a class-data archive at the first start, kept with the app's cache: later starts take
-# about a third less time. The JVM makes a new one after an update.
+# Starts finimal from @APPDIR@ (/opt/finimal in the deb and rpm) on the system's Java. It picks the newest installed
+# Java 21 or later that has the desktop (X11) libraries, whatever its folder name, rather than whichever `java` is on
+# the PATH (which can be older: 17 on one CI machine). The options match jpackage's launcher (desktop/build.gradle.kts).
+# The first start writes the app's classes to a class-data archive in the cache, which makes later starts about a third
+# faster. The JVM rebuilds the archive after an update.
 app=@APPDIR@
 java=
 best=0

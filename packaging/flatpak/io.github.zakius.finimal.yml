@@ -1,6 +1,6 @@
-# finimal for Linux. The app is the jpackage image from `./gradlew :desktop:createReleaseDistributable` (Java runtime
-# included); libmpv and the libraries it needs beyond the runtime are built here, as Celluloid's Flathub manifest does,
-# pinned and bumped through x-checker-data.
+# The app is the jpackage image from `./gradlew :desktop:createReleaseDistributable`, Java runtime included. libmpv and
+# the libraries it needs beyond the runtime are built here, as in Celluloid's Flathub manifest, pinned and bumped
+# through x-checker-data.
 # Build: tools/flatpak.sh
 app-id: io.github.zakius.finimal
 runtime: org.freedesktop.Platform
@@ -15,7 +15,7 @@ finish-args:
   - --socket=pulseaudio
   # GPU: VA-API video decoding and Skia's OpenGL.
   - --device=dri
-  # Keeping the screen on while playing: the portal's Inhibit first, this where there is no portal.
+  # Keeps the screen on during playback where there is no portal; the app tries the portal's Inhibit first.
   - --talk-name=org.freedesktop.ScreenSaver
 modules:
   - name: ffmpeg
@@ -104,7 +104,7 @@ modules:
     buildsystem: simple
     build-commands:
       - cp -a app /app/finimal
-      # The Java runtime's base class-data archive, which jlink leaves out; the launcher builds on it.
+      # jlink leaves out the Java runtime's base class-data archive, which the launcher's app archive builds on.
       - JAVA_TOOL_OPTIONS=-Xshare:dump /app/finimal/bin/finimal
       - sed 's|@APPDIR@|/app/finimal|' finimal.sh | install -Dm755 /dev/stdin /app/bin/finimal
       - install -Dm644 io.github.zakius.finimal.desktop -t /app/share/applications

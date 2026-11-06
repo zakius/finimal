@@ -32,23 +32,29 @@ private interface Kernel32 : com.sun.jna.Library {
 }
 
 /**
- * Keeps the screen on while a video plays. mpv does this itself only with its own window; embedded, it's ours to do.
- * Linux: the desktop portal's Inhibit (what a Flatpak may use), else org.freedesktop.ScreenSaver. Windows:
- * SetThreadExecutionState, which holds while the thread that set it lives, so everything runs on one worker thread,
- * which also keeps a slow D-Bus from holding up the player.
+ * Keeps the screen on while a video plays. mpv does this itself only when it has its own window, so the embedded
+ * player must do it here. On Linux it uses the desktop portal's Inhibit (which a Flatpak may use), falling back to
+ * org.freedesktop.ScreenSaver. On Windows it uses SetThreadExecutionState, which holds only while the thread that set
+ * it lives. So everything runs on one worker thread, which also keeps a slow D-Bus from holding up the player.
  */
 object ScreenSaver {
-    private val worker = Executors.newSingleThreadExecutor { Thread(it, "screensaver").apply { isDaemon = true } }
+    private val worker = Executors.newSingleThreadExecutor { task -> Thread(task, "screensaver").apply { isDaemon = true } }
     private var bus: DBusConnection? = null
     private var release: (() -> Unit)? = null
 
     fun inhibit(on: Boolean) = worker.execute {
         if (on == (release != null)) return@execute
-        if (!on) { runCatching { release?.invoke() }; release = null; return@execute }
-        release = runCatching { hold() }.onFailure { System.err.println("finimal: can't keep the screen on: $it") }.getOrNull()
+        if (!on) {
+            runCatching { release?.invoke() }
+            release = null
+            return@execute
+        }
+        val held = runCatching { hold() }
+        held.onFailure { e -> System.err.println("finimal: can't keep the screen on: $e") }
+        release = held.getOrNull()
     }
 
-    /** For --check-player on Windows: sets and clears the state as playing would, on the same thread; throws if it can't. */
+    /** For --check-player on Windows. Sets and clears the state on the worker thread as playback would, and throws if it can't. */
     fun checkWindows() {
         if (!System.getProperty("os.name").startsWith("Windows")) return
         worker.submit { hold()!!.invoke() }.get()
@@ -57,15 +63,16 @@ object ScreenSaver {
     private fun hold(): (() -> Unit)? {
         if (System.getProperty("os.name").startsWith("Windows")) {
             val kernel = com.sun.jna.Native.load("kernel32", Kernel32::class.java)
-            // ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED; ES_CONTINUOUS alone clears them.
-            check(kernel.SetThreadExecutionState(0x80000000.toInt() or 0x2 or 0x1) != 0) { "SetThreadExecutionState failed" }
-            return { kernel.SetThreadExecutionState(0x80000000.toInt()) }
+            val flags = ES_CONTINUOUS or ES_DISPLAY_REQUIRED or ES_SYSTEM_REQUIRED
+            check(kernel.SetThreadExecutionState(flags) != 0) { "SetThreadExecutionState failed" }
+            return { kernel.SetThreadExecutionState(ES_CONTINUOUS) } // ES_CONTINUOUS alone clears the other flags.
         }
-        val conn = bus ?: DBusConnectionBuilder.forSessionBus().build().also { bus = it }
+        val conn = bus ?: DBusConnectionBuilder.forSessionBus().build()
+        bus = conn
         return runCatching {
             val portal = conn.getRemoteObject("org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop", PortalInhibit::class.java)
-            // 8: idle. The inhibition lasts until its request object is closed.
-            val request = portal.Inhibit("", UInt32(8), mapOf("reason" to Variant("Playing a video")))
+            // The inhibition lasts until its request object is closed.
+            val request = portal.Inhibit("", UInt32(INHIBIT_IDLE), mapOf("reason" to Variant("Playing a video")))
             val handle = conn.getRemoteObject("org.freedesktop.portal.Desktop", request.path, PortalRequest::class.java)
             ({ handle.Close() })
         }.getOrElse {
@@ -75,3 +82,8 @@ object ScreenSaver {
         }
     }
 }
+
+private const val ES_CONTINUOUS = 0x80000000.toInt()
+private const val ES_DISPLAY_REQUIRED = 0x2
+private const val ES_SYSTEM_REQUIRED = 0x1
+private const val INHIBIT_IDLE = 8L

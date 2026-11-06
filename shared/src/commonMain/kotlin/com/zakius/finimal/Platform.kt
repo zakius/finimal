@@ -15,20 +15,20 @@ interface Platform {
     val versionName: String
     /** Shows the Android-only settings: interface mode, touch gestures, metered networks, decoder limits. */
     val android: Boolean
-    /** App files: download records, unsynced play state. */
+    /** Durable app files, such as download records and unsynced play state. */
     val appFiles: File
-    /** Files that can be fetched again: saved lists. */
+    /** Files that can be fetched again, such as saved lists. */
     val appCache: File
     val store: KeyValueStore
     /** A remote-first device (Android TV, a box without a touchscreen). */
     val autoTv: Boolean
-    /** Work that outlives a screen: report flushes, prefetches. */
+    /** For work that outlives a screen, such as report flushes and prefetches. */
     val scope: CoroutineScope
-    /** Video height a transcode asks for when Settings doesn't cap it: what the device's H.264 decoder takes. */
+    /** The video height a transcode asks for when Settings doesn't cap it, chosen to fit the device's H.264 decoder. */
     val transcodeHeight: Int
     /** Null where there are no downloads yet. */
     val downloads: Downloads?
-    /** Device identity for the Jellyfin SDK. */
+    /** Sets the device identity for the Jellyfin SDK. */
     fun configure(options: JellyfinOptions.Builder)
     /** Pushes progress and applies "keep next N" in the background. */
     fun scheduleHousekeeping()
@@ -43,7 +43,7 @@ interface Platform {
 interface KeyValueStore {
     operator fun get(key: String): Any?
     fun keys(): Set<String>
-    /** Applies the puts together; a null value removes the key. */
+    /** Applies all puts in [block] together. A null value removes the key. */
     fun edit(block: MutableMap<String, Any?>.() -> Unit)
 }
 
@@ -57,10 +57,18 @@ object App {
     val http by lazy { OkHttpClient() }
     val downloads get() = platform.downloads
     /** The remote-first interface: no touch-only controls, D-pad keys in the player, TV-safe margins. */
-    val tv get() = when (prefs.interfaceMode) { 1 -> false; 2 -> true; else -> platform.autoTv }
+    val tv get() = when (prefs.interfaceMode) {
+        1 -> false
+        2 -> true
+        else -> platform.autoTv
+    }
     val autoTv get() = platform.autoTv
 
-    /** Set when the server rejects the token; the UI returns to login. Unsynced progress is kept and pushed after. Here, not on [Server], so the first frame doesn't build the API client. */
+    /**
+     * Set when the server rejects the token, which sends the UI back to login. Unsynced progress is kept
+     * and pushed after the next login. It lives here rather than on [Server] so that the first frame
+     * doesn't have to build the API client.
+     */
     var sessionExpired by mutableStateOf(false)
 
     /**
@@ -68,18 +76,24 @@ object App {
      * progress kept over a logout waits for that account and never reaches another.
      */
     val pending: PendingStore get() = synchronized(this) {
-        // Logged out (an expired session): stops still recorded belong to the account that just left.
-        if (prefs.userId == null) pendingStore?.let { return it }
-        val account = prefs.baseUrl to prefs.userId
-        pendingStore?.takeIf { pendingAccount == account } ?: run {
-            val name = java.security.MessageDigest.getInstance("SHA-1").digest("${account.first}\u0000${account.second}".toByteArray())
-                .take(8).joinToString("") { "%02x".format(it) }
-            val file = File(platform.appFiles, "pending-$name.json")
-            // From before per-account files: it belongs to whoever logs in next, as it always did.
-            val legacy = File(platform.appFiles, "pending.json")
-            if (account.second != null && legacy.exists() && !file.exists()) legacy.renameTo(file)
-            PendingStore(file).also { pendingStore = it; pendingAccount = account }
+        // After a session expires, stops that are still being recorded belong to the account that just left.
+        if (prefs.userId == null) {
+            val kept = pendingStore
+            if (kept != null) return kept
         }
+        val account = prefs.baseUrl to prefs.userId
+        val current = pendingStore
+        if (current != null && pendingAccount == account) return current
+        val hash = java.security.MessageDigest.getInstance("SHA-1").digest("${account.first}\u0000${account.second}".toByteArray())
+        val name = hash.take(8).joinToString("") { "%02x".format(it) }
+        val file = File(platform.appFiles, "pending-$name.json")
+        // Older versions kept one pending.json for everyone. It goes to the next account that logs in.
+        val legacy = File(platform.appFiles, "pending.json")
+        if (account.second != null && legacy.exists() && !file.exists()) legacy.renameTo(file)
+        val store = PendingStore(file)
+        pendingStore = store
+        pendingAccount = account
+        store
     }
     private var pendingStore: PendingStore? = null
     private var pendingAccount: Pair<String?, String?>? = null
@@ -90,6 +104,9 @@ object App {
      */
     val disk = Dispatchers.IO.limitedParallelism(1)
 
-    /** Buffer start and stop, in order, apart from [disk] so cache and download locks never hold up play-state records. */
+    /**
+     * Buffer start and stop, one at a time in order. Kept separate from [disk] so that cache and download
+     * locks never hold up play-state records.
+     */
     val buffers = Dispatchers.IO.limitedParallelism(1)
 }

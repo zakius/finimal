@@ -143,6 +143,8 @@ import finimal.core.TICKS_PER_MS
 private const val REPORT_INTERVAL_MS = 10_000L
 private const val RESUME_REWIND_MS = 5_000L
 private const val SEEK_MS_PER_WIDTH = 100_000f
+/** How far behind the playhead the disk buffer starts, so seeking back a little stays local. */
+private const val BUFFER_BEHIND_BYTES = 32L * 1000 * 1000
 
 /** Chosen speed, kept for the rest of the session so "Play next" does not reset it. */
 private var sessionSpeed = 1f
@@ -150,7 +152,7 @@ private var sessionSpeed = 1f
 /** Forced fullscreen and rotation lock, handed from a player to the "Play next" one so the screen doesn't flip in between. */
 private var carried: Pair<Boolean, Boolean>? = null
 
-// Material icons missing from material-icons-core; extended would add thousands of classes for five paths.
+// Material icons that material-icons-core lacks. The extended icon set would add thousands of classes for six paths.
 private fun icon(name: String, path: String) = ImageVector.Builder(name, 24.dp, 24.dp, 24f, 24f)
     .addPath(addPathNodes(path), fill = SolidColor(Color.Black)).build()
 private val PauseIcon = icon("Pause", "M6,19h4V5H6v14zm8,-14v14h4V5h-4z")
@@ -166,7 +168,7 @@ fun PlayerScreen(itemId: String, onBack: () -> Unit, onPlay: (String) -> Unit) {
     val activity = LocalActivity.current!!
     val carry = remember { carried }
     DisposableEffect(Unit) {
-        // Cleared here, after the previous player's dispose below has seen it.
+        // Cleared only once this screen is composed, which is after the previous player's onDispose below has read it.
         carried = null
         onDispose {
             if (carried == null) {
@@ -190,34 +192,55 @@ fun PlayerScreen(itemId: String, onBack: () -> Unit, onPlay: (String) -> Unit) {
         val complete = download != null && withContext(Dispatchers.IO) { Media.isDone(download) }
         // Outside this screen's scope, so giving up on a slow server below doesn't cut a flush short.
         val process = ProcessLifecycleOwner.get().lifecycleScope
-        val fetch = process.async { runCatching {
-            // Only this item's unsynced state must reach the server before it is read; the rest syncs alongside.
-            // Read on App.disk, so a stop recorded on leaving the previous player is seen.
-            val pending = withContext(App.disk) { App.pending.get(itemId) != null }
-            if (!pending) process.launch { server.flush() }
-            server.item(itemId, flushFirst = pending)
-        } }
+        val fetch = process.async {
+            runCatching {
+                // Only this item's unsynced state must reach the server before the item is read; the rest syncs in
+                // parallel. The check runs on App.disk so it sees a stop that the previous player recorded on exit.
+                val pending = withContext(App.disk) { App.pending.get(itemId) != null }
+                if (!pending) process.launch { server.flush() }
+                server.item(itemId, flushFirst = pending)
+            }
+        }
         // A finished download doesn't wait out network timeouts; it plays offline if the server is slow to answer.
-        val result = (if (complete) withTimeoutOrNull(2_000) { fetch.await() } else fetch.await())
-            ?: Result.failure(java.util.concurrent.TimeoutException("server slow to answer"))
-        result.onFailure { if (it is InvalidStatusException && it.status == 401) server.expire() }
+        val fetched = if (complete) withTimeoutOrNull(2_000) { fetch.await() } else fetch.await()
+        val result = fetched ?: Result.failure(java.util.concurrent.TimeoutException("server slow to answer"))
+        result.onFailure { e ->
+            if (e is InvalidStatusException && e.status == 401) server.expire()
+        }
         val loaded = result.getOrNull()
         online = loaded != null
         // A finished download plays as downloaded, even if the server's file changed since.
-        val shown = if (complete) downloaded!!.copy(userData = loaded?.userData ?: downloaded.userData) else loaded ?: downloaded
+        val shown = if (complete) {
+            val local = downloaded!!
+            val userData = loaded?.userData ?: local.userData
+            local.copy(userData = userData)
+        } else {
+            loaded ?: downloaded
+        }
         // A missing episode the server lists (no file behind it) has no source to play.
-        if (shown != null && shown.mediaSources.isNullOrEmpty()) error = java.io.FileNotFoundException("This item has no file on the server")
-        else { item = shown; if (shown == null) error = result.exceptionOrNull() }
+        if (shown != null && shown.mediaSources.isNullOrEmpty()) {
+            error = java.io.FileNotFoundException("This item has no file on the server")
+        } else {
+            item = shown
+            if (shown == null) error = result.exceptionOrNull()
+        }
     }
-    // Re-fetched after "Mark played" in the episode list.
+    // The episode list; [refresh] re-fetches it after "Mark played".
     LaunchedEffect(item, refresh) {
-        val it = item ?: return@LaunchedEffect
+        val episode = item ?: return@LaunchedEffect
         val server = App.server
-        val seriesId = it.seriesId?.toString()
-        if (it.type == BaseItemKind.EPISODE && seriesId != null) {
-            siblings = (if (online) runCatching { server.episodes(seriesId) }.getOrNull() else null)
-                ?: withContext(Dispatchers.IO) { Media.downloads() }.map { d -> d.item }.filter { d -> d.seriesId == it.seriesId }
+        val seriesId = episode.seriesId?.toString()
+        if (episode.type == BaseItemKind.EPISODE && seriesId != null) {
+            val fromServer = if (online) runCatching { server.episodes(seriesId) }.getOrNull() else null
+            if (fromServer != null) {
+                siblings = fromServer
+            } else {
+                val downloads = withContext(Dispatchers.IO) { Media.downloads() }
+                siblings = downloads
+                    .map { d -> d.item }
+                    .filter { d -> d.seriesId == episode.seriesId }
                     .sortedWith(compareBy({ d -> d.parentIndexNumber }, { d -> d.indexNumber }))
+            }
         }
     }
     val current = item
@@ -261,9 +284,10 @@ private fun Playback(
     val videoStream = remember(source) { videoInfo(source) }
     val download = remember(id) { Media.download(id) }
     // A finished transcoded download plays from its local playlist; one still under way is no use yet.
-    val localPlaylist = remember(download) { download?.let(Media::playlist) }
+    val localPlaylist = remember(download) { if (download != null) Media.playlist(download) else null }
     val cacheKey = Media.key(item)
-    // A file the device can't decode starts as a transcode. Downloads play as they are; a failure still switches.
+    // A file the device can't decode starts as a transcode. A direct download plays as it is; if it then fails to
+    // decode, playback still switches to a transcode.
     var transcoding by remember { mutableStateOf(online && localPlaylist == null && download?.transcoded != false && !playsDirectly(item)) }
     // Where a direct play switched to a transcode; null for a play that started as one, which resumes like any other.
     var transcodeFromMs by remember { mutableStateOf<Long?>(null) }
@@ -293,12 +317,13 @@ private fun Playback(
         }
     }
     val player = remember(transcoding) { buildPlayer(context, playerView) }
-    // Per player: ties reports to the transcode, so a stop ends the server's job, but the direct-play stop never ends the transcode after it.
+    // A new session ID per player. Reports carry it so the server ties them to the transcode job: a stop ends that job,
+    // and the stop from an earlier direct-play player can't end the transcode that replaced it.
     val playSession = remember(player) { UUID.randomUUID().toString() }
 
-    // Prepare: external subtitles first (cached on disk), then the media item at the resume point.
+    // Fetch external subtitles first (cached on disk), then load the media item at the resume point.
     LaunchedEffect(player) {
-        // Set first: eviction and subtitle cleanup leave the playing item alone.
+        // Set before anything else, so eviction and subtitle cleanup leave the playing item alone.
         Media.playing = cacheKey
         // A slow server doesn't hold up the start; the fetch finishes on its own and the files are there next time.
         // A transcode, live or downloaded, has no embedded subtitles: those come as files too.
@@ -307,39 +332,51 @@ private fun Playback(
         val subs = withTimeoutOrNull(3_000) { fetch.await() } ?: emptyMap()
         val streams = sideloadedSubs(item, sideload).associateBy { it.index }
         val audioIndex = prefs.audioLang(seriesKey)?.let { audioIndex(source, it) }
-        val url = if (transcoding) App.server.transcodeUrl(id, sourceId, audioIndex, burnInIndex(source, prefs.subLang(seriesKey)), playSession)
-            else localPlaylist?.let { Uri.fromFile(it).toString() } ?: Media.streamUrl(item)
+        val url = if (transcoding) {
+            val burnIn = burnInIndex(source, prefs.subLang(seriesKey))
+            App.server.transcodeUrl(id, sourceId, audioIndex, burnIn, playSession)
+        } else if (localPlaylist != null) {
+            Uri.fromFile(localPlaylist).toString()
+        } else {
+            Media.streamUrl(item)
+        }
+        val subtitleConfigurations = subs.mapNotNull { (index, file) ->
+            val stream = streams[index] ?: return@mapNotNull null
+            val mime = when (file.extension) {
+                "ass", "ssa" -> MimeTypes.TEXT_SSA
+                "srt" -> MimeTypes.APPLICATION_SUBRIP
+                "vtt" -> MimeTypes.TEXT_VTT
+                else -> return@mapNotNull null
+            }
+            MediaItem.SubtitleConfiguration.Builder(Uri.fromFile(file))
+                .setMimeType(mime)
+                .setLanguage(stream.language)
+                .setLabel(stream.displayTitle)
+                .setId("ext${stream.index}")
+                .build()
+        }
         val mediaItem = MediaItem.Builder()
             .setUri(url)
-            .setSubtitleConfigurations(subs.mapNotNull { (index, file) ->
-                val stream = streams[index] ?: return@mapNotNull null
-                val mime = when (file.extension) {
-                    "ass", "ssa" -> MimeTypes.TEXT_SSA
-                    "srt" -> MimeTypes.APPLICATION_SUBRIP
-                    "vtt" -> MimeTypes.TEXT_VTT
-                    else -> return@mapNotNull null
-                }
-                MediaItem.SubtitleConfiguration.Builder(Uri.fromFile(file))
-                    .setMimeType(mime)
-                    .setLanguage(stream.language)
-                    .setLabel(stream.displayTitle)
-                    .setId("ext${stream.index}")
-                    .build()
-            })
+            .setSubtitleConfigurations(subtitleConfigurations)
             .build()
-        val resumeMs = (item.localState().first?.positionTicks ?: 0) / TICKS_PER_MS
+        val savedTicks = item.localState().first?.positionTicks ?: 0L
+        val resumeMs = savedTicks / TICKS_PER_MS
         val startMs = transcodeFromMs ?: (resumeMs - RESUME_REWIND_MS).coerceAtLeast(0)
         startTicks = startMs * TICKS_PER_MS
         startedAt = SystemClock.elapsedRealtime()
         if (transcodeFromMs == null && startMs > 0) resumedAt = startMs
-        player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().apply {
-            prefs.audioLang(seriesKey)?.let { setPreferredAudioLanguage(it) }
-            when (val sub = prefs.subLang(seriesKey)) {
-                null -> {}
-                "" -> setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
-                else -> setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false).setPreferredTextLanguage(sub)
+        val trackParams = player.trackSelectionParameters.buildUpon()
+        val audioLang = prefs.audioLang(seriesKey)
+        if (audioLang != null) trackParams.setPreferredAudioLanguage(audioLang)
+        when (val sub = prefs.subLang(seriesKey)) {
+            null -> {}
+            "" -> trackParams.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
+            else -> {
+                trackParams.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                trackParams.setPreferredTextLanguage(sub)
             }
-        }.build()
+        }
+        player.trackSelectionParameters = trackParams.build()
         player.setPlaybackSpeed(sessionSpeed)
         player.setMediaItem(mediaItem, startMs)
         player.prepare()
@@ -348,14 +385,28 @@ private fun Playback(
         if (online) segments = runCatching { App.server.segments(id) }.getOrDefault(emptyList())
     }
 
-    fun runtimeTicks() = item.runTimeTicks ?: source.runTimeTicks ?: player.duration.takeIf { it > 0 }?.times(TICKS_PER_MS)
+    fun runtimeTicks(): Long? {
+        val known = item.runTimeTicks ?: source.runTimeTicks
+        if (known != null) return known
+        val durationMs = player.duration
+        if (durationMs > 0) return durationMs * TICKS_PER_MS
+        return null
+    }
     fun positionTicks() = ResumeGuard.position(startTicks, player.currentPosition * TICKS_PER_MS, runtimeTicks(),
         SystemClock.elapsedRealtime() - startedAt, seeked)
-    fun report() = scope.launch { App.server.reportProgress(id, sourceId, positionTicks(), !player.isPlaying, transcoding, serverPlayed, playSession) }
-    fun switchToTranscode() { transcodeFromMs = player.currentPosition; transcoding = true }
-    // Paused, ended or failed for good: let the screen time out.
-    fun keepScreenOn() { playerView.keepScreenOn = player.playWhenReady && player.playbackState != Player.STATE_ENDED &&
-        (player.playerError == null || failedSince != null) }
+    fun report() = scope.launch {
+        App.server.reportProgress(id, sourceId, positionTicks(), !player.isPlaying, transcoding, serverPlayed, playSession)
+    }
+    fun switchToTranscode() {
+        transcodeFromMs = player.currentPosition
+        transcoding = true
+    }
+    // Let the screen time out while paused, after the end, or after a failure that is no longer being retried.
+    fun keepScreenOn() {
+        playerView.keepScreenOn = player.playWhenReady &&
+            player.playbackState != Player.STATE_ENDED &&
+            (player.playerError == null || failedSince != null)
+    }
 
     DisposableEffect(player) {
         val listener = object : Player.Listener {
@@ -366,25 +417,38 @@ private fun Playback(
             override fun onEvents(player: Player, events: Player.Events) = keepScreenOn()
 
             override fun onPositionDiscontinuity(old: Player.PositionInfo, new: Player.PositionInfo, reason: Int) {
-                if (reason == Player.DISCONTINUITY_REASON_SEEK) { seeked = true; report() }
+                if (reason == Player.DISCONTINUITY_REASON_SEEK) {
+                    seeked = true
+                    report()
+                }
             }
 
-            // No decoder at all for the video means no error: Media3 plays the audio over black.
+            // With no decoder for the video at all, Media3 raises no error and plays the audio over black.
             override fun onTracksChanged(tracks: Tracks) {
-                if (!transcoding && online && tracks.containsType(C.TRACK_TYPE_VIDEO) && !tracks.isTypeSupported(C.TRACK_TYPE_VIDEO, true)) switchToTranscode()
+                if (!transcoding && online &&
+                    tracks.containsType(C.TRACK_TYPE_VIDEO) &&
+                    !tracks.isTypeSupported(C.TRACK_TYPE_VIDEO, true)
+                ) {
+                    switchToTranscode()
+                }
             }
 
             override fun onPlaybackStateChanged(state: Int) {
-                if (state == Player.STATE_READY) { failedSince = null; attempt = 0 }
+                if (state == Player.STATE_READY) {
+                    failedSince = null
+                    attempt = 0
+                }
                 // Seeking back from the end screen plays on.
                 if (state == Player.STATE_READY || state == Player.STATE_BUFFERING) ended = false
                 if (state == Player.STATE_READY && !transcoding && localPlaylist == null) {
                     val fraction = player.currentPosition.toDouble() / player.duration.coerceAtLeast(1)
-                    // On App.buffers, so a start never lands after the stop on leaving.
+                    // Runs on App.buffers, like the stop on leaving, so a start can never land after that stop.
                     scope.launch(App.buffers) {
-                        val len = Media.lengthOf(cacheKey).takeIf { it > 0 } ?: source.size ?: 0
-                        // A fixed margin behind the playhead: a share of the file would be a gigabyte behind on a big remux.
-                        Media.startBuffer(item, if (len > 0) ((len * fraction).toLong() - 32_000_000).coerceAtLeast(0) else 0)
+                        val cachedLen = Media.lengthOf(cacheKey)
+                        val len = if (cachedLen > 0) cachedLen else (source.size ?: 0L)
+                        // A fixed margin rather than a share of the file, which would be a gigabyte behind on a big remux.
+                        val from = if (len > 0) ((len * fraction).toLong() - BUFFER_BEHIND_BYTES).coerceAtLeast(0) else 0L
+                        Media.startBuffer(item, from)
                     }
                 }
                 if (state == Player.STATE_ENDED && !ended) {
@@ -395,14 +459,19 @@ private fun Playback(
             }
 
             override fun onPlayerError(error: PlaybackException) {
-                // Media3 reports a network failure only once the buffer is spent. Keep trying, from the same position, for a while.
+                // Media3 reports a network failure only once the buffer is spent. Keep retrying from the same position
+                // for a while.
                 if (isNetworkFailure(error)) {
                     val now = System.currentTimeMillis()
                     val since = failedSince ?: now
                     val wait = reconnectDelayMs(attempt, since, now)
                     if (wait != null) {
                         failedSince = since
-                        scope.launch { delay(wait); attempt++; if (player.playbackState == Player.STATE_IDLE) player.reload() }
+                        scope.launch {
+                            delay(wait)
+                            attempt++
+                            if (player.playbackState == Player.STATE_IDLE) player.reload()
+                        }
                         return
                     }
                 }
@@ -419,7 +488,8 @@ private fun Playback(
                 else playerError = error
             }
         }
-        // A weak decoder drops frames without failing. Two batches of 50 within 30 s at normal speed offer a transcode.
+        // A weak decoder drops frames without failing. Two batches of 50 or more dropped frames within 30 seconds, at
+        // normal speed, make the player offer a transcode.
         var lastDrop = 0L
         val drops = object : AnalyticsListener {
             override fun onDroppedVideoFrames(eventTime: AnalyticsListener.EventTime, droppedFrames: Int, elapsedMs: Long) {
@@ -432,15 +502,16 @@ private fun Playback(
         player.addListener(listener)
         player.addAnalyticsListener(drops)
         playerView.player = player
-        // Late audio from headphones connected mid-play needs a seek to take effect, as in the menu.
+        // The audio delay for headphones connected during playback takes effect only after a seek, as in the menu.
         AudioDelay.onWirelessChanged = { if (prefs.audioDelayMs != 0) player.seekTo(player.currentPosition) }
         onDispose {
             AudioDelay.onWirelessChanged = null
             player.removeListener(listener)
-            // Left before loading: there is no position, and reporting 0 would wipe the resume point.
+            // If the user left before the item loaded there is no position, and reporting 0 would wipe the resume point.
             if (!ended && player.currentMediaItem != null) {
                 val runtime = runtimeTicks()
-                App.server.reportStop(id, sourceId, if (creditsDone && runtime != null) runtime else positionTicks(), runtime, serverPlayed, playSession)
+                val stopTicks = if (creditsDone && runtime != null) runtime else positionTicks()
+                App.server.reportStop(id, sourceId, stopTicks, runtime, serverPlayed, playSession)
             }
             ProcessLifecycleOwner.get().lifecycleScope.launch(App.buffers) { Media.stopBuffer(id) }
             Media.playing = null
@@ -448,15 +519,20 @@ private fun Playback(
         }
     }
 
-    // A network coming back retries at once rather than at the next backoff step.
+    // When a network comes back, retry immediately rather than at the next backoff step.
     DisposableEffect(player, failedSince != null) {
         if (failedSince == null) return@DisposableEffect onDispose {}
         val cm = context.getSystemService(ConnectivityManager::class.java)
         val main = Handler(Looper.getMainLooper())
-        // The network already up is reported at once; the backoff covers it.
+        // Registration reports the current network immediately. Ignore it, since the backoff already retries on it.
         val initial = cm.activeNetwork
         val callback = object : ConnectivityManager.NetworkCallback() {
-            override fun onAvailable(network: Network) { if (network != initial) main.post { if (player.playbackState == Player.STATE_IDLE) player.reload() } }
+            override fun onAvailable(network: Network) {
+                if (network == initial) return
+                main.post {
+                    if (player.playbackState == Player.STATE_IDLE) player.reload()
+                }
+            }
         }
         cm.registerDefaultNetworkCallback(callback)
         onDispose { cm.unregisterNetworkCallback(callback) }
@@ -487,32 +563,49 @@ private fun Playback(
     }
     fun setFullscreen(on: Boolean) {
         forcedFullscreen = on
-        if (!rotationLocked) activity.requestedOrientation =
-            if (on) ActivityInfo.SCREEN_ORIENTATION_USER_LANDSCAPE else ActivityInfo.SCREEN_ORIENTATION_USER_PORTRAIT
+        if (!rotationLocked) {
+            activity.requestedOrientation =
+                if (on) ActivityInfo.SCREEN_ORIENTATION_USER_LANDSCAPE else ActivityInfo.SCREEN_ORIENTATION_USER_PORTRAIT
+        }
     }
     LaunchedEffect(fullscreen) { systemBars(activity, hidden = fullscreen) }
     LaunchedEffect(Unit) { if (forcedFullscreen && !rotationLocked) setFullscreen(true) }
-    LaunchedEffect(choppy) { if (choppy) { delay(15_000); choppy = false } }
-    fun playNext(nextId: String) { carried = forcedFullscreen to rotationLocked; onPlay(nextId) }
+    LaunchedEffect(choppy) {
+        if (choppy) {
+            delay(15_000)
+            choppy = false
+        }
+    }
+    fun playNext(nextId: String) {
+        carried = Pair(forcedFullscreen, rotationLocked)
+        onPlay(nextId)
+    }
     BackHandler { if (fullscreen && !landscape) setFullscreen(false) else onBack() }
 
     val video = @Composable { mod: Modifier ->
+        val streamCacheKey = if (transcoding || localPlaylist != null) null else cacheKey
         VideoSurface(
-            mod, player, playerView, fullscreen, transcoding, cacheKey.takeUnless { transcoding || localPlaylist != null }, segments, ended, next, playerError, failedSince != null,
+            mod, player, playerView, fullscreen, transcoding, streamCacheKey, segments, ended, next, playerError, failedSince != null,
             title = if (item.type == BaseItemKind.EPISODE) "${item.seriesName.orEmpty()} · ${episodeLabel(item)}" else item.name.orEmpty(),
             chapters = chapters,
             resumedAt = resumedAt,
             onResumeNoteGone = { resumedAt = null },
             onTranscode = if (choppy && !transcoding) ({
                 choppy = false
-                videoStream?.let { prefs.learnChoppy(it.codec, it.pixelRate) }
+                if (videoStream != null) prefs.learnChoppy(videoStream.codec, videoStream.pixelRate)
                 switchToTranscode()
             }) else null,
             onToggleFullscreen = { setFullscreen(!fullscreen) },
             onBack = onBack,
             onPlay = ::playNext,
-            onCreditsNext = { creditsDone = true; playNext(it) },
-            onRetry = { playerError = null; player.reload() },
+            onCreditsNext = { nextId ->
+                creditsDone = true
+                playNext(nextId)
+            },
+            onRetry = {
+                playerError = null
+                player.reload()
+            },
             rotationLocked = rotationLocked,
             onRotationLock = {
                 rotationLocked = !rotationLocked
@@ -529,22 +622,29 @@ private fun Playback(
             val downloads = rememberDownloadStatuses()
             val season = siblings.filter { it.seasonId == item.seasonId }
             val listState = rememberLazyListState()
-            // The playing episode in view once the list arrives; item 0 is the title.
+            // Scroll the playing episode into view once the list arrives. List item 0 is the title.
             LaunchedEffect(season.isNotEmpty()) {
                 val i = season.indexOfFirst { it.id == item.id }
-                if (i >= 0 && i + 1 > (listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0)) listState.scrollToItem(i)
+                if (i >= 0) {
+                    val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+                    if (i + 1 > lastVisible) listState.scrollToItem(i)
+                }
             }
             LazyColumn(Modifier.fillMaxSize().padding(horizontal = 12.dp), listState) {
                 item {
                     Text(item.seriesName ?: item.name.orEmpty(), style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(top = 12.dp))
                     if (item.type == BaseItemKind.EPISODE) Text(episodeLabel(item), style = MaterialTheme.typography.titleMedium)
-                    item.overview?.let { Text(it, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(vertical = 8.dp)) }
+                    val overview = item.overview
+                    if (overview != null) Text(overview, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(vertical = 8.dp))
                 }
                 items(season, key = { it.id }) { ep ->
                     EpisodeRow(ep, downloads?.get(ep.id.toString()), highlighted = ep.id == item.id, onPlay = { onPlay(ep.id.toString()) },
                         onStartOver = {
                             if (ep.id == item.id) player.seekTo(0)
-                            else scope.launch { App.server.startOver(ep); onPlay(ep.id.toString()) }
+                            else scope.launch {
+                                App.server.startOver(ep)
+                                onPlay(ep.id.toString())
+                            }
                         },
                         onChanged = onChanged)
                 }
@@ -556,15 +656,19 @@ private fun Playback(
 private fun buildPlayer(context: Context, view: VideoView): ExoPlayer {
     AudioDelay.watch(context)
     val renderers = AudioDelay.renderers(context).setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
-        .setEnableDecoderFallback(true) // another device decoder before giving up and transcoding
-    // The RAM buffer stays modest; buffering to the end happens on disk, in Media's scratch.
-    // A 15 s back buffer lets skip-back and the subtitle re-read seek stay in memory instead of reloading.
+        .setEnableDecoderFallback(true) // Try another device decoder before giving up and transcoding.
+    // The RAM buffer stays modest, because buffering to the end happens on disk in Media's scratch.
+    // A 15-second back buffer keeps skip-back and the subtitle re-read seek in memory instead of reloading.
     val load = DefaultLoadControl.Builder().setBufferDurationsMs(30_000, 120_000, 1_000, 2_000)
         .setBackBuffer(15_000, true).build()
+    val audioAttributes = AudioAttributes.Builder()
+        .setUsage(C.USAGE_MEDIA)
+        .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
+        .build()
     return ExoPlayer.Builder(context)
         .setLoadControl(load)
         // Pauses for calls and other players, ducks under navigation prompts.
-        .setAudioAttributes(AudioAttributes.Builder().setUsage(C.USAGE_MEDIA).setContentType(C.AUDIO_CONTENT_TYPE_MOVIE).build(), true)
+        .setAudioAttributes(audioAttributes, true)
         .setHandleAudioBecomingNoisy(true)
         .buildWithAssSupport(
             context,
@@ -625,8 +729,14 @@ private fun VideoSurface(
     var crop by remember { mutableStateOf(false) }
     var scrubTarget by remember { mutableStateOf<Long?>(null) }
     var lastInteraction by remember { mutableLongStateOf(System.currentTimeMillis()) }
-    val ranges = remember(segments) { segments.map { it.type to (it.startTicks / TICKS_PER_MS until it.endTicks / TICKS_PER_MS - 1_000) } }
-    // Derived, so the 250 ms position tick doesn't recompose the whole surface while the controls are hidden.
+    val ranges = remember(segments) {
+        segments.map { s ->
+            val startMs = s.startTicks / TICKS_PER_MS
+            val endMs = s.endTicks / TICKS_PER_MS - 1_000
+            Pair(s.type, startMs until endMs)
+        }
+    }
+    // Derived state, so the 250 ms position tick doesn't recompose the whole surface while the controls are hidden.
     val segment by remember(ranges) { derivedStateOf { ranges.firstOrNull { position in it.second } } }
     var fastHold by remember { mutableStateOf(false) }
     val haptics = LocalHapticFeedback.current
@@ -635,19 +745,33 @@ private fun VideoSurface(
         while (true) {
             position = player.currentPosition
             duration = player.duration.coerceAtLeast(0)
-            // Only shown with the controls. Off the main thread: cache lookups wait on the fill worker's commit lock.
-            val cached = if (!controls) 0 else cacheKey?.let { k -> withContext(Dispatchers.IO) { Media.cachedUntilMs(k, position, duration) } } ?: 0
+            // The cached range is shown only with the controls. It is read off the main thread because cache lookups
+            // wait on the fill worker's commit lock.
+            var cached = 0L
+            if (controls && cacheKey != null) {
+                cached = withContext(Dispatchers.IO) { Media.cachedUntilMs(cacheKey, position, duration) }
+            }
             buffered = maxOf(player.bufferedPosition, cached)
             playing = player.isPlaying
-            // Idle is the time before the first prepare (subtitles are fetched first), or after an error.
+            // The player is idle before the first prepare (subtitles are fetched first) and after an error.
             waiting = player.playbackState == Player.STATE_BUFFERING || player.playbackState == Player.STATE_IDLE
             if (controls && playing && System.currentTimeMillis() - lastInteraction > 3_000) controls = false
             delay(250)
         }
     }
-    LaunchedEffect(overlay) { if (overlay != null) { delay(800); overlay = null } }
-    LaunchedEffect(resumedAt) { if (resumedAt != null) { delay(5_000); onResumeNoteGone() } }
-    // Before the duration is known (loading, reconnecting) it reads 0; clamping to it would seek to the start.
+    LaunchedEffect(overlay) {
+        if (overlay != null) {
+            delay(800)
+            overlay = null
+        }
+    }
+    LaunchedEffect(resumedAt) {
+        if (resumedAt != null) {
+            delay(5_000)
+            onResumeNoteGone()
+        }
+    }
+    // The duration reads 0 until it is known (loading, reconnecting), and clamping to it would seek to the start.
     fun clamp(ms: Long) = if (duration > 0) ms.coerceIn(0, duration) else ms.coerceAtLeast(0)
     LaunchedEffect(crop) {
         playerView.resizeMode = if (crop) AspectRatioFrameLayout.RESIZE_MODE_ZOOM else AspectRatioFrameLayout.RESIZE_MODE_FIT
@@ -655,21 +779,29 @@ private fun VideoSurface(
 
     fun seekBy(ms: Long) {
         player.seekTo(clamp(player.currentPosition + ms))
-        overlay = (if (ms > 0) "+" else "−") + "${abs(ms) / 1000}s"
+        val sign = if (ms > 0) "+" else "−"
+        overlay = "$sign${abs(ms) / 1000}s"
     }
     fun togglePlay() = if (player.isPlaying) player.pause() else player.play()
 
-    // Offered, never done on its own. Credits offer the next episode in season order when there is one.
-    val skip: Skip? = segment?.takeIf { !ended }?.let { (type, range) ->
+    // Skipping is offered, never automatic. During the credits the button offers the next episode, if there is one.
+    val activeSegment = segment
+    val skip: Skip? = if (activeSegment == null || ended) {
+        null
+    } else {
+        val (type, range) = activeSegment
         when (type) {
             MediaSegmentType.INTRO -> Skip("Skip intro") { player.seekTo(range.last + 1_000) }
             MediaSegmentType.RECAP -> Skip("Skip recap") { player.seekTo(range.last + 1_000) }
-            MediaSegmentType.OUTRO -> next?.let { n -> Skip("Play next: ${episodeLabel(n)}") { onCreditsNext(n.id.toString()) } }
+            MediaSegmentType.OUTRO -> {
+                if (next != null) Skip("Play next: ${episodeLabel(next)}") { onCreditsNext(next.id.toString()) } else null
+            }
             else -> null
         }
     }
 
-    // Remote and keyboard. The surface holds focus while no button is shown; buttons that show take it (Modifier.takeFocus).
+    // Remote and keyboard input. The surface holds focus while no button is shown; a button takes focus as it appears
+    // (see Modifier.takeFocus).
     val surfaceFocus = remember { FocusRequester() }
     val skipShown = skip != null && !controls
     LaunchedEffect(controls, skipShown, ended, playerError) {
@@ -680,9 +812,13 @@ private fun VideoSurface(
         modifier
             .background(Color.Black)
             .onPreviewKeyEvent { e ->
-                lastInteraction = System.currentTimeMillis() // keys keep the controls up, like taps
-                // On TV, Back hides the controls first. Here, not a BackHandler: the player screen's own one ran first.
-                if (e.key == Key.Back && App.tv && controls) { if (e.type == KeyEventType.KeyUp) controls = false; return@onPreviewKeyEvent true }
+                lastInteraction = System.currentTimeMillis() // Keys keep the controls up, like taps.
+                // On TV, Back hides the controls before leaving. This can't be a BackHandler, because the player
+                // screen's own BackHandler would run first.
+                if (e.key == Key.Back && App.tv && controls) {
+                    if (e.type == KeyEventType.KeyUp) controls = false
+                    return@onPreviewKeyEvent true
+                }
                 if (e.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
                 val step = prefs.doubleTapSeconds * 1000L
                 when (e.key) {
@@ -691,12 +827,12 @@ private fun VideoSurface(
                     Key.MediaPause -> player.pause()
                     Key.MediaFastForward -> seekBy(step)
                     Key.MediaRewind -> seekBy(-step)
-                    Key.MediaNext -> next?.let { onPlay(it.id.toString()) }
+                    Key.MediaNext -> if (next != null) onPlay(next.id.toString())
                     else -> return@onPreviewKeyEvent false
                 }
                 true
             }
-            // Reached only by keys no button took: with the controls up, the arrows move between their buttons instead.
+            // Only keys that no button consumed reach here. With the controls up, the arrows move between buttons instead.
             .onKeyEvent { e ->
                 if (controls) return@onKeyEvent false
                 val step = prefs.doubleTapSeconds * 1000L
@@ -704,9 +840,10 @@ private fun VideoSurface(
                     e.type == KeyEventType.KeyDown && e.key == Key.DirectionLeft -> seekBy(-step)
                     e.type == KeyEventType.KeyDown && e.key == Key.DirectionRight -> seekBy(step)
                     e.type == KeyEventType.KeyDown && (e.key == Key.DirectionUp || e.key == Key.DirectionDown) -> controls = true
-                    // On release: the press that brings the controls up must not also click the button they focus.
+                    // Act on release, so the press that brings the controls up doesn't also click the button they focus.
                     e.type == KeyEventType.KeyUp && (e.key == Key.DirectionCenter || e.key == Key.Enter || e.key == Key.NumPadEnter) -> {
-                        togglePlay(); controls = true
+                        togglePlay()
+                        controls = true
                     }
                     else -> return@onKeyEvent false
                 }
@@ -716,7 +853,7 @@ private fun VideoSurface(
             .focusable()
             .pointerInput(fullscreen) {
                 detectTapGestures(
-                    // Hold for 2x until release; the speed the user chose comes back after.
+                    // Holding plays at 2x until release, then the user's chosen speed comes back.
                     onLongPress = {
                         if (prefs.gestureHold) {
                             fastHold = true
@@ -725,13 +862,24 @@ private fun VideoSurface(
                         }
                     },
                     onPress = {
-                        // finally: a rotation restarts this block mid-hold, and 2x must not stick.
-                        try { tryAwaitRelease() } finally { if (fastHold) { fastHold = false; player.setPlaybackSpeed(sessionSpeed) } }
+                        // Restore the speed in finally: a rotation restarts this block mid-hold, and 2x must not stick.
+                        try {
+                            tryAwaitRelease()
+                        } finally {
+                            if (fastHold) {
+                                fastHold = false
+                                player.setPlaybackSpeed(sessionSpeed)
+                            }
+                        }
                     },
-                    onTap = { controls = !controls; lastInteraction = System.currentTimeMillis() },
-                    // Null when off, so a single tap doesn't wait out the double-tap window.
+                    onTap = {
+                        controls = !controls
+                        lastInteraction = System.currentTimeMillis()
+                    },
+                    // Null when disabled, so a single tap doesn't wait out the double-tap window.
                     onDoubleTap = if (!prefs.gestureDoubleTap) null else { offset ->
-                        seekBy((if (offset.x < size.width / 2) -1 else 1) * prefs.doubleTapSeconds * 1000L)
+                        val direction = if (offset.x < size.width / 2) -1 else 1
+                        seekBy(direction * prefs.doubleTapSeconds * 1000L)
                     },
                 )
             }
@@ -751,9 +899,11 @@ private fun VideoSurface(
                     val startPos = player.currentPosition
                     val maxVol = audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
                     val startVol = audio.getStreamVolume(AudioManager.STREAM_MUSIC)
-                    val startBright = activity.window.attributes.screenBrightness.takeIf { it >= 0 } ?: 0.5f
+                    val windowBright = activity.window.attributes.screenBrightness
+                    val startBright = if (windowBright >= 0) windowBright else 0.5f
                     val brightnessZone = if (prefs.brightnessOnLeft) 0 else 2
-                    // Each apply is a call into the window or audio service; touch events come far faster than the value changes.
+                    // Apply only when the value changes. Each apply calls into the window or audio service, and touch
+                    // events arrive far more often than the value changes.
                     var lastPercent = -1
                     var lastVol = startVol
                     while (true) {
@@ -762,7 +912,10 @@ private fun VideoSurface(
                         if (pressed.isEmpty()) break
                         if (pressed.size >= 2 && prefs.gesturePinch && fullscreen) {
                             val span = (pressed[0].position - pressed[1].position).getDistance()
-                            if (axis != 3) { axis = 3; startSpan = span }
+                            if (axis != 3) {
+                                axis = 3
+                                startSpan = span
+                            }
                             if (span > startSpan * 1.15f) crop = true
                             if (span < startSpan * 0.85f) crop = false
                             event.changes.forEach { it.consume() }
@@ -771,7 +924,9 @@ private fun VideoSurface(
                         if (axis == 3) continue
                         val change = pressed[0]
                         total += change.positionChange()
-                        if (axis == 0 && total.getDistance() > viewConfiguration.touchSlop) axis = if (abs(total.x) > abs(total.y)) 1 else 2
+                        if (axis == 0 && total.getDistance() > viewConfiguration.touchSlop) {
+                            axis = if (abs(total.x) > abs(total.y)) 1 else 2
+                        }
                         when {
                             axis == 1 && fullscreen && prefs.gestureSeek -> {
                                 val target = clamp(startPos + (total.x / w * SEEK_MS_PER_WIDTH).toLong())
@@ -784,7 +939,8 @@ private fun VideoSurface(
                             axis == 2 && fullscreen && zone != 1 && prefs.gestureLevels -> {
                                 val delta = -total.y / (h * 0.8f)
                                 if (zone == brightnessZone) {
-                                    val percent = ((startBright + delta).coerceIn(0.01f, 1f) * 100).toInt().coerceAtLeast(1)
+                                    val brightness = (startBright + delta).coerceIn(0.01f, 1f)
+                                    val percent = (brightness * 100).toInt().coerceAtLeast(1)
                                     if (percent != lastPercent) {
                                         lastPercent = percent
                                         activity.window.attributes = activity.window.attributes.apply { screenBrightness = percent / 100f }
@@ -792,14 +948,18 @@ private fun VideoSurface(
                                     overlay = "Brightness $percent%"
                                 } else {
                                     val v = (startVol + delta * maxVol).toInt().coerceIn(0, maxVol)
-                                    if (v != lastVol) { lastVol = v; audio.setStreamVolume(AudioManager.STREAM_MUSIC, v, 0) }
+                                    if (v != lastVol) {
+                                        lastVol = v
+                                        audio.setStreamVolume(AudioManager.STREAM_MUSIC, v, 0)
+                                    }
                                     overlay = "Volume $v / $maxVol"
                                 }
                                 change.consume()
                             }
                         }
                     }
-                    scrubTarget?.let { player.seekToNearestKeyframe(it) }
+                    val scrubEnd = scrubTarget
+                    if (scrubEnd != null) player.seekToNearestKeyframe(scrubEnd)
                     scrubTarget = null
                     if (axis == 2 && prefs.gestureFullscreen) {
                         val threshold = h * 0.15f
@@ -811,8 +971,9 @@ private fun VideoSurface(
     ) {
         AndroidView({ playerView }, Modifier.fillMaxSize())
 
-        overlay?.let {
-            Text(it, color = Color.White, style = MaterialTheme.typography.titleLarge,
+        val overlayText = overlay
+        if (overlayText != null) {
+            Text(overlayText, color = Color.White, style = MaterialTheme.typography.titleLarge,
                 modifier = Modifier.align(Alignment.Center).background(Color(0x99000000), MaterialTheme.shapes.small).padding(12.dp))
         }
 
@@ -823,11 +984,11 @@ private fun VideoSurface(
         if (reconnecting && playerError == null) Text("Reconnecting…", color = Color.White, style = MaterialTheme.typography.labelLarge,
             modifier = Modifier.align(Alignment.Center).padding(top = 72.dp).background(Color(0x99000000), MaterialTheme.shapes.small).padding(horizontal = 8.dp, vertical = 4.dp))
 
-        // With controls shown it sits beside the seek bar instead, so the bar and scrim never cover it.
+        // With the controls shown, the skip button sits beside the seek bar instead, so the bar and scrim never cover it.
         if (skip != null && !controls) SkipButton(skip,
             Modifier.align(Alignment.BottomEnd).then(if (fullscreen) Modifier.safeDrawingPadding() else Modifier).padding(if (App.tv) 48.dp else 24.dp).takeFocus())
 
-        // Below the top bar, so it shows with the controls up at the start too.
+        // Placed below the top bar, so it is visible even though the controls are up at the start.
         val note = Modifier.align(Alignment.TopCenter).then(if (fullscreen) Modifier.safeDrawingPadding() else Modifier).padding(top = 56.dp)
         if (resumedAt != null && playerError == null && !ended) Row(note.background(Color(0x99000000), MaterialTheme.shapes.small).padding(start = 12.dp),
             verticalAlignment = Alignment.CenterVertically) {
@@ -837,10 +998,11 @@ private fun VideoSurface(
         else if (onTranscode != null && playerError == null && !ended) FilledTonalButton(onTranscode, note) { Text("Choppy? Transcode") }
 
         if (playerError != null) {
-            // Over the controls' scrim, without their buttons under it.
+            // Shown over the controls' scrim, without the control buttons underneath.
             Column(Modifier.align(Alignment.Center).padding(16.dp), Arrangement.spacedBy(8.dp), Alignment.CenterHorizontally) {
                 val known = playbackError(playerError)
-                ErrorText(known ?: "Playback failed.", playerError.errorCodeName.takeIf { known == null }, Color.White)
+                val detail = if (known == null) playerError.errorCodeName else null
+                ErrorText(known ?: "Playback failed.", detail, Color.White)
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     Button(onClick = onRetry, Modifier.takeFocus()) { Text("Retry") }
                     FilledTonalButton(onClick = onBack) { Text("Back") }
@@ -854,9 +1016,11 @@ private fun VideoSurface(
                 FilledTonalButton(onClick = onBack, if (next == null) Modifier.takeFocus() else Modifier) { Text("Back") }
             }
         } else if (controls) {
+            var onNext: (() -> Unit)? = null
+            if (next != null) onNext = { onPlay(next.id.toString()) }
             Controls(
                 player, position, duration, buffered, playing, fullscreen, transcoding, rotationLocked, title,
-                onBack, onToggleFullscreen, onRotationLock, onTracksChosen, ::seekBy, next?.let { { onPlay(it.id.toString()) } }, skip,
+                onBack, onToggleFullscreen, onRotationLock, onTracksChosen, ::seekBy, onNext, skip,
                 onInteraction = { lastInteraction = System.currentTimeMillis() },
                 subtitleView = playerView.subtitleView,
                 chapters = chapters,
@@ -890,21 +1054,34 @@ private fun Controls(
     var menu by remember { mutableStateOf(false) }
     var sub by remember { mutableStateOf<String?>(null) }
     var dragging by remember { mutableFloatStateOf(-1f) }
-    // Auto-hide would close an open menu.
-    LaunchedEffect(menu) { while (menu) { onInteraction(); delay(1_000) } }
+    // Keep the controls alive while the menu is open, since auto-hiding them would close it.
+    LaunchedEffect(menu) {
+        while (menu) {
+            onInteraction()
+            delay(1_000)
+        }
+    }
     // Portrait already sits below the status bar; the rest of the safe area is below the video.
     Box(Modifier.fillMaxSize().background(Color(0x55000000)).then(if (fullscreen) Modifier.safeDrawingPadding() else Modifier)
         .then(if (App.tv) Modifier.padding(horizontal = 48.dp, vertical = 27.dp) else Modifier)) {
         Row(Modifier.align(Alignment.TopStart).fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = Color.White) }
-            // Portrait has the title under the video.
+            // In portrait the title is under the video instead.
             Column(Modifier.weight(1f)) {
                 if (fullscreen) Text(title, color = Color.White, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 if (transcoding) Text("Transcoding: buffering to the end is best-effort", color = Color.White, style = MaterialTheme.typography.labelSmall)
             }
             Box {
-                IconButton(onClick = { menu = true; onInteraction() }) { Icon(Icons.Default.MoreVert, "Menu", tint = Color.White) }
-                DropdownMenu(expanded = menu, onDismissRequest = { menu = false; sub = null }) {
+                IconButton(onClick = {
+                    menu = true
+                    onInteraction()
+                }) {
+                    Icon(Icons.Default.MoreVert, "Menu", tint = Color.White)
+                }
+                DropdownMenu(expanded = menu, onDismissRequest = {
+                    menu = false
+                    sub = null
+                }) {
                     when (sub) {
                         null -> {
                             DropdownMenuItem({ Text("Speed: ${speedLabel(player.playbackParameters.speed)}") }, { sub = "speed" })
@@ -913,32 +1090,47 @@ private fun Controls(
                             DropdownMenuItem({ Text("Subtitle size: ${App.prefs.subtitleScale}%") }, { sub = "size" })
                             DropdownMenuItem({ Text("Wireless audio delay: ${App.prefs.audioDelayMs} ms") }, { sub = "delay" })
                             if (chapters.isNotEmpty()) DropdownMenuItem({ Text("Chapters") }, { sub = "chapters" })
-                            if (!App.tv) DropdownMenuItem({ Text(if (rotationLocked) "Unlock rotation" else "Lock rotation") }, { onRotationLock(); menu = false })
+                            if (!App.tv) {
+                                val rotationLabel = if (rotationLocked) "Unlock rotation" else "Lock rotation"
+                                DropdownMenuItem({ Text(rotationLabel) }, {
+                                    onRotationLock()
+                                    menu = false
+                                })
+                            }
                         }
                         "chapters" -> {
                             val current = chapterAt(chapters.map { it.startMs }, position)
                             chapters.forEachIndexed { i, c ->
                                 Choice("${formatMs(c.startMs)}  ${c.name.ifEmpty { "Chapter ${i + 1}" }}", i == current) {
-                                    player.seekTo(c.startMs); menu = false; sub = null
+                                    player.seekTo(c.startMs)
+                                    menu = false
+                                    sub = null
                                 }
                             }
                         }
                         "speed" -> listOf(0.5f, 0.75f, 1f, 1.25f, 1.5f, 2f).forEach { s ->
-                            Choice(speedLabel(s), player.playbackParameters.speed == s) { sessionSpeed = s; player.setPlaybackSpeed(s); menu = false; sub = null }
+                            Choice(speedLabel(s), player.playbackParameters.speed == s) {
+                                sessionSpeed = s
+                                player.setPlaybackSpeed(s)
+                                menu = false
+                                sub = null
+                            }
                         }
                         "size" -> listOf(50, 75, 100, 125, 150, 200).forEach { s ->
                             Choice("$s%", App.prefs.subtitleScale == s) {
                                 App.prefs.subtitleScale = s
                                 subtitleView.setFractionalTextSize(SubtitleView.DEFAULT_TEXT_SIZE_FRACTION * s / 100f)
-                                menu = false; sub = null
+                                menu = false
+                                sub = null
                             }
                         }
                         "delay" -> AUDIO_DELAYS_MS.forEach { d ->
                             Choice("$d ms", App.prefs.audioDelayMs == d) {
                                 AudioDelay.set(d)
-                                // The audio clock never moves backwards on its own; a seek applies a larger delay at once.
+                                // The audio clock never moves backwards on its own, so seek to apply a larger delay now.
                                 player.seekTo(player.currentPosition)
-                                menu = false; sub = null
+                                menu = false
+                                sub = null
                             }
                         }
                         "audio", "text" -> {
@@ -948,7 +1140,8 @@ private fun Controls(
                             if (type == C.TRACK_TYPE_TEXT) Choice("Off", textOff) {
                                 player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true).build()
                                 onTracksChosen(selectedLanguage(player, C.TRACK_TYPE_AUDIO), "")
-                                menu = false; sub = null
+                                menu = false
+                                sub = null
                             }
                             player.currentTracks.groups.filter { it.type == type }.forEach { group ->
                                 for (i in 0 until group.length) {
@@ -962,9 +1155,10 @@ private fun Controls(
                                         val audioLang = if (type == C.TRACK_TYPE_AUDIO) f.language else selectedLanguage(player, C.TRACK_TYPE_AUDIO)
                                         val subLang = if (type == C.TRACK_TYPE_TEXT) f.language else selectedLanguage(player, C.TRACK_TYPE_TEXT)
                                         onTracksChosen(audioLang, subLang)
-                                        // Re-read from here so the current subtitle line shows now, not at the next one.
+                                        // Seek in place so the current subtitle line shows now, not at the next cue.
                                         if (type == C.TRACK_TYPE_TEXT) player.seekTo(player.currentPosition)
-                                        menu = false; sub = null
+                                        menu = false
+                                        sub = null
                                     }
                                 }
                             }
@@ -979,11 +1173,24 @@ private fun Controls(
 
         Row(Modifier.align(Alignment.Center), verticalAlignment = Alignment.CenterVertically) {
             val step = App.prefs.doubleTapSeconds
-            IconButton(onClick = { onSeek(-step * 1000L); onInteraction() }) { Icon(RewindIcon, "Back $step seconds", tint = Color.White) }
-            IconButton(onClick = { if (playing) player.pause() else player.play(); onInteraction() }, Modifier.padding(horizontal = 16.dp).size(64.dp).takeFocus()) {
+            IconButton(onClick = {
+                onSeek(-step * 1000L)
+                onInteraction()
+            }) {
+                Icon(RewindIcon, "Back $step seconds", tint = Color.White)
+            }
+            IconButton(onClick = {
+                if (playing) player.pause() else player.play()
+                onInteraction()
+            }, Modifier.padding(horizontal = 16.dp).size(64.dp).takeFocus()) {
                 Icon(if (playing) PauseIcon else Icons.Default.PlayArrow, if (playing) "Pause" else "Play", Modifier.size(40.dp), tint = Color.White)
             }
-            IconButton(onClick = { onSeek(step * 1000L); onInteraction() }) { Icon(ForwardIcon, "Forward $step seconds", tint = Color.White) }
+            IconButton(onClick = {
+                onSeek(step * 1000L)
+                onInteraction()
+            }) {
+                Icon(ForwardIcon, "Forward $step seconds", tint = Color.White)
+            }
             if (onNext != null) IconButton(onClick = onNext) { Icon(NextIcon, "Next episode", tint = Color.White) }
         }
 
@@ -995,9 +1202,15 @@ private fun Controls(
                     Slider(
                         value = shown.toFloat().coerceIn(0f, duration.toFloat().coerceAtLeast(1f)),
                         valueRange = 0f..duration.toFloat().coerceAtLeast(1f),
-                        onValueChange = { dragging = it; onInteraction() },
-                        // D-pad steps can report finished without a change in between.
-                        onValueChangeFinished = { if (dragging >= 0) player.seekToNearestKeyframe(dragging.toLong()); dragging = -1f },
+                        onValueChange = { value ->
+                            dragging = value
+                            onInteraction()
+                        },
+                        // D-pad steps can report finished without a change in between, so check [dragging].
+                        onValueChangeFinished = {
+                            if (dragging >= 0) player.seekToNearestKeyframe(dragging.toLong())
+                            dragging = -1f
+                        },
                         modifier = Modifier.fillMaxWidth(),
                     )
                     ChapterMarks(chapters, duration, Modifier.matchParentSize())
@@ -1008,7 +1221,7 @@ private fun Controls(
     }
 }
 
-/** Focus for a button as it shows, so the remote's OK presses it. Touch mode ignores it. */
+/** Focuses a button as it appears, so the remote's OK presses it. Touch mode ignores this. */
 private fun Modifier.takeFocus(): Modifier = composed {
     val requester = remember { FocusRequester() }
     LaunchedEffect(Unit) { requester.requestFocus() }
@@ -1022,22 +1235,31 @@ private fun SkipButton(skip: Skip, modifier: Modifier) =
 private class Skip(val label: String, val onClick: () -> Unit)
 
 /**
- * The surface, shutter and subtitles of media3's PlayerView, wired the same way. PlayerView itself always links its
- * controller, and with it RecyclerView: 130 KB of every APK.
- * The shutter goes at the first frame and stays gone: a reconnect reloads the item, and the last frame stays up meanwhile.
+ * Media3's PlayerView reduced to its surface, shutter and subtitles, wired the same way. PlayerView always links its
+ * controller and, with it, RecyclerView, which adds 130 KB to every APK.
+ * The shutter hides at the first frame and stays hidden, so the last frame stays on screen while a reconnect reloads.
  */
 private class VideoView(context: Context) : android.widget.FrameLayout(context), Player.Listener {
     init { inflate(context, R.layout.player_surface, this) }
     private val frame: AspectRatioFrameLayout = findViewById(androidx.media3.ui.R.id.exo_content_frame)
     private val shutter: android.view.View = findViewById(androidx.media3.ui.R.id.exo_shutter)
     val subtitleView: SubtitleView = findViewById(androidx.media3.ui.R.id.exo_subtitles)
-    private val surface = android.view.SurfaceView(context).also { frame.addView(it, 0, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT)) }
+    private val surface = android.view.SurfaceView(context)
+    init { frame.addView(surface, 0, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT)) }
     var resizeMode by frame::resizeMode
     var player: Player? = null
         set(value) {
-            field?.run { removeListener(this@VideoView); clearVideoSurfaceView(surface) }
+            val old = field
+            if (old != null) {
+                old.removeListener(this)
+                old.clearVideoSurfaceView(surface)
+            }
             field = value
-            value?.run { setVideoSurfaceView(surface); addListener(this@VideoView); subtitleView.setCues(currentCues.cues) }
+            if (value != null) {
+                value.setVideoSurfaceView(surface)
+                value.addListener(this)
+                subtitleView.setCues(value.currentCues.cues)
+            }
         }
 
     override fun onVideoSizeChanged(videoSize: VideoSize) {
@@ -1057,12 +1279,19 @@ private fun Choice(label: String, selected: Boolean, onClick: () -> Unit) =
  * the old extractor mid-file, and the Matroska one then fails on a sample with no format.
  */
 private fun ExoPlayer.reload() {
-    val item = currentMediaItem ?: return prepare()
+    val item = currentMediaItem
+    if (item == null) {
+        prepare()
+        return
+    }
     setMediaItem(item, currentPosition)
     prepare()
 }
 
-/** For coarse seeks (slider, swipe): exact seeks decode from the keyframe before, seconds on long-GOP files. Skips stay exact. */
+/**
+ * Seeks to the nearest keyframe, for coarse seeks from the slider or a swipe. An exact seek decodes forward from the
+ * previous keyframe, which takes seconds on long-GOP files. Skip buttons still seek exactly.
+ */
 private fun ExoPlayer.seekToNearestKeyframe(ms: Long) {
     setSeekParameters(SeekParameters.CLOSEST_SYNC)
     seekTo(ms)
@@ -1073,37 +1302,58 @@ private fun speedLabel(s: Float) = "${s.toString().removeSuffix(".0")}×"
 
 /** "English · 5.1" rather than "eng · mp4a.40.2"; the track's own title first when it has one. */
 private fun trackLabel(f: Format): String {
-    val language = f.language?.takeUnless { it == "und" }?.let { Locale.forLanguageTag(it).displayLanguage.ifBlank { it } }
-    val channels = when (f.channelCount) { Format.NO_VALUE -> null; 1 -> "mono"; 2 -> "stereo"; 6 -> "5.1"; 8 -> "7.1"; else -> "${f.channelCount} ch" }
-    return listOfNotNull(f.label, language?.takeUnless { f.label?.contains(it, ignoreCase = true) == true }, channels).joinToString(" · ")
+    val code = f.language
+    val language = if (code == null || code == "und") null else Locale.forLanguageTag(code).displayLanguage.ifBlank { code }
+    val channels = when (f.channelCount) {
+        Format.NO_VALUE -> null
+        1 -> "mono"
+        2 -> "stereo"
+        6 -> "5.1"
+        8 -> "7.1"
+        else -> "${f.channelCount} ch"
+    }
+    val label = f.label
+    // Skip the language when the track's title already names it.
+    val repeatsLabel = language != null && label != null && label.contains(language, ignoreCase = true)
+    val shownLanguage = if (repeatsLabel) null else language
+    return listOfNotNull(label, shownLanguage, channels).joinToString(" · ")
 }
 
 /** Language of the selected track, "" when that type is off, null when unknown. */
 private fun selectedLanguage(player: ExoPlayer, type: Int): String? {
     if (player.trackSelectionParameters.disabledTrackTypes.contains(type)) return ""
-    return player.currentTracks.groups.filter { it.type == type && it.isSelected }
-        .firstNotNullOfOrNull { g -> (0 until g.length).firstOrNull { g.isTrackSelected(it) }?.let { g.getTrackFormat(it).language } }
+    val selectedGroups = player.currentTracks.groups.filter { it.type == type && it.isSelected }
+    for (group in selectedGroups) {
+        val index = (0 until group.length).firstOrNull { i -> group.isTrackSelected(i) }
+        if (index == null) continue
+        val language = group.getTrackFormat(index).language
+        if (language != null) return language
+    }
+    return null
 }
 
-/** A plain sentence for common playback failures; null for the rest. */
 /** No answer, or a server-side error: worth retrying. A 4xx would fail the same way every time. */
 private fun isNetworkFailure(e: PlaybackException): Boolean {
     val http = generateSequence(e.cause) { it.cause }.filterIsInstance<HttpDataSource.HttpDataSourceException>().firstOrNull()
     return when {
         http is HttpDataSource.InvalidResponseCodeException -> http.responseCode >= 500
-        // OkHttp's connect failures arrive wrapped, which Media3 files as IO_UNSPECIFIED: the transport error is the signal.
+        // Media3 files OkHttp's wrapped connect failures as IO_UNSPECIFIED, so the transport exception is the signal.
         http != null -> true
         else -> e.errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED ||
             e.errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT || e.errorCode == PlaybackException.ERROR_CODE_TIMEOUT
     }
 }
 
+/** A plain sentence for common playback failures; null for the rest. */
 private fun playbackError(e: PlaybackException) = when (e.errorCode) {
     PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED -> "Can't reach the server."
-    PlaybackException.ERROR_CODE_IO_UNSPECIFIED -> "Can't reach the server.".takeIf { isNetworkFailure(e) }
+    PlaybackException.ERROR_CODE_IO_UNSPECIFIED -> if (isNetworkFailure(e)) "Can't reach the server." else null
     PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT, PlaybackException.ERROR_CODE_TIMEOUT -> "The server took too long to respond."
-    PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS ->
-        "The server returned an error" + ((e.cause as? HttpDataSource.InvalidResponseCodeException)?.let { " (${it.responseCode})." } ?: ".")
+    PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS -> {
+        val cause = e.cause
+        if (cause is HttpDataSource.InvalidResponseCodeException) "The server returned an error (${cause.responseCode})."
+        else "The server returned an error."
+    }
     PlaybackException.ERROR_CODE_IO_FILE_NOT_FOUND -> "The file is missing."
     PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED, PlaybackException.ERROR_CODE_DECODING_FORMAT_EXCEEDS_CAPABILITIES,
     PlaybackException.ERROR_CODE_DECODER_INIT_FAILED, PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED,

@@ -7,8 +7,8 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
- * The libmpv binding against the real library, on a clip mpv generates itself: frames render, properties arrive,
- * the end is seen, and closing doesn't crash. CI runs it on Linux and Windows, where nobody watches the window.
+ * Tests the libmpv binding against the real library on a clip mpv generates itself: frames render, properties arrive,
+ * the end is detected, and closing doesn't crash. CI runs it on Linux and Windows, where nobody watches the window.
  */
 class MpvTest {
     private fun waitFor(timeoutMs: Long = 15_000, what: String, check: () -> Boolean) {
@@ -38,21 +38,29 @@ class MpvTest {
         }
     }
 
-    /** Closing while the event, render and caller threads are busy: the crash left the JVM aborting on a corrupt heap. */
+    /** Closes while the event, render and caller threads are busy. A crash here aborts the JVM on a corrupt heap. */
     @Test fun closingUnderLoadIsSafe() {
-        repeat(15) {
+        repeat(15) { round ->
             val mpv = Mpv(mapOf("ao" to "null"))
             mpv.resize(160, 90)
             mpv.load("av://lavfi:testsrc=duration=5:size=320x240:rate=50", 0.0)
-            val callers = (1..3).map { kotlin.concurrent.thread { repeat(200) { mpv.tracks(); mpv.get("time-pos"); mpv.seek(1.0) } } }
-            Thread.sleep(30L * it % 200)
+            val callers = (1..3).map {
+                kotlin.concurrent.thread {
+                    repeat(200) {
+                        mpv.tracks()
+                        mpv.get("time-pos")
+                        mpv.seek(1.0)
+                    }
+                }
+            }
+            Thread.sleep(30L * round % 200)
             mpv.close()
             callers.forEach { it.join() }
         }
         Thread.sleep(500) // the closes finish on their own thread
     }
 
-    /** The resume point: set before loadfile, which works on every libmpv 2.x (0.37 rejected loadfile's options). */
+    /** The resume point is set before loadfile, which works on every libmpv 2.x (0.37 rejected loadfile's per-file options). */
     @Test fun startsAtTheGivenPosition() {
         val mpv = Mpv(mapOf("ao" to "null"))
         try {

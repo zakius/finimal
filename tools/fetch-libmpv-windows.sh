@@ -1,8 +1,7 @@
 #!/bin/bash
-# libmpv for the Windows desktop build: shinchiro's mpv-winbuild-cmake, the Windows builds mpv.io links to. One
-# self-contained DLL; Linux uses the distribution's libmpv2 instead. Lands where the packaged app finds it
-# (desktop/resources/windows, the app's resources folder at runtime).
-# Usage: tools/fetch-libmpv-windows.sh
+# Downloads libmpv-2.dll for the Windows desktop build into desktop/resources/windows, which the packaged app reads as
+# its resources folder. It is one self-contained DLL from shinchiro's mpv-winbuild-cmake, the Windows builds mpv.io
+# links to. Linux uses the system libmpv instead.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 build=20261021

@@ -44,10 +44,15 @@ class CoreTest {
     }
 
     @Test fun pendingStoreSurvivesReloadAndKeepsNewerWrites() {
-        val f = File.createTempFile("pending", ".json").apply { delete(); deleteOnExit() }
+        val f = File.createTempFile("pending", ".json")
+        f.delete()
+        f.deleteOnExit()
         val a = PlayState(1, false, 1)
         val b = PlayState(2, false, 2)
-        PendingStore(f).apply { put("x", a); put("x", b); confirm("x", a) }
+        val store = PendingStore(f)
+        store.put("x", a)
+        store.put("x", b)
+        store.confirm("x", a)
         val reloaded = PendingStore(f)
         assertEquals(b, reloaded.get("x"))
         reloaded.confirm("x", b)
@@ -55,7 +60,7 @@ class CoreTest {
     }
 
     private fun ep(id: String, played: Boolean = false, at: Long? = null) =
-        EpisodeRef(id, at?.let { PlayState(0, played, it) })
+        EpisodeRef(id, if (at != null) PlayState(0, played, at) else null)
 
     @Test fun keepNextFromScratch() {
         assertEquals(listOf("1", "2"), keepNextWindow(listOf(ep("1"), ep("2"), ep("3")), 2))
@@ -78,7 +83,8 @@ class CoreTest {
     }
 
     @Test fun pendingStoreKeepsCorruptFile() {
-        val f = File.createTempFile("pending", ".json").apply { writeText("{not json") }
+        val f = File.createTempFile("pending", ".json")
+        f.writeText("{not json")
         val store = PendingStore(f)
         assertNull(store.get("x"))
         store.put("x", PlayState(1, false, 1))
@@ -120,12 +126,17 @@ class CoreTest {
     }
 
     @Test fun pendingStoreKeepsStateWhenDiskWriteFails() {
-        val dir = File.createTempFile("pending", "").apply { delete(); mkdirs(); deleteOnExit() }
+        val dir = File.createTempFile("pending", "")
+        dir.delete()
+        dir.mkdirs()
+        dir.deleteOnExit()
         val store = PendingStore(File(dir, "p.json"))
         dir.setWritable(false)
         try {
             store.put("x", PlayState(1, false, 1))
             assertEquals(PlayState(1, false, 1), store.get("x"))
-        } finally { dir.setWritable(true) }
+        } finally {
+            dir.setWritable(true)
+        }
     }
 }

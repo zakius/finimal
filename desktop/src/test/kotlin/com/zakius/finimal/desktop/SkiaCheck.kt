@@ -9,16 +9,23 @@ import org.jetbrains.skia.paragraph.TextStyle
 import java.io.File
 import java.security.MessageDigest
 
-// ./gradlew :desktop:skiaCheck: Skia's library with ICU's data trimmed (desktop/build.gradle.kts, trimSkiaIcu) breaks
-// text as the original does. Each library runs in a JVM of its own; per script, words of assigned code points are
-// laid out at several widths (line breaks) and walked with the line and character break iterators, then digested.
-// Word breaking isn't compared: without the Chinese/Japanese dictionary it splits those per character.
+// Run with ./gradlew :desktop:skiaCheck. Checks that Skia's library with its ICU data trimmed (trimSkiaIcu in
+// desktop/build.gradle.kts) breaks text the same way as the original. Each library runs in its own JVM. For each
+// script, words of assigned code points are laid out at several widths to exercise line breaks, then walked with the
+// line and character break iterators, and the results are digested for comparison. Word breaking isn't compared,
+// because without the Chinese/Japanese dictionary it splits those languages per character.
 fun main(args: Array<String>) {
-    if (args[0] == "run") return println(digests())
-    fun run(dir: String) = ProcessBuilder(
-        File(System.getProperty("java.home"), "bin/java").path, "-Dskiko.library.path=$dir",
-        "-cp", System.getProperty("java.class.path"), "com.zakius.finimal.desktop.SkiaCheckKt", "run",
-    ).redirectError(ProcessBuilder.Redirect.INHERIT).start().inputStream.bufferedReader().readText().trim()
+    if (args[0] == "run") {
+        println(digests())
+        return
+    }
+    fun run(dir: String): String {
+        val process = ProcessBuilder(
+            File(System.getProperty("java.home"), "bin/java").path, "-Dskiko.library.path=$dir",
+            "-cp", System.getProperty("java.class.path"), "com.zakius.finimal.desktop.SkiaCheckKt", "run",
+        ).redirectError(ProcessBuilder.Redirect.INHERIT).start()
+        return process.inputStream.bufferedReader().readText().trim()
+    }
     val full = run(args[0])
     val trimmed = run(args[1])
     println("full    $full\ntrimmed $trimmed")
@@ -48,7 +55,10 @@ private fun digests(): String {
         for (iterator in listOf(BreakIterator.makeLineInstance(), BreakIterator.makeCharacterInstance())) {
             iterator.setText(text)
             var at = iterator.first()
-            while (at != BreakIterator.DONE) { md.update("$at,".toByteArray()); at = iterator.next() }
+            while (at != BreakIterator.DONE) {
+                md.update("$at,".toByteArray())
+                at = iterator.next()
+            }
             iterator.close()
         }
     }

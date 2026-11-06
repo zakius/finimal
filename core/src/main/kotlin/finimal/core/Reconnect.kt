@@ -4,8 +4,11 @@ package finimal.core
 const val RECONNECT_WINDOW_MS = 60_000L
 
 /**
- * Wait before reconnect attempt [attempt] (0 first): 1, 2, 4, 8, then every 10 s. Null once
- * [RECONNECT_WINDOW_MS] has passed since [firstFailureMs]: time to tell the user.
+ * Delay before reconnect attempt [attempt], counting from 0: 1, 2, 4 and 8 s, then every 10 s. Returns
+ * null once [RECONNECT_WINDOW_MS] has passed since [firstFailureMs], when it is time to tell the user.
  */
-fun reconnectDelayMs(attempt: Int, firstFailureMs: Long, nowMs: Long): Long? =
-    if (nowMs - firstFailureMs >= RECONNECT_WINDOW_MS) null else minOf(1_000L shl minOf(attempt, 4), 10_000L)
+fun reconnectDelayMs(attempt: Int, firstFailureMs: Long, nowMs: Long): Long? {
+    if (nowMs - firstFailureMs >= RECONNECT_WINDOW_MS) return null
+    val delays = longArrayOf(1_000, 2_000, 4_000, 8_000, 10_000)
+    return delays[minOf(attempt, 4)]
+}

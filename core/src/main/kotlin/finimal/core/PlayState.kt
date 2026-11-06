@@ -15,9 +15,9 @@ data class PlayState(
 )
 
 /**
- * Mirror of the server's `UserDataManager.UpdatePlayState` with its default limits, for plays the
+ * Mirrors the server's `UserDataManager.UpdatePlayState` with its default limits, for plays the
  * server never saw (offline). Online stops go through `/Sessions/Playing/Stopped`, which runs the
- * real thing.
+ * server's own logic.
  */
 object ResumeRules {
     const val MIN_RESUME_PCT = 5
@@ -56,9 +56,10 @@ fun shouldPush(local: PlayState, server: PlayState?): Boolean {
 }
 
 /**
- * The position to report: [positionTicks], unless it would move a resume point back under the
- * resume minimum within [GUARD_MS] of starting, with no seek. No viewer does that; a player that
- * reports before it has loaded, or a restored "start over", does, and the series restarts.
+ * The position to report. That is [positionTicks], unless in the first [GUARD_MS] after starting, with
+ * no seek, it would move the resume point back below the resume minimum. A viewer never does that.
+ * A player that reports before it has loaded does, as does a restored "start over", and then the
+ * series would restart from the beginning.
  */
 object ResumeGuard {
     const val GUARD_MS = 30_000L

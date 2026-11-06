@@ -59,29 +59,42 @@ fun main(args: Array<String>) {
     application {
         val control = remember { WindowControl.restore() }
         LaunchedEffect(control) {
-            // Saved a moment after it settles, not on every pixel of a drag.
-            snapshotFlow { Triple(control.state.placement, control.state.position, control.state.size) }.collectLatest { delay(500); control.save() }
+            // Save a moment after the window settles, not on every pixel of a drag.
+            snapshotFlow { Triple(control.state.placement, control.state.position, control.state.size) }.collectLatest {
+                delay(500)
+                control.save()
+            }
         }
-        Window(::exitApplication, control.state, title = control.title, icon = remember { appIcon() },
-            onPreviewKeyEvent = { control.keys?.invoke(it) ?: false }) {
-            Theme { CompositionLocalProvider(LocalWindow provides control) {
-                Box(Modifier.fillMaxSize().onPointerEvent(PointerEventType.Press) { e ->
-                    // The mouse's back button goes back, as Esc does.
-                    if (e.button == PointerButton.Back) pressEscape()
-                }) {
-                    Root(openDownloads = false, openedDownloads = {}) { id, onBack, onPlay -> PlayerScreen(id, onBack, onPlay) }
-                    ToastHost(Modifier.align(Alignment.BottomCenter))
+        Window(
+            ::exitApplication,
+            control.state,
+            title = control.title,
+            icon = remember { appIcon() },
+            onPreviewKeyEvent = { event ->
+                val handler = control.keys
+                if (handler != null) handler(event) else false
+            },
+        ) {
+            Theme {
+                CompositionLocalProvider(LocalWindow provides control) {
+                    Box(Modifier.fillMaxSize().onPointerEvent(PointerEventType.Press) { e ->
+                        // The mouse's back button acts like Esc.
+                        if (e.button == PointerButton.Back) pressEscape()
+                    }) {
+                        Root(openDownloads = false, openedDownloads = {}) { id, onBack, onPlay -> PlayerScreen(id, onBack, onPlay) }
+                        ToastHost(Modifier.align(Alignment.BottomCenter))
+                    }
                 }
-            } }
+            }
         }
     }
 }
 
 /**
- * Linux: KDE, and other desktops that leave X11 apps to scale themselves, give the scale only as Xft.dpi, which
- * OpenJDK never reads (it follows GDK_SCALE and GNOME's setting), so finimal came up at 1x on a 2x screen. Java's
- * scale from Xft.dpi, then, unless one is set (sun.java2d.uiScale, J2D_UISCALE); before the first window.
- * Java scales X11 windows by whole numbers only: 1.5 rounds to 2.
+ * On Linux, KDE and other desktops that leave X11 apps to scale themselves expose the scale only as Xft.dpi. OpenJDK
+ * never reads that (it follows GDK_SCALE and GNOME's setting), so the app came up at 1x on a 2x screen. This sets
+ * Java's scale from Xft.dpi unless one is already set (sun.java2d.uiScale or J2D_UISCALE), and must run before the
+ * first window opens. Java scales X11 windows by whole numbers only, so 1.5 rounds to 2.
  */
 private fun scaleFromXftDpi() {
     if (!System.getProperty("os.name").startsWith("Linux") || System.getProperty("sun.java2d.uiScale") != null ||
@@ -91,8 +104,10 @@ private fun scaleFromXftDpi() {
         val display = x11.XOpenDisplay(null) ?: return
         try { x11.XResourceManagerString(display) } finally { x11.XCloseDisplay(display) }
     }.getOrNull() ?: return
-    val dpi = Regex("""^Xft\.dpi:\s*([\d.]+)""", RegexOption.MULTILINE).find(resources)?.groupValues?.get(1)?.toDoubleOrNull() ?: return
-    System.setProperty("sun.java2d.uiScale", maxOf(1, Math.round(dpi / 96).toInt()).toString())
+    val match = Regex("""^Xft\.dpi:\s*([\d.]+)""", RegexOption.MULTILINE).find(resources) ?: return
+    val dpi = match.groupValues[1].toDoubleOrNull() ?: return
+    val scale = maxOf(1, Math.round(dpi / 96).toInt())
+    System.setProperty("sun.java2d.uiScale", scale.toString())
 }
 
 @Suppress("FunctionName")
@@ -103,15 +118,15 @@ private interface X11 : Library {
 }
 
 /**
- * Own dispatcher: a screen of thumbnails must not queue behind or ahead of API calls (5 per host each). No
- * ServiceLoader scan, as on Android: the one fetcher is added here, and in the ProGuard build the scan found a
- * registration whose class was gone, and no image loaded.
+ * Images get their own dispatcher, so a screen of thumbnails doesn't queue behind or ahead of API calls (OkHttp
+ * allows 5 per host per dispatcher). The ServiceLoader scan is off, as on Android, and the one fetcher is added here:
+ * in the ProGuard build the scan found a registration whose class had been stripped, and no image loaded.
  */
 private fun imageLoader(ctx: PlatformContext) = ImageLoader.Builder(ctx).serviceLoaderEnabled(false).components {
     add(OkHttpNetworkFetcherFactory(callFactory = { App.http.newBuilder().dispatcher(Dispatcher()).build() }))
 }.build()
 
-/** Back on the desktop is Esc: the player takes it first (out of fullscreen, then out), the screens after. */
+/** On the desktop, Esc acts as Back. The player handles it first (leaving fullscreen, then the player), then the screens. */
 private fun pressEscape() {
     val target = KeyboardFocusManager.getCurrentKeyboardFocusManager().focusOwner ?: return
     val now = System.currentTimeMillis()
@@ -124,25 +139,43 @@ private fun pressEscape() {
 private fun ToastHost(modifier: Modifier) {
     val toast = Toasts.current
     var shown by remember { mutableStateOf<Pair<Int, String>?>(null) }
-    LaunchedEffect(toast) { shown = toast; delay(3_000); shown = null }
-    shown?.let { (_, text) ->
-        Text(text, modifier.padding(32.dp).background(MaterialTheme.colorScheme.inverseSurface, MaterialTheme.shapes.small).padding(horizontal = 16.dp, vertical = 10.dp),
-            color = MaterialTheme.colorScheme.inverseOnSurface)
+    LaunchedEffect(toast) {
+        shown = toast
+        delay(3_000)
+        shown = null
+    }
+    val current = shown
+    if (current != null) {
+        val (_, text) = current
+        Text(
+            text,
+            modifier
+                .padding(32.dp)
+                .background(MaterialTheme.colorScheme.inverseSurface, MaterialTheme.shapes.small)
+                .padding(horizontal = 16.dp, vertical = 10.dp),
+            color = MaterialTheme.colorScheme.inverseOnSurface,
+        )
     }
 }
 
 /**
- * For package checks without a screen: loads libmpv, renders a frame of a clip mpv generates and plays it to the end.
- * Prints the outcome; exit code 0 when it worked.
+ * Checks a packaged build without a screen. Loads libmpv, renders a frame of a clip mpv generates, and plays it to
+ * the end. Prints the outcome and returns exit code 0 on success.
  */
 private fun checkPlayer(): Int = try {
-    // One class from each runtime module beyond the defaults (desktop/build.gradle.kts), which a trimmed runtime can
-    // lack while the Gradle run, on the full JDK, works: dbus-java needed jdk.security.auth.
+    // Load one class from each runtime module added beyond the defaults in desktop/build.gradle.kts. A trimmed runtime
+    // can lack one while the Gradle run on the full JDK works, as happened when dbus-java needed jdk.security.auth.
     listOf("com.sun.security.auth.module.UnixSystem", "javax.naming.directory.InitialDirContext", "sun.misc.Unsafe",
         "sun.security.ec.ECKeyFactory").forEach { Class.forName(it) }
-    // The image loader as the app builds it, decoding the bundled icon: in a ProGuard build it once loaded nothing.
-    val icon = File.createTempFile("finimal-check", ".png").apply { deleteOnExit(); writeBytes(object {}.javaClass.getResource("/finimal.png")!!.readBytes()) }
-    val image = runBlocking { imageLoader(PlatformContext.INSTANCE).execute(ImageRequest.Builder(PlatformContext.INSTANCE).data(icon).build()) }
+    // Build the image loader as the app does and decode the bundled icon. In a ProGuard build it once loaded nothing.
+    val icon = File.createTempFile("finimal-check", ".png")
+    icon.deleteOnExit()
+    icon.writeBytes(object {}.javaClass.getResource("/finimal.png")!!.readBytes())
+    val image = runBlocking {
+        val loader = imageLoader(PlatformContext.INSTANCE)
+        val request = ImageRequest.Builder(PlatformContext.INSTANCE).data(icon).build()
+        loader.execute(request)
+    }
     check(image is SuccessResult) { "images don't load: ${(image as? ErrorResult)?.throwable}" }
     ScreenSaver.checkWindows()
     val mpv = Mpv(mapOf("ao" to "null"))
@@ -150,7 +183,7 @@ private fun checkPlayer(): Int = try {
     mpv.load("av://lavfi:testsrc=duration=1:size=64x48:rate=10", 0.0)
     val deadline = System.currentTimeMillis() + 20_000
     while ((mpv.frame == null || !mpv.eof) && mpv.error == null && System.currentTimeMillis() < deadline) Thread.sleep(50)
-    // A duration proves the file opened: an idle mpv draws black frames too.
+    // A duration proves the file opened, since an idle mpv draws black frames too.
     val ok = mpv.frame != null && mpv.duration > 0.5 && mpv.eof && mpv.error == null
     println(if (ok) "player ok" else "player failed: frame=${mpv.frame != null} duration=${mpv.duration} eof=${mpv.eof} error=${mpv.error}")
     mpv.close()
@@ -160,6 +193,8 @@ private fun checkPlayer(): Int = try {
     1
 }
 
-private fun appIcon() = BitmapPainter(
-    Image.makeFromEncoded(Thread.currentThread().contextClassLoader.getResourceAsStream("finimal.png")!!.use { it.readAllBytes() })
-        .toComposeImageBitmap())
+private fun appIcon(): BitmapPainter {
+    val stream = Thread.currentThread().contextClassLoader.getResourceAsStream("finimal.png")!!
+    val bytes = stream.use { it.readAllBytes() }
+    return BitmapPainter(Image.makeFromEncoded(bytes).toComposeImageBitmap())
+}

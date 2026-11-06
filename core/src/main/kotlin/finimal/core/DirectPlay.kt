@@ -2,11 +2,11 @@ package finimal.core
 
 /** The video stream of a file, as the server describes it. */
 data class VideoInfo(val codec: String, val width: Int, val height: Int, val fps: Float, val tenBit: Boolean) {
-    /** Decoder load: pixels a second. A 1080p60 file costs about what 4K at 15 fps does. */
+    /** Decoder load in pixels per second. A 1080p60 file costs about as much as 4K at 15 fps. */
     val pixelRate get() = width.toLong() * height * fps.toLong().coerceAtLeast(1)
 }
 
-/** Settings → Playback. [maxHeight] 0 and [codecs] AUTO trust the device's decoders. */
+/** The Playback settings. A [maxHeight] of 0 and [codecs] AUTO trust the device's decoders. */
 data class DirectPlayLimits(val maxHeight: Int, val codecs: Codecs, val learnedPixelRate: Long?) {
     enum class Codecs { AUTO, H264_ONLY, ALL }
 }
@@ -26,11 +26,12 @@ fun playsDirectly(video: VideoInfo, limits: DirectPlayLimits, decoders: Decoders
     }
     val sizeOk = when {
         limits.maxHeight > 0 -> video.height <= limits.maxHeight
-        // ALL: a codec with no hardware decoder is left to the player's software one.
+        // With ALL, a codec that has no hardware decoder is left to the player's software decoder.
         limits.codecs == DirectPlayLimits.Codecs.ALL && !decoders.hasCodec(video.codec, video.tenBit) -> true
         else -> decoders.fits(video.codec, video.width, video.height, video.fps)
     }
-    // A transcode the user picked after dropped frames: this codec chokes at this load and above.
-    val learnedOk = limits.learnedPixelRate?.let { video.pixelRate < it } ?: true
+    // The user picked a transcode after dropped frames, so this codec can't keep up at this load or above.
+    val learned = limits.learnedPixelRate
+    val learnedOk = learned == null || video.pixelRate < learned
     return codecOk && sizeOk && learnedOk
 }

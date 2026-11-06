@@ -1,15 +1,15 @@
 #!/bin/bash
-# The Windows installers, from the release app image (createReleaseDistributable, whose Skia ICU data is trimmed):
+# Builds the Windows installers from the release app image (createReleaseDistributable, with Skia's ICU data trimmed):
 # - dist/finimal-<version>-x64-full.msi, with its own Java runtime and libmpv;
-# - dist/finimal-<version>-x64.msi and dist/finimal-<version>-windows-x64.zip, small: the app without its Java runtime
-#   and libmpv, started by packaging/windows/Launcher.cs, which finds both on the machine or downloads them once. Its
-#   image stays in desktop/build/windows-small for CI's checks.
-# Not packageReleaseMsi's .msi: that task unpacks Skia's files again, untrimmed. It runs first for the WiX toolset.
+# - dist/finimal-<version>-x64.msi and dist/finimal-<version>-windows-x64.zip, the small build: no Java runtime or
+#   libmpv. packaging/windows/Launcher.cs finds both on the machine or downloads them once. The small app image stays
+#   in desktop/build/windows-small for CI's checks.
+# packageReleaseMsi's own .msi is not used because that task unpacks Skia's files again, untrimmed. It still has to run
+# first, to fetch the WiX toolset.
 # The JRE is pinned here. The libmpv is the full build's (tools/fetch-libmpv-windows.sh), zipped and published once per
-# libmpv build as a release of its own, libmpv-<build>, which needs gh with write access: a pull request that bumps
-# libmpv fails here until the bump reaches main.
-# Runs on Windows (Git Bash) after :desktop:packageReleaseMsi :desktop:createReleaseDistributable, which leave the
-# app image and the WiX toolset jpackage needs.
+# libmpv build as its own release, libmpv-<build>. That needs gh with write access, so a pull request that bumps libmpv
+# fails here until the bump reaches main.
+# Runs on Windows (Git Bash) after :desktop:packageReleaseMsi :desktop:createReleaseDistributable.
 # Usage: tools/windows-packages.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -22,7 +22,7 @@ tag=libmpv-$build
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
-# Every small build of this libmpv downloads the zip published first, so its hash is the one to pin.
+# Every small build of this libmpv downloads the zip that was published first, so pin that zip's hash.
 mpv=$tmp/libmpv-2-x64.zip
 if ! gh release download "$tag" -p libmpv-2-x64.zip -D "$tmp" 2> /dev/null; then
   (cd desktop/resources/windows && 7z a -tzip "$mpv" libmpv-2.dll > /dev/null)
@@ -53,12 +53,12 @@ mkdir -p "$(dirname "$small")" dist
 cp -r desktop/build/compose/binaries/main-release/app/finimal "$small"
 rm -rf "$small/runtime"
 find "$small" -name libmpv-2.dll -delete
-rm -f "$small/finimal.exe" # jpackage's launcher, read-only
+rm -f "$small/finimal.exe" # jpackage's launcher is read-only, so cp can't overwrite it
 cp "$tmp/finimal.exe" "$small/finimal.exe"
 (cd "$(dirname "$small")" && 7z a -tzip "$OLDPWD/dist/finimal-$version-windows-x64.zip" finimal > /dev/null)
 
-# The installers, as packageReleaseMsi makes them (desktop/build.gradle.kts): the same upgrade code, so either build
-# replaces the other.
+# Same options as packageReleaseMsi (desktop/build.gradle.kts), including the upgrade code, so either build replaces
+# the other.
 candle=$(find desktop/build build ~/AppData/Local -name candle.exe 2> /dev/null | head -n 1)
 [ -n "$candle" ] || { echo "No WiX toolset (candle.exe) found" >&2; exit 1; }
 msi() { # app image, output

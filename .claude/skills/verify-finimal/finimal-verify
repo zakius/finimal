@@ -21,7 +21,7 @@ run_dir() {
 }
 load() {
   R=$(run_dir); [[ -f $R/run.env ]] || die "run $(basename "$R") is stopped"; source "$R/run.env"; export DISPLAY; EV="$R/evidence"
-  # After a login in the UI (launch --logged-out), the app's own token and user.
+  # After a login through the UI (launch --logged-out), read the token and user the app saved.
   local s="$R/scratch/config/finimal/settings.json"
   [[ -n $TOKEN || ! -f $s ]] || { TOKEN=$(jq -r '.token // empty' "$s"); USER_ID=$(jq -r '.userId // empty' "$s"); }
 }
@@ -42,8 +42,8 @@ start_app() {
   APP_PID=$!
 }
 
-# launch [user] [password] | launch --logged-out: fresh Xvfb + XDG dirs, a token from the server seeded as the login
-# (none with --logged-out: the app opens on Login), the app started.
+# launch [user] [password] | launch --logged-out: starts a fresh Xvfb with its own XDG dirs, seeds a server token as the
+# saved login (skipped with --logged-out, so the app opens on Login), then starts the app.
 cmd_launch() {
   local user=${1:-test} pass=${2:-test}
   [[ -s $CMD_FILE ]] || cmd_build
@@ -101,9 +101,9 @@ cmd_doctor() {
 # OCR the screen; prints "x y text" per line of words (centre of the line's box).
 ocr_lines() {
   import -window root "$R/scratch/ocr.png"
-  # Two passes, black on white each time: tesseract reads nothing on the dark theme as is. The first pass reads light
-  # text on dark surfaces; the second keeps only light shapes (flood-filling the dark rest white) for dark text on light
-  # buttons such as "Log in".
+  # tesseract reads nothing from the dark theme as is, so make two black-on-white passes. The first inverts, for light
+  # text on dark surfaces. The second flood-fills the dark background white, for dark text on light buttons such as
+  # "Log in".
   local pass; for pass in "-negate -threshold 50%" "-threshold 60% -fill white -draw 'color 0,0 floodfill'"; do
     eval convert '"$R/scratch/ocr.png"' -colorspace Gray "$pass" '"$R/scratch/ocr2.png"'
     tesseract "$R/scratch/ocr2.png" - --psm 11 tsv 2>/dev/null | awk -F'\t' 'NR>1 && $12 != "" && $11 > 30 {

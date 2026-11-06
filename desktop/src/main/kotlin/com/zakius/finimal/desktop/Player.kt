@@ -98,12 +98,14 @@ import org.jellyfin.sdk.model.api.MediaSegmentType
 
 private const val REPORT_INTERVAL_MS = 10_000L
 private const val RESUME_REWIND_MS = 5_000L
-/** An end this far before the duration is a dropped connection, not the end of the file. */
+/** A file that ends this far before its duration was cut off by a dropped connection, not played to the end. */
 private const val EARLY_END_MS = 10_000L
-/** Buffering this long, with the server not answering, is a dropped connection. */
+/** Buffering this long while the server doesn't answer counts as a dropped connection. */
 private const val STALL_MS = 10_000L
+/** How far before the resume position, in bytes, background buffering of the rest of the file starts. */
+private const val BUFFER_MARGIN_BYTES = 32_000_000L
 
-/** Chosen speed and volume, kept for the session so "Play next" does not reset them. */
+/** The chosen speed and volume, kept for the session so "Play next" does not reset them. */
 private var sessionSpeed = 1.0
 private var sessionVolume = 100.0
 
@@ -124,7 +126,7 @@ fun PlayerScreen(itemId: String, onBack: () -> Unit, onPlay: (String) -> Unit) {
     LaunchedEffect(itemId, retry) {
         error = null
         val server = App.server
-        // Only this item's unsynced state must reach the server before it is read; the rest syncs alongside.
+        // Only this item's unsynced state must reach the server before the item is fetched. Other items sync in the background.
         val pending = withContext(App.disk) { App.pending.get(itemId) != null }
         if (!pending) App.platform.scope.launch { server.flush() }
         runCatching { server.item(itemId, flushFirst = pending) }
@@ -132,12 +134,17 @@ fun PlayerScreen(itemId: String, onBack: () -> Unit, onPlay: (String) -> Unit) {
                 if (loaded.mediaSources.isNullOrEmpty()) error = java.io.FileNotFoundException("This item has no file on the server")
                 else item = loaded
             }
-            .onFailure { if (it is InvalidStatusException && it.status == 401) server.expire(); error = it }
+            .onFailure { e ->
+                if (e is InvalidStatusException && e.status == 401) server.expire()
+                error = e
+            }
     }
     LaunchedEffect(item) {
-        val it = item ?: return@LaunchedEffect
-        val seriesId = it.seriesId?.toString()
-        if (it.type == BaseItemKind.EPISODE && seriesId != null) siblings = runCatching { App.server.episodes(seriesId) }.getOrDefault(emptyList())
+        val loaded = item ?: return@LaunchedEffect
+        val seriesId = loaded.seriesId?.toString()
+        if (loaded.type == BaseItemKind.EPISODE && seriesId != null) {
+            siblings = runCatching { App.server.episodes(seriesId) }.getOrDefault(emptyList())
+        }
     }
     val current = item
     when {
@@ -165,19 +172,21 @@ private fun Playback(item: BaseItemDto, siblings: List<BaseItemDto>, onBack: () 
     val seriesKey = item.seriesId?.toString() ?: id
     val serverPlayed = item.userData?.played ?: false
     val next = nextEpisode(item, siblings)
-    // mpv decodes everything; only the "Direct play up to" setting makes a transcode, for bandwidth.
-    val videoHeight = source.mediaStreams?.firstOrNull { it.type == org.jellyfin.sdk.model.api.MediaStreamType.VIDEO }?.height ?: 0
+    // mpv decodes everything, so the only reason to transcode is the "Direct play up to" setting, which saves bandwidth.
+    val videoStream = source.mediaStreams?.firstOrNull { it.type == org.jellyfin.sdk.model.api.MediaStreamType.VIDEO }
+    val videoHeight = videoStream?.height ?: 0
     val transcoding = prefs.maxHeight in 1 until videoHeight
     val playSession = remember { UUID.randomUUID().toString() }
     val scope = rememberCoroutineScope()
     val started = remember {
         runCatching { Mpv(mapOf(
-            // A cut connection to the scratch proxy (the server dropped) is picked up again at the same byte.
+            // When the server drops and the scratch proxy cuts the connection, mpv resumes at the same byte.
             "stream-lavf-o" to "reconnect=1,reconnect_streamed=1,reconnect_on_network_error=1,reconnect_delay_max=10",
             "sub-scale" to "${prefs.subtitleScale / 100.0}",
             "speed" to "$sessionSpeed",
             "volume" to "$sessionVolume",
-            // Late wireless audio: holding the video back matches it. The desktop can't tell which output is wireless.
+            // Holding the video back compensates for late wireless audio. The desktop can't tell which output is wireless,
+            // so the user sets the delay.
             "audio-delay" to "${-prefs.audioDelayMs / 1000.0}",
         )) }
     }
@@ -196,39 +205,74 @@ private fun Playback(item: BaseItemDto, siblings: List<BaseItemDto>, onBack: () 
     var creditsDone by remember { mutableStateOf(false) }
     var ended by remember { mutableStateOf(false) }
     var lastPositionMs by remember { mutableLongStateOf(0L) }
-    // Set while a dropped connection is retried; see reconnectDelayMs.
+    // Set while a dropped connection is being retried. See reconnectDelayMs.
     var failedSince by remember { mutableStateOf<Long?>(null) }
     var attempt by remember { mutableIntStateOf(0) }
     var gaveUp by remember { mutableStateOf(false) }
     var reloadAtMs by remember { mutableLongStateOf(0L) }
-    // The file really ends early: it did again after a reload, with the server answering.
+    // The file really does end early: it ended at the same spot again after a reload, while the server was answering.
     var trustEnd by remember { mutableStateOf(false) }
-    // A transcode's stream never fails: mpv retries it under the spinner for as long as the server is gone.
+    // A transcode's stream never fails. mpv keeps retrying it behind the spinner for as long as the server is gone,
+    // so this flag detects that stall instead.
     var stalled by remember { mutableStateOf(false) }
 
     fun positionMs() = (mpv.position * 1000).toLong()
-    fun runtimeTicks() = item.runTimeTicks ?: source.runTimeTicks ?: (mpv.duration * 1000).toLong().takeIf { it > 0 }?.times(TICKS_PER_MS)
+    fun runtimeTicks(): Long? {
+        val known = item.runTimeTicks ?: source.runTimeTicks
+        if (known != null) return known
+        val durationMs = (mpv.duration * 1000).toLong()
+        return if (durationMs > 0) durationMs * TICKS_PER_MS else null
+    }
     fun positionTicks() = ResumeGuard.position(startTicks, positionMs() * TICKS_PER_MS, runtimeTicks(), System.currentTimeMillis() - startedAt, seeked)
     fun report() = scope.launch { App.server.reportProgress(id, sourceId, positionTicks(), mpv.paused, transcoding, serverPlayed, playSession) }
-    fun seekTo(ms: Long, exact: Boolean = true) { seeked = true; mpv.seek(ms / 1000.0, exact); scope.launch { delay(500); report() } }
-    // Once mpv's own reconnects give up, a dropped connection ends the file early, or fails its load. An end hit while
-    // seeking, past what is on disk, never sets eof-reached: mpv just pauses, unasked.
-    fun endedEarly() = !trustEnd && (mpv.eof || mpv.paused && !mpv.pauseWanted) &&
-        ((mpv.duration * 1000).toLong().takeIf { it > 0 } ?: runtimeTicks()?.div(TICKS_PER_MS))?.let { lastPositionMs < it - EARLY_END_MS } == true
-    fun url() = if (transcoding) App.server.transcodeUrl(id, sourceId, prefs.audioLang(seriesKey)?.let { com.zakius.finimal.audioIndex(source, it) },
-            burnInIndex(source, prefs.subLang(seriesKey)), playSession)
-        else DesktopMedia.streamUrl(item)
+    fun seekTo(ms: Long, exact: Boolean = true) {
+        seeked = true
+        mpv.seek(ms / 1000.0, exact)
+        scope.launch {
+            delay(500)
+            report()
+        }
+    }
+    // Once mpv's own reconnects give up, a dropped connection ends the file early or fails its load. Hitting the end of
+    // what is on disk while seeking never sets eof-reached. mpv just pauses without the user asking.
+    fun endedEarly(): Boolean {
+        if (trustEnd) return false
+        val stopped = mpv.eof || mpv.paused && !mpv.pauseWanted
+        if (!stopped) return false
+        var durationMs = (mpv.duration * 1000).toLong()
+        if (durationMs <= 0) {
+            val runtime = runtimeTicks() ?: return false
+            durationMs = runtime / TICKS_PER_MS
+        }
+        return lastPositionMs < durationMs - EARLY_END_MS
+    }
+    fun url(): String {
+        if (!transcoding) return DesktopMedia.streamUrl(item)
+        val audioLang = prefs.audioLang(seriesKey)
+        val audioIndex = if (audioLang != null) com.zakius.finimal.audioIndex(source, audioLang) else null
+        val burnIn = burnInIndex(source, prefs.subLang(seriesKey))
+        return App.server.transcodeUrl(id, sourceId, audioIndex, burnIn, playSession)
+    }
 
     mpv.onLoaded = {
         sideloadedSubs(item, transcoding).forEach { stream ->
-            mpv.command("sub-add", App.server.subtitleUrl(id, sourceId, stream), "auto", stream.displayTitle ?: stream.language ?: "", stream.language ?: "")
+            val subtitleUrl = App.server.subtitleUrl(id, sourceId, stream)
+            val title = stream.displayTitle ?: stream.language ?: ""
+            mpv.command("sub-add", subtitleUrl, "auto", title, stream.language ?: "")
         }
         val tracks = mpv.tracks()
-        prefs.audioLang(seriesKey)?.let { lang -> tracks.firstOrNull { it.type == "audio" && sameLanguage(it.language, lang) }?.let { mpv.set("aid", it.id) } }
+        val audioLang = prefs.audioLang(seriesKey)
+        if (audioLang != null) {
+            val audio = tracks.firstOrNull { it.type == "audio" && sameLanguage(it.language, audioLang) }
+            if (audio != null) mpv.set("aid", audio.id)
+        }
         when (val sub = prefs.subLang(seriesKey)) {
             null -> {}
             "" -> mpv.set("sid", "no")
-            else -> mpv.tracks().firstOrNull { it.type == "sub" && sameLanguage(it.language, sub) }?.let { mpv.set("sid", it.id) }
+            else -> {
+                val track = mpv.tracks().firstOrNull { it.type == "sub" && sameLanguage(it.language, sub) }
+                if (track != null) mpv.set("sid", track.id)
+            }
         }
     }
 
@@ -241,11 +285,16 @@ private fun Playback(item: BaseItemDto, siblings: List<BaseItemDto>, onBack: () 
         lastPositionMs = startMs
         if (startMs > 0) resumedAt = startMs
         mpv.load(url(), startMs / 1000.0)
-        if (!transcoding) withContext(Dispatchers.IO) {
-            // The rest of the file lands on disk meanwhile, from a margin behind the start.
-            val len = DesktopMedia.lengthOf(item).takeIf { it > 0 } ?: source.size ?: 0
-            val dur = runtimeTicks()?.div(TICKS_PER_MS) ?: 0
-            DesktopMedia.startBuffer(item, if (len > 0 && dur > 0) (len * startMs / dur - 32_000_000).coerceAtLeast(0) else 0)
+        if (!transcoding) {
+            withContext(Dispatchers.IO) {
+                // Meanwhile, buffer the rest of the file to disk, starting a little before the resume position.
+                var len = DesktopMedia.lengthOf(item)
+                if (len <= 0) len = source.size ?: 0
+                val runtime = runtimeTicks()
+                val dur = if (runtime != null) runtime / TICKS_PER_MS else 0L
+                val from = if (len > 0 && dur > 0) (len * startMs / dur - BUFFER_MARGIN_BYTES).coerceAtLeast(0) else 0L
+                DesktopMedia.startBuffer(item, from)
+            }
         }
         launch { App.server.reportStart(id, sourceId, startTicks, transcoding, playSession) }
         segments = runCatching { App.server.segments(id) }.getOrDefault(emptyList())
@@ -253,10 +302,11 @@ private fun Playback(item: BaseItemDto, siblings: List<BaseItemDto>, onBack: () 
 
     DisposableEffect(mpv) {
         onDispose {
-            // Left before loading: there is no position, and reporting 0 would wipe the resume point.
+            // If the user left before the file loaded, there is no position, and reporting 0 would wipe the resume point.
             if (!ended && mpv.loaded) {
                 val runtime = runtimeTicks()
-                App.server.reportStop(id, sourceId, if (creditsDone && runtime != null) runtime else positionTicks(), runtime, serverPlayed, playSession)
+                val stopTicks = if (creditsDone && runtime != null) runtime else positionTicks()
+                App.server.reportStop(id, sourceId, stopTicks, runtime, serverPlayed, playSession)
             }
             mpv.close()
             DesktopMedia.playing = null
@@ -264,12 +314,15 @@ private fun Playback(item: BaseItemDto, siblings: List<BaseItemDto>, onBack: () 
         }
     }
 
-    // Pausing reports at once; playing reports every 10 s; the end reports the whole runtime.
+    // Pausing reports at once, playing reports every REPORT_INTERVAL_MS, and the end reports the whole runtime.
     LaunchedEffect(mpv) {
         snapshotFlow { mpv.paused }.collect { if (it && mpv.loaded) report() }
     }
     LaunchedEffect(mpv) {
-        while (true) { delay(REPORT_INTERVAL_MS); if (!mpv.paused && mpv.loaded && !ended) report() }
+        while (true) {
+            delay(REPORT_INTERVAL_MS)
+            if (!mpv.paused && mpv.loaded && !ended) report()
+        }
     }
     LaunchedEffect(mpv) {
         snapshotFlow { mpv.eof to endedEarly() }.collect { (eof, early) ->
@@ -278,31 +331,41 @@ private fun Playback(item: BaseItemDto, siblings: List<BaseItemDto>, onBack: () 
                 val runtime = runtimeTicks()
                 App.server.reportStop(id, sourceId, runtime ?: positionTicks(), runtime, serverPlayed, playSession)
             }
-            // Seeking back from the end screen plays on.
+            // Seeking back from the end screen resumes playback.
             if (!eof) ended = false
         }
     }
-    // A dropped connection loads the file again at the same spot, on a backoff; after a minute the error shows.
+    // After a dropped connection, reload the file at the same spot with a backoff. After RECONNECT_WINDOW_MS, show the error.
     LaunchedEffect(mpv) {
-        // mpv pauses itself at the early end; the reload plays on unless the user had paused.
+        // mpv pauses itself at an early end. The reload resumes playback unless the user had paused.
         var playOn = false
-        // Where the last reload started, until playback moves on from there.
+        // Where the last reload started. Cleared once playback moves on from there.
         var reloadedAtMs: Long? = null
         while (true) {
             snapshotFlow { mpv.error != null || endedEarly() || stalled }.first { it }
-            if (reloadedAtMs?.let { lastPositionMs > it + 1_000 } == true) reloadedAtMs = null
-            // Ended early again right where it was loaded, with the server answering: the file really ends there.
-            if (mpv.eof && reloadedAtMs != null && App.server.reachable()) { trustEnd = true; failedSince = null; attempt = 0; continue }
+            val reloadedAt = reloadedAtMs
+            if (reloadedAt != null && lastPositionMs > reloadedAt + 1_000) reloadedAtMs = null
+            // It ended early again right where it was reloaded, while the server answers, so the file really ends there.
+            if (mpv.eof && reloadedAtMs != null && App.server.reachable()) {
+                trustEnd = true
+                failedSince = null
+                attempt = 0
+                continue
+            }
             if (failedSince == null) {
-                // A load error while the server answers is the file's: it shows at once, and Retry loads again.
-                if (mpv.error != null && App.server.reachable()) { snapshotFlow { mpv.error == null }.first { it }; continue }
+                // A load error while the server answers is the file's fault. Show it at once and let Retry load again.
+                if (mpv.error != null && App.server.reachable()) {
+                    snapshotFlow { mpv.error == null }.first { it }
+                    continue
+                }
                 playOn = !mpv.pauseWanted
             }
             val now = System.currentTimeMillis()
             val since = failedSince ?: now
             failedSince = since
-            // mpv's own reconnects make a load slow to fail, so the minute is kept whatever the attempts take.
-            val outcome = reconnectDelayMs(attempt, since, now)?.let { wait ->
+            // mpv's own reconnects make a load slow to fail, so the timeout counts from the first failure, however long each attempt takes.
+            val wait = reconnectDelayMs(attempt, since, now)
+            val outcome = if (wait != null) {
                 delay(wait)
                 attempt++
                 if (playOn) mpv.play()
@@ -312,40 +375,75 @@ private fun Playback(item: BaseItemDto, siblings: List<BaseItemDto>, onBack: () 
                 withTimeoutOrNull(RECONNECT_WINDOW_MS - (System.currentTimeMillis() - since)) {
                     snapshotFlow { mpv.loaded || mpv.error != null }.first { it }
                 }
+            } else {
+                null
             }
             when {
                 outcome == null -> {
                     mpv.command("stop")
-                    failedSince = null; attempt = 0; gaveUp = true
+                    failedSince = null
+                    attempt = 0
+                    gaveUp = true
                     snapshotFlow { gaveUp }.first { !it }
-                    // Retry's load replaces the stopped file's state.
+                    // Wait for Retry's load, which replaces the stopped file's state.
                     snapshotFlow { mpv.loaded || mpv.error != null }.first { it }
                 }
-                // Loaded, and the server answers: the connection is back, and a slow one just buffers. A load can
-                // succeed without it, from what is on disk; that one fails again where the disk ends.
-                mpv.error == null && App.server.reachable() -> { failedSince = null; attempt = 0 }
+                // Loaded while the server answers, so the connection is back, and a slow one just buffers. A load can also
+                // succeed from what is on disk without the server, but that one fails again where the data on disk ends.
+                mpv.error == null && App.server.reachable() -> {
+                    failedSince = null
+                    attempt = 0
+                }
             }
         }
     }
     LaunchedEffect(mpv) {
-        snapshotFlow { mpv.loaded && mpv.buffering }.collectLatest { stalled = it && run { delay(STALL_MS); !App.server.reachable() } }
+        snapshotFlow { mpv.loaded && mpv.buffering }.collectLatest { buffering ->
+            if (buffering) {
+                delay(STALL_MS)
+                stalled = !App.server.reachable()
+            } else {
+                stalled = false
+            }
+        }
     }
-    // Reconnected once playback moves on from where it was loaded again, or, paused by the user, once it is loaded.
+    // The connection counts as back once playback moves past the reload point, or, if the user paused, once the file is loaded.
     LaunchedEffect(mpv) {
-        snapshotFlow { lastPositionMs > reloadAtMs + 1_000 || mpv.pauseWanted && mpv.loaded && !mpv.buffering && !mpv.eof && mpv.error == null }
-            .collect { if (it && failedSince != null) { failedSince = null; attempt = 0 } }
+        snapshotFlow {
+            val movedOn = lastPositionMs > reloadAtMs + 1_000
+            movedOn || mpv.pauseWanted && mpv.loaded && !mpv.buffering && !mpv.eof && mpv.error == null
+        }.collect { back ->
+            if (back && failedSince != null) {
+                failedSince = null
+                attempt = 0
+            }
+        }
     }
-    LaunchedEffect(resumedAt) { if (resumedAt != null) { delay(5_000); resumedAt = null } }
+    LaunchedEffect(resumedAt) {
+        if (resumedAt != null) {
+            delay(5_000)
+            resumedAt = null
+        }
+    }
     LaunchedEffect(mpv) { snapshotFlow { mpv.volume }.collect { if (mpv.loaded) sessionVolume = it } }
-    // The screen stays on only while playing; paused, ended or failed, it times out.
-    LaunchedEffect(mpv) { snapshotFlow { mpv.loaded && !mpv.paused && !mpv.eof && mpv.error == null }.collect { ScreenSaver.inhibit(it) } }
+    // Keep the screen on only while playing. When paused, ended or failed, it times out as usual.
+    LaunchedEffect(mpv) {
+        snapshotFlow { mpv.loaded && !mpv.paused && !mpv.eof && mpv.error == null }.collect { playing -> ScreenSaver.inhibit(playing) }
+    }
     DisposableEffect(mpv) { onDispose { ScreenSaver.inhibit(false) } }
     val window = LocalWindow.current
     DisposableEffect(window) {
         window?.title = "${playerTitle(item)} – finimal"
-        onDispose { window?.title = "finimal"; window?.setFullscreen(false) }
+        onDispose {
+            window?.title = "finimal"
+            window?.setFullscreen(false)
+        }
     }
-    LaunchedEffect(mpv) { snapshotFlow { mpv.position }.collect { if (mpv.loaded && it > 0) lastPositionMs = (it * 1000).toLong() } }
+    LaunchedEffect(mpv) {
+        snapshotFlow { mpv.position }.collect { position ->
+            if (mpv.loaded && position > 0) lastPositionMs = (position * 1000).toLong()
+        }
+    }
 
     VideoSurface(mpv, item, transcoding, segments, ended, next, resumedAt, reconnecting = failedSince != null,
         failure = if (gaveUp) "Can't reach the server." else mpv.error,
@@ -354,8 +452,15 @@ private fun Playback(item: BaseItemDto, siblings: List<BaseItemDto>, onBack: () 
         onSeek = ::seekTo,
         onBack = onBack,
         onPlay = onPlay,
-        onCreditsNext = { creditsDone = true; onPlay(it) },
-        onRetry = { gaveUp = false; mpv.play(); mpv.load(url(), lastPositionMs / 1000.0) },
+        onCreditsNext = { nextId ->
+            creditsDone = true
+            onPlay(nextId)
+        },
+        onRetry = {
+            gaveUp = false
+            mpv.play()
+            mpv.load(url(), lastPositionMs / 1000.0)
+        },
         onTracksChosen = { audio, sub -> prefs.setTracks(seriesKey, audio, sub) },
     )
 }
@@ -391,7 +496,7 @@ private fun VideoSurface(
     val fullscreen = window?.fullscreen == true
     fun toggleFullscreen() { window?.toggleFullscreen() }
     var controls by remember { mutableStateOf(true) }
-    // While the ⋮ menu is open, keys are the menu's: Esc closes it, the arrows move through it.
+    // While the ⋮ menu is open, it gets the keys: Esc closes it and the arrows move through it.
     var menu by remember { mutableStateOf(false) }
     var lastInteraction by remember { mutableLongStateOf(System.currentTimeMillis()) }
     var overlay by remember { mutableStateOf<String?>(null) }
@@ -400,14 +505,21 @@ private fun VideoSurface(
     val step = prefs.doubleTapSeconds * 1000L
     val chapters = remember(item) { chapters(item) }
     fun clamp(ms: Long) = if (durationMs > 0) ms.coerceIn(0, durationMs) else ms.coerceAtLeast(0)
-    fun seekBy(ms: Long) { onSeek(clamp(positionMs + ms), true); overlay = (if (ms > 0) "+" else "−") + "${kotlin.math.abs(ms) / 1000}s" }
+    fun seekBy(ms: Long) {
+        onSeek(clamp(positionMs + ms), true)
+        val sign = if (ms > 0) "+" else "−"
+        overlay = sign + "${kotlin.math.abs(ms) / 1000}s"
+    }
     fun togglePlay() = if (mpv.paused) mpv.play() else mpv.pause()
     fun volumeBy(step: Double) {
         val v = (mpv.volume + step).coerceIn(0.0, 130.0)
         mpv.set("volume", "$v")
         overlay = "Volume ${v.toInt()}%" + if (mpv.muted) " · muted" else ""
     }
-    fun interact() { lastInteraction = System.currentTimeMillis(); controls = true }
+    fun interact() {
+        lastInteraction = System.currentTimeMillis()
+        controls = true
+    }
 
     LaunchedEffect(Unit) {
         while (true) {
@@ -415,25 +527,45 @@ private fun VideoSurface(
             if (controls && !mpv.paused && System.currentTimeMillis() - lastInteraction > 3_000) controls = false
         }
     }
-    LaunchedEffect(overlay) { if (overlay != null) { delay(800); overlay = null } }
-    // From mpv's own flag once it changes, not at the key press: the flag arrives late, and quick presses would show stale text.
-    LaunchedEffect(mpv) { snapshotFlow { mpv.muted }.drop(1).collect { overlay = if (it) "Muted" else "Volume ${mpv.volume.toInt()}%" } }
-
-    // Offered, never done on its own. Credits offer the next episode in season order when there is one.
-    val ranges = remember(segments) { segments.map { it.type to (it.startTicks / TICKS_PER_MS until it.endTicks / TICKS_PER_MS - 1_000) } }
-    val skip = ranges.firstOrNull { positionMs in it.second }?.takeIf { !ended }?.let { (type, range) ->
-        when (type) {
-            MediaSegmentType.INTRO -> Skip("Skip intro") { onSeek(range.last + 1_000, true) }
-            MediaSegmentType.RECAP -> Skip("Skip recap") { onSeek(range.last + 1_000, true) }
-            MediaSegmentType.OUTRO -> next?.let { n -> Skip("Play next: ${episodeLabel(n)}") { onCreditsNext(n.id.toString()) } }
-            else -> null
+    LaunchedEffect(overlay) {
+        if (overlay != null) {
+            delay(800)
+            overlay = null
+        }
+    }
+    // Show the mute state when mpv's flag changes, not at the key press. The flag arrives late, so quick presses would show stale text.
+    LaunchedEffect(mpv) {
+        snapshotFlow { mpv.muted }.drop(1).collect { muted ->
+            overlay = if (muted) "Muted" else "Volume ${mpv.volume.toInt()}%"
         }
     }
 
-    // At the window, not on a focused node: covered screens stay composed and can keep focus, and menus take it.
+    // Skipping is offered, never automatic. During the credits, the offer is the next episode in season order, if any.
+    val ranges = remember(segments) {
+        segments.map { segment ->
+            val startMs = segment.startTicks / TICKS_PER_MS
+            val endMs = segment.endTicks / TICKS_PER_MS
+            segment.type to (startMs until endMs - 1_000)
+        }
+    }
+    val segmentNow = ranges.firstOrNull { positionMs in it.second }
+    val skip = if (segmentNow != null && !ended) {
+        val (type, range) = segmentNow
+        when (type) {
+            MediaSegmentType.INTRO -> Skip("Skip intro") { onSeek(range.last + 1_000, true) }
+            MediaSegmentType.RECAP -> Skip("Skip recap") { onSeek(range.last + 1_000, true) }
+            MediaSegmentType.OUTRO -> if (next != null) Skip("Play next: ${episodeLabel(next)}") { onCreditsNext(next.id.toString()) } else null
+            else -> null
+        }
+    } else {
+        null
+    }
+
+    // Keys are handled at the window rather than on a focused node, because covered screens stay composed and can keep
+    // focus, and menus take it.
     val keys by rememberUpdatedState { e: KeyEvent ->
         if (menu) false
-        // The release too: a focused button would otherwise click on it (Space), undoing the toggle.
+        // Consume the key release too. Otherwise a focused button clicks on Space release, undoing the toggle.
         else if (e.type == KeyEventType.KeyUp) e.key in playerKeys
         else if (e.type != KeyEventType.KeyDown) false
         else {
@@ -446,14 +578,24 @@ private fun VideoSurface(
                 Key.DirectionDown -> { volumeBy(-5.0); true }
                 Key.M -> { mpv.command("cycle", "mute"); true }
                 Key.F -> { toggleFullscreen(); true }
-                Key.N, Key.MediaNext -> { next?.let { onPlay(it.id.toString()) }; true }
+                Key.N, Key.MediaNext -> {
+                    if (next != null) onPlay(next.id.toString())
+                    true
+                }
                 Key.PageUp, Key.PageDown -> {
-                    chapterSeek(chapters.map { it.startMs }, positionMs, forward = e.key == Key.PageDown)?.let { ms ->
-                        onSeek(ms, true); overlay = chapters.first { it.startMs == ms }.name.ifEmpty { formatMs(ms) }
+                    val starts = chapters.map { it.startMs }
+                    val ms = chapterSeek(starts, positionMs, forward = e.key == Key.PageDown)
+                    if (ms != null) {
+                        onSeek(ms, true)
+                        val chapter = chapters.first { it.startMs == ms }
+                        overlay = chapter.name.ifEmpty { formatMs(ms) }
                     }
                     true
                 }
-                Key.Escape -> { if (fullscreen) toggleFullscreen() else onBack(); true }
+                Key.Escape -> {
+                    if (fullscreen) toggleFullscreen() else onBack()
+                    true
+                }
                 else -> false
             }
         }
@@ -463,38 +605,82 @@ private fun VideoSurface(
         window?.keys = handler
         onDispose { if (window?.keys === handler) window.keys = null }
     }
+    // Hide the cursor with the controls by switching to a blank 1x1 cursor.
+    val cursor = if (controls) {
+        PointerIcon.Default
+    } else {
+        val blank = java.awt.image.BufferedImage(1, 1, java.awt.image.BufferedImage.TYPE_INT_ARGB)
+        PointerIcon(java.awt.Toolkit.getDefaultToolkit().createCustomCursor(blank, java.awt.Point(), "none"))
+    }
     Box(
-        Modifier.fillMaxSize().background(Color.Black)
+        Modifier.fillMaxSize()
+            .background(Color.Black)
             .onPointerEvent(PointerEventType.Move) { interact() }
-            .onPointerEvent(PointerEventType.Scroll) { e -> e.changes.firstOrNull()?.scrollDelta?.y?.let { if (it != 0f) volumeBy(if (it < 0) 5.0 else -5.0) } }
-            // The cursor hides with the controls, as in other players.
-            .pointerHoverIcon(if (controls) PointerIcon.Default else PointerIcon(java.awt.Toolkit.getDefaultToolkit()
-                .createCustomCursor(java.awt.image.BufferedImage(1, 1, java.awt.image.BufferedImage.TYPE_INT_ARGB), java.awt.Point(), "none")))
+            .onPointerEvent(PointerEventType.Scroll) { e ->
+                val scroll = e.changes.firstOrNull()?.scrollDelta?.y
+                if (scroll != null && scroll != 0f) volumeBy(if (scroll < 0) 5.0 else -5.0)
+            }
+            .pointerHoverIcon(cursor)
             .pointerInput(Unit) {
-                detectTapGestures(onTap = { togglePlay(); interact() }, onDoubleTap = { toggleFullscreen() })
+                detectTapGestures(
+                    onTap = {
+                        togglePlay()
+                        interact()
+                    },
+                    onDoubleTap = { toggleFullscreen() },
+                )
             }
     ) {
-        Canvas(Modifier.fillMaxSize().onSizeChanged { mpv.resize(it.width, it.height) }) {
+        Canvas(Modifier.fillMaxSize().onSizeChanged { size -> mpv.resize(size.width, size.height) }) {
             mpv.frame?.let { drawImage(it) }
         }
 
-        overlay?.let {
-            Text(it, color = Color.White, style = MaterialTheme.typography.titleLarge,
-                modifier = Modifier.align(Alignment.Center).background(Color(0x99000000), MaterialTheme.shapes.small).padding(12.dp))
+        val overlayText = overlay
+        if (overlayText != null) {
+            Text(
+                overlayText,
+                color = Color.White,
+                style = MaterialTheme.typography.titleLarge,
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .background(Color(0x99000000), MaterialTheme.shapes.small)
+                    .padding(12.dp),
+            )
         }
-        // While reconnecting, the last frame stays up under a note instead of the error or the end screen.
-        val error = failure.takeUnless { reconnecting }
+        // While reconnecting, the last frame stays up with a note, instead of the error or the end screen.
+        val error = if (reconnecting) null else failure
         val ended = ended && !reconnecting
-        if (reconnecting) Text("Reconnecting…", Modifier.align(Alignment.Center).background(Color(0x99000000), MaterialTheme.shapes.small).padding(12.dp),
-            color = Color.White, style = MaterialTheme.typography.labelLarge)
-        else if (mpv.buffering && error == null && !ended) CircularProgressIndicator(Modifier.align(Alignment.Center), color = Color.White)
+        if (reconnecting) {
+            Text(
+                "Reconnecting…",
+                Modifier
+                    .align(Alignment.Center)
+                    .background(Color(0x99000000), MaterialTheme.shapes.small)
+                    .padding(12.dp),
+                color = Color.White,
+                style = MaterialTheme.typography.labelLarge,
+            )
+        } else if (mpv.buffering && error == null && !ended) {
+            CircularProgressIndicator(Modifier.align(Alignment.Center), color = Color.White)
+        }
 
         if (skip != null && !controls) FilledTonalButton(skip.onClick, Modifier.align(Alignment.BottomEnd).padding(32.dp)) { Text(skip.label) }
 
-        if (resumedAt != null && error == null && !ended) Row(Modifier.align(Alignment.TopCenter).padding(top = 64.dp)
-            .background(Color(0x99000000), MaterialTheme.shapes.small).padding(start = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("Resumed at ${formatMs(resumedAt)}", color = Color.White, style = MaterialTheme.typography.labelLarge)
-            TextButton(onClick = { onSeek(0, true); onResumeNoteGone() }) { Text("Start over") }
+        if (resumedAt != null && error == null && !ended) {
+            val noteModifier = Modifier
+                .align(Alignment.TopCenter)
+                .padding(top = 64.dp)
+                .background(Color(0x99000000), MaterialTheme.shapes.small)
+                .padding(start = 12.dp)
+            Row(noteModifier, verticalAlignment = Alignment.CenterVertically) {
+                Text("Resumed at ${formatMs(resumedAt)}", color = Color.White, style = MaterialTheme.typography.labelLarge)
+                TextButton(
+                    onClick = {
+                        onSeek(0, true)
+                        onResumeNoteGone()
+                    },
+                ) { Text("Start over") }
+            }
         }
 
         if (error != null) {
@@ -543,11 +729,23 @@ private fun Controls(
     var tracks by remember { mutableStateOf<List<Mpv.Track>>(emptyList()) }
     var dragging by remember { mutableFloatStateOf(-1f) }
     val chapters = remember(item) { chapters(item) }
-    LaunchedEffect(menu) { while (menu) { onInteraction(); delay(1_000) } }
-    // The end or an error screen can take the controls' place with the menu open; keys must not stay the menu's.
+    LaunchedEffect(menu) {
+        while (menu) {
+            onInteraction()
+            delay(1_000)
+        }
+    }
+    // The end or error screen can replace the controls while the menu is open. Close the menu so it doesn't keep the keys.
     DisposableEffect(Unit) { onDispose { onMenu(false) } }
-    LaunchedEffect(sub, mpv.tracksChanged) { if (sub == "audio" || sub == "text") tracks = withContext(Dispatchers.IO) { mpv.tracks() } }
-    fun close() { onMenu(false); sub = null }
+    LaunchedEffect(sub, mpv.tracksChanged) {
+        if (sub == "audio" || sub == "text") {
+            tracks = withContext(Dispatchers.IO) { mpv.tracks() }
+        }
+    }
+    fun close() {
+        onMenu(false)
+        sub = null
+    }
     Box(Modifier.fillMaxSize().background(Color(0x55000000))) {
         Row(Modifier.align(Alignment.TopStart).fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = Color.White) }
@@ -556,7 +754,12 @@ private fun Controls(
                 if (transcoding) Text("Transcoding to fit the \"Direct play up to\" setting", color = Color.White, style = MaterialTheme.typography.labelSmall)
             }
             Box {
-                IconButton(onClick = { onMenu(true); onInteraction() }) { Icon(Icons.Default.MoreVert, "Menu", tint = Color.White) }
+                IconButton(
+                    onClick = {
+                        onMenu(true)
+                        onInteraction()
+                    },
+                ) { Icon(Icons.Default.MoreVert, "Menu", tint = Color.White) }
                 DropdownMenu(expanded = menu, onDismissRequest = ::close) {
                     when (sub) {
                         null -> {
@@ -570,28 +773,54 @@ private fun Controls(
                         "chapters" -> {
                             val current = chapterAt(chapters.map { it.startMs }, positionMs)
                             chapters.forEachIndexed { i, c ->
-                                Choice("${formatMs(c.startMs)}  ${c.name.ifEmpty { "Chapter ${i + 1}" }}", i == current) { onSeek(c.startMs, true); close() }
+                                val name = c.name.ifEmpty { "Chapter ${i + 1}" }
+                                Choice("${formatMs(c.startMs)}  $name", i == current) {
+                                    onSeek(c.startMs, true)
+                                    close()
+                                }
                             }
                         }
                         "speed" -> listOf(0.5, 0.75, 1.0, 1.25, 1.5, 2.0).forEach { s ->
-                            Choice(speedLabel(s), mpv.speed == s) { sessionSpeed = s; mpv.set("speed", "$s"); close() }
+                            Choice(speedLabel(s), mpv.speed == s) {
+                                sessionSpeed = s
+                                mpv.set("speed", "$s")
+                                close()
+                            }
                         }
                         "size" -> listOf(50, 75, 100, 125, 150, 200).forEach { s ->
-                            Choice("$s%", App.prefs.subtitleScale == s) { App.prefs.subtitleScale = s; mpv.set("sub-scale", "${s / 100.0}"); close() }
+                            Choice("$s%", App.prefs.subtitleScale == s) {
+                                App.prefs.subtitleScale = s
+                                mpv.set("sub-scale", "${s / 100.0}")
+                                close()
+                            }
                         }
                         "delay" -> AUDIO_DELAYS_MS.forEach { d ->
-                            Choice("$d ms", App.prefs.audioDelayMs == d) { App.prefs.audioDelayMs = d; mpv.set("audio-delay", "${-d / 1000.0}"); close() }
+                            Choice("$d ms", App.prefs.audioDelayMs == d) {
+                                App.prefs.audioDelayMs = d
+                                mpv.set("audio-delay", "${-d / 1000.0}")
+                                close()
+                            }
                         }
                         "audio", "text" -> {
                             val type = if (sub == "audio") "audio" else "sub"
-                            fun selectedLanguage(t: String) = tracks.firstOrNull { it.type == t && it.selected }?.language ?: if (t == "sub") "" else null
-                            if (type == "sub") Choice("Off", tracks.none { it.type == "sub" && it.selected }) {
-                                mpv.set("sid", "no"); onTracksChosen(selectedLanguage("audio"), ""); close()
+                            fun selectedLanguage(t: String): String? {
+                                val language = tracks.firstOrNull { it.type == t && it.selected }?.language
+                                if (language != null) return language
+                                return if (t == "sub") "" else null
+                            }
+                            if (type == "sub") {
+                                Choice("Off", tracks.none { it.type == "sub" && it.selected }) {
+                                    mpv.set("sid", "no")
+                                    onTracksChosen(selectedLanguage("audio"), "")
+                                    close()
+                                }
                             }
                             tracks.filter { it.type == type }.forEachIndexed { i, t ->
                                 Choice(trackLabel(t).ifEmpty { "Track ${i + 1}" }, t.selected) {
                                     mpv.set(if (type == "audio") "aid" else "sid", t.id)
-                                    onTracksChosen(if (type == "audio") t.language else selectedLanguage("audio"), if (type == "sub") t.language else selectedLanguage("sub"))
+                                    val audio = if (type == "audio") t.language else selectedLanguage("audio")
+                                    val subtitle = if (type == "sub") t.language else selectedLanguage("sub")
+                                    onTracksChosen(audio, subtitle)
                                     close()
                                 }
                             }
@@ -606,10 +835,19 @@ private fun Controls(
 
         Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
             val shown = if (dragging >= 0) dragging.toLong() else positionMs
-            val cached = if (transcoding) (mpv.cachedUntil * 1000).toLong()
-                else (DesktopMedia.cachedUntil(item, shown / 1000.0, durationMs / 1000.0) * 1000).toLong().coerceAtLeast((mpv.cachedUntil * 1000).toLong())
+            val cached = if (transcoding) {
+                (mpv.cachedUntil * 1000).toLong()
+            } else {
+                val onDiskMs = (DesktopMedia.cachedUntil(item, shown / 1000.0, durationMs / 1000.0) * 1000).toLong()
+                onDiskMs.coerceAtLeast((mpv.cachedUntil * 1000).toLong())
+            }
             Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = { if (mpv.paused) mpv.play() else mpv.pause(); onInteraction() }) {
+                IconButton(
+                    onClick = {
+                        if (mpv.paused) mpv.play() else mpv.pause()
+                        onInteraction()
+                    },
+                ) {
                     Icon(if (mpv.paused) Icons.Default.PlayArrow else PauseIcon, if (mpv.paused) "Play" else "Pause", Modifier.size(32.dp), tint = Color.White)
                 }
                 if (next != null) IconButton(onClick = { onPlay(next.id.toString()) }) { Icon(NextIcon, "Next episode", tint = Color.White) }
@@ -620,8 +858,14 @@ private fun Controls(
                     Slider(
                         value = shown.toFloat().coerceIn(0f, durationMs.toFloat().coerceAtLeast(1f)),
                         valueRange = 0f..durationMs.toFloat().coerceAtLeast(1f),
-                        onValueChange = { dragging = it; onInteraction() },
-                        onValueChangeFinished = { if (dragging >= 0) onSeek(dragging.toLong(), false); dragging = -1f },
+                        onValueChange = { value ->
+                            dragging = value
+                            onInteraction()
+                        },
+                        onValueChangeFinished = {
+                            if (dragging >= 0) onSeek(dragging.toLong(), false)
+                            dragging = -1f
+                        },
                         modifier = Modifier.fillMaxWidth(),
                     )
                     ChapterMarks(chapters, durationMs, Modifier.matchParentSize())
@@ -638,9 +882,20 @@ private fun Choice(label: String, selected: Boolean, onClick: () -> Unit) =
 
 private fun speedLabel(s: Double) = "${s.toString().removeSuffix(".0")}×"
 
-/** "English · 5.1", the track's own title first. */
+/** Builds a label like "English · 5.1", with the track's own title first. */
 private fun trackLabel(t: Mpv.Track): String {
-    val language = t.language?.takeUnless { it == "und" }?.let { Locale.forLanguageTag(it).displayLanguage.ifBlank { it } }
-    val channels = when (t.channels) { null -> null; 1 -> "mono"; 2 -> "stereo"; 6 -> "5.1"; 8 -> "7.1"; else -> "${t.channels} ch" }
-    return listOfNotNull(t.title, language?.takeUnless { t.title?.contains(it, ignoreCase = true) == true }, channels).joinToString(" · ")
+    val code = t.language
+    val language = if (code == null || code == "und") null else Locale.forLanguageTag(code).displayLanguage.ifBlank { code }
+    val channels = when (t.channels) {
+        null -> null
+        1 -> "mono"
+        2 -> "stereo"
+        6 -> "5.1"
+        8 -> "7.1"
+        else -> "${t.channels} ch"
+    }
+    // Skip the language when the title already names it.
+    val titleNamesLanguage = language != null && t.title?.contains(language, ignoreCase = true) == true
+    val shownLanguage = if (titleNamesLanguage) null else language
+    return listOfNotNull(t.title, shownLanguage, channels).joinToString(" · ")
 }
