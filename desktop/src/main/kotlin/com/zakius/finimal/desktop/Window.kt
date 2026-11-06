@@ -17,12 +17,12 @@ import kotlinx.coroutines.launch
 import java.awt.Rectangle
 import java.awt.Toolkit
 
-/** The window, for the player: fullscreen that comes back to what was there before, and the title. */
+/** Gives the player control of the window: its title, and fullscreen that restores the previous placement on exit. */
 val LocalWindow = compositionLocalOf<WindowControl?> { null }
 
 class WindowControl(val state: WindowState) {
     var title by mutableStateOf("finimal")
-    /** The player's keys, seen first by the whole window. */
+    /** The player's key handler, which sees every key in the window first. */
     var keys: ((androidx.compose.ui.input.key.KeyEvent) -> Boolean)? = null
     private var beforeFullscreen = WindowPlacement.Floating
 
@@ -31,8 +31,8 @@ class WindowControl(val state: WindowState) {
     fun setFullscreen(on: Boolean) {
         if (on == fullscreen) return
         if (on) { beforeFullscreen = state.placement; state.placement = WindowPlacement.Fullscreen; return }
-        // Back to maximized when it was, not to the floating size from before that. Through floating: on X11 a
-        // fullscreen window told to maximize stays fullscreen.
+        // Return to maximized if it was maximized, not to the older floating size. Go through floating first, because
+        // on X11 a fullscreen window told to maximize stays fullscreen.
         state.placement = WindowPlacement.Floating
         if (beforeFullscreen == WindowPlacement.Maximized) scope.launch {
             delay(150)
@@ -47,7 +47,7 @@ class WindowControl(val state: WindowState) {
     companion object {
         private val store get() = DesktopPlatform.store
 
-        /** Where and how big the window was when it last moved; centred at 1280×800 the first time or off-screen. */
+        /** Restores where and how big the window was when it last moved. The first time, or if that is off-screen, it is centred at 1280×800. */
         fun restore(): WindowControl {
             fun int(key: String) = (store[key] as Number?)?.toInt()
             val saved = Rectangle(int("window.x") ?: 0, int("window.y") ?: 0, int("window.width") ?: 1280, int("window.height") ?: 800)
@@ -58,7 +58,7 @@ class WindowControl(val state: WindowState) {
                     c.bounds.run { Rectangle(x + i.left, y + i.top, width - i.left - i.right, height - i.top - i.bottom) }
                 }
                 fit(saved, int("window.x") != null && int("window.y") != null, ge.maximumWindowBounds, screens)
-            }.getOrNull() // headless
+            }.getOrNull() // Fails when headless.
             return WindowControl(WindowState(
                 placement = if (store["window.maximized"] == true) WindowPlacement.Maximized else WindowPlacement.Floating,
                 position = bounds?.let { WindowPosition(it.x.dp, it.y.dp) } ?: WindowPosition(Alignment.Center),
@@ -67,9 +67,9 @@ class WindowControl(val state: WindowState) {
         }
 
         /**
-         * [saved] made to fit the free area (less taskbars and panels) of the screen it overlaps, or centred in the main
-         * screen's when it overlaps none (a monitor unplugged since) or has no place yet. A smaller monitor than last
-         * time, or a 768 px laptop, would otherwise leave the window's bottom under the taskbar.
+         * Fits [saved] into the free area (minus taskbars and panels) of the screen it overlaps. If it overlaps no screen,
+         * for example because a monitor was unplugged, or has no saved position, it is centred on the main screen.
+         * Without this, a smaller monitor than last time, or a 768 px laptop, would leave the window's bottom under the taskbar.
          */
         fun fit(saved: Rectangle, placed: Boolean, main: Rectangle, screens: List<Rectangle>): Rectangle {
             val screen = screens.firstOrNull { placed && it.intersects(saved) }
@@ -81,7 +81,7 @@ class WindowControl(val state: WindowState) {
         }
     }
 
-    /** Remembers the floating bounds and whether it was maximized; fullscreen is left to the player, never restored. */
+    /** Remembers the floating bounds and whether the window was maximized. Fullscreen is the player's business and is never restored. */
     fun save() {
         val s = state
         store.edit {

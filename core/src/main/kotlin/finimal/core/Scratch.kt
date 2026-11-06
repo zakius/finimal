@@ -15,23 +15,23 @@ import okhttp3.Call
 import okhttp3.OkHttpClient
 import okhttp3.Request
 
-/** The server answered, and refused: worth retrying only for 5xx (and 401, a stale token). */
+/** The server refused the request. Only a 5xx, or a 401 from a stale token, is worth retrying. */
 class HttpStatus(val code: Int) : IOException("HTTP $code")
 
-/** The server's file is not the size it lists: a captive portal or proxy page, or a file replaced mid-download. */
+/** The server sent a file of a different size than it lists, such as a captive portal page or a file replaced mid-download. */
 class WrongFile(message: String) : IOException(message)
 
-/** A chunk could not be written: the disk is full or gone. */
+/** A chunk could not be written because the disk is full or gone. */
 class StorageError(cause: IOException) : IOException(cause.message, cause)
 
 /**
- * Server files kept on disk in fixed-size chunks, for streaming and downloads alike: what one fetched, the other
- * reads. An entry is a folder per file version (its key): `length`, then `0`, `1`… for whole chunks and `<n>.part`
- * for the one being written. A chunk file appears only once all of it is on disk and synced, so a crash leaves at
- * worst a `.part`, fetched again.
+ * Server files kept on disk in fixed-size chunks. Streaming and downloads share them, so bytes fetched by one are
+ * read by the other. Each entry is a folder per file version (its key) holding a `length` file, the whole chunks
+ * `0`, `1`, and so on, and `<n>.part` for the chunk being written. A chunk file appears only after all of it is on
+ * disk and synced, so a crash leaves at worst a `.part`, which is fetched again.
  *
- * One filler thread per entry fetches what its open [Demand]s ask for. Readers never fetch: they wait for the
- * filler and read the chunk it is writing as the bytes land.
+ * One filler thread per entry fetches what its open [Demand]s ask for. Readers never fetch. They wait for the
+ * filler and read the chunk it is writing as the bytes arrive.
  */
 class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int = 4 * 1024 * 1024) {
     private val entries = HashMap<String, Entry>()
@@ -49,16 +49,16 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
     /** Keys with anything on disk. */
     fun keys(): List<String> = dir.list().orEmpty().filter { File(dir, it).isDirectory }
 
-    /** Removes [key]'s bytes unless a reader, buffer or download has it open; returns whether it did. */
+    /** Removes [key]'s bytes and returns true, unless a reader, buffer or download has it open. */
     fun delete(key: String): Boolean {
         val e = synchronized(this) { entries[key] }
         if (e != null && !e.release()) return false
-        // Under the lock: an entry() for the key in between would count the chunks being deleted as present.
+        // Delete under the lock, so a concurrent entry() for this key can't count the chunks being deleted as present.
         synchronized(this) { entries.remove(key); File(dir, key).deleteRecursively() }
         return true
     }
 
-    /** Stops every filler and reader; the files stay. For a storage switch. */
+    /** Stops every filler and reader but keeps the files. Used when switching storage location. */
     fun close() {
         val all = synchronized(this) { closed = true; entries.values.toList() }
         all.forEach { it.shutDown() }
@@ -97,10 +97,10 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
         private var seq = 0L
         private var filler: Thread? = null
         private var call: Call? = null
-        /** The last failure; [fatal] when retrying can't help (refused, wrong file, disk). */
+        /** The last failure. [fatal] means retrying can't help: the server refused, the file is wrong, or the disk failed. */
         private var error: IOException? = null
         private var fatal = false
-        /** The disk filled up: only readers get chunks written until the next demand. */
+        /** The disk filled up. Until the next demand, only chunks that readers wait for get written. */
         private var lowSpace = false
         private var gone = false
         private var touched = 0L
@@ -173,14 +173,14 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
             wake()
         }
 
-        /** The demands changed: the filler re-picks, and drops a fetch nobody wants any more. */
+        /** Called when the demands change. The filler picks its target again, and a fetch nobody wants any more is cancelled. */
         @Synchronized
         internal fun wake() {
             (this as Object).notifyAll()
             if (writing >= 0 && target() != writing) call?.cancel()
         }
 
-        /** True when nothing has it open; it is then closed for good. */
+        /** Closes the entry for good and returns true, unless something still has it open. */
         @Synchronized
         internal fun release(): Boolean {
             if (demands.isNotEmpty()) return false
@@ -196,7 +196,7 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
             (this as Object).notifyAll()
         }
 
-        /** Sets the length of a file whose chunks come from elsewhere (a migration), before [putChunk]. */
+        /** Sets the length of a file whose chunks come from elsewhere, such as a migration. Call it before [putChunk]. */
         @Synchronized
         fun setLength(total: Long) {
             if (length == total) return
@@ -209,7 +209,7 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
         @Synchronized
         fun has(i: Int) = present[i]
 
-        /** Stores chunk [i] whole, from outside the filler. */
+        /** Stores the whole chunk [i] without going through the filler. */
         fun putChunk(i: Int, bytes: ByteArray) {
             synchronized(this) { require(bytes.size.toLong() == chunkLength(i)) { "chunk $i is ${chunkLength(i)} bytes, not ${bytes.size}" } }
             val part = File(folder, "$i.import")
@@ -235,8 +235,8 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
                             length >= 0 && present[i] -> return@synchronized chunkFile(i) to chunkLength(i) - inChunk
                             writing == i && written > inChunk -> return@synchronized partFile(i) to written - inChunk
                             fatal -> throw error!!
-                            // The filler's last try failed (no network, server down): say so now, not at the deadline,
-                            // so the player reports it. Its retry is a new request, whose demand wakes the filler.
+                            // The filler's last try failed (no network, or the server is down). Fail now rather than at
+                            // the deadline, so the player reports it. The player's retry is a new demand, which wakes the filler.
                             error != null && writing != i -> throw InterruptedIOException("no data: ${error!!.message}")
                         }
                         val wait = deadline - System.currentTimeMillis()
@@ -245,12 +245,12 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
                     }
                     @Suppress("UNREACHABLE_CODE") error("unreachable")
                 }
-                // The part can be renamed to its chunk, or dropped and begun again, between the check and the open.
-                // A FileChannel, not a RandomAccessFile: on Windows only it lets the filler rename the part while open.
+                // On Windows, only a FileChannel (not a RandomAccessFile) lets the filler rename the part while it is open.
                 val n = try {
                     FileChannel.open(file.toPath()).use { it.read(ByteBuffer.wrap(buf, off, minOf(len.toLong(), available).toInt()), inChunk) }
                 } catch (e: IOException) {
-                    // AccessDenied: on Windows, a part being deleted. Retried, though not past the deadline.
+                    // Between the check above and this open, the filler may have renamed the part to its chunk, or
+                    // deleted it to start over. Windows reports a part being deleted as AccessDenied. Retry until the deadline.
                     if (e !is NoSuchFileException && e !is AccessDeniedException || System.currentTimeMillis() > deadline) throw e
                     continue
                 }
@@ -275,8 +275,8 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
         }
 
         /**
-         * Fills the whole file, reporting bytes on disk and the length. Throws a fatal failure at once, and a passing
-         * one (network) once [stallMs] go by without a new chunk. Interruptible.
+         * Fills the whole file, reporting bytes on disk and the total length. A fatal failure throws at once. A passing
+         * one, such as a network error, throws only after [stallMs] go by without a new chunk. Interruptible.
          */
         fun download(stallMs: Long = 60_000, onProgress: (Long, Long) -> Unit = { _, _ -> }) {
             demand(0, Long.MAX_VALUE, Priority.DOWNLOAD).use {
@@ -302,11 +302,11 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
 
         private fun touch() {
             val now = System.currentTimeMillis()
-            // A directory's mtime only, and at most once a minute.
+            // Update the folder's mtime at most once a minute, to keep disk writes rare.
             if (now - touched > 60_000) { touched = now; folder.setLastModified(now) }
         }
 
-        /** The next chunk to fetch: the first missing one in the most pressing demand's range. Readers go newest first. */
+        /** The next chunk to fetch: the first missing one in the most pressing demand's range. Among readers, the newest goes first. */
         private fun target(): Int? {
             if (gone || fatal) return null
             val order = demands.filter { !lowSpace || it.priority == Priority.READ }
@@ -340,14 +340,14 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
                 } catch (e: StorageError) {
                     if (onStorageFull()) continue
                     synchronized(this) {
-                        // Buffering and downloading stop; a reader still gets its chunks written while there is room.
+                        // Buffering and downloading stop, but a reader still gets its chunks written while there is room.
                         if (lowSpace || demands.none { it.priority == Priority.READ }) { error = e; fatal = true } else lowSpace = true
                         (this as Object).notifyAll()
                     }
                 } catch (e: WrongFile) {
                     fail(e)
                 } catch (e: HttpStatus) {
-                    // Refused: a 4xx stays refused. A 401 is the token, and 5xx the server: worth waiting out.
+                    // A 4xx stays refused. A 401 (stale token) and a 5xx (server trouble) are worth waiting out.
                     if (e.code in 400..499 && e.code != 401) fail(e) else backOff(e, attempt++)
                 } catch (e: IOException) {
                     if (synchronized(this) { call?.isCanceled() == true }) continue
@@ -355,7 +355,7 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
                 } finally {
                     synchronized(this) {
                         call = null
-                        // Once gone, the folder may be a new entry's: the next one's init drops a leftover part.
+                        // Once gone, the folder may belong to a new entry, so leave the part. That entry's init deletes leftovers.
                         if (writing >= 0) { if (!gone) partFile(writing).delete(); writing = -1; written = 0 }
                     }
                 }
@@ -367,7 +367,7 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
         private fun backOff(e: IOException, attempt: Int) = synchronized(this) {
             error = e
             (this as Object).notifyAll()
-            // A new demand (a seek, a retry) wakes it early.
+            // A new demand, such as a seek or a retry, ends the wait early.
             if (!gone && demands.isNotEmpty()) (this as Object).wait(longArrayOf(1_000, 2_000, 4_000, 8_000, 16_000, 30_000)[minOf(attempt, 5)])
         }
 
@@ -404,13 +404,13 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
                         when {
                             present[i] -> true
                             target() == i -> { writing = i; written = 0; false }
-                            // A server ignoring the range sends from byte 0: skip to the wanted chunk, not ask again at once.
+                            // A server that ignores the range sends from byte 0. Skip ahead to the wanted chunk rather than request again at once.
                             !ranged && target().let { it != null && i < it } -> true
                             else -> return stored
                         }
                     }
                     if (have) {
-                        // Only a server ignoring the range sends a chunk already here or not wanted; later ones may be.
+                        // Only a server that ignores the range sends a chunk that is already here or not wanted. Skip it, since later ones may be wanted.
                         if (ranged) return stored
                         while (pos < end) pos += input.read(buf, 0, minOf(buf.size.toLong(), end - pos).toInt()).also { if (it < 0) throw IOException("ended at $pos") }
                         continue
@@ -432,7 +432,7 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
                         try { out.fd.sync() } catch (e: IOException) { throw StorageError(e) }
                     }
                     synchronized(this) {
-                        // Once gone, the folder may be a new entry's, and the part its filler's.
+                        // Once gone, the folder may belong to a new entry, and this part to that entry's filler.
                         if (gone) return stored
                         if (!partFile(i).renameTo(chunkFile(i))) throw StorageError(IOException("rename failed"))
                         present.set(i)

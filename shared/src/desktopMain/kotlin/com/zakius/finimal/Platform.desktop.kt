@@ -27,7 +27,10 @@ internal actual fun smallestWidthDp(): Int {
     return with(LocalDensity.current) { minOf(size.width, size.height).toDp().value.toInt() }
 }
 
-/** The latest [toast], which the window shows for a few seconds; [seq] tells a repeat of the same text from the last. */
+/**
+ * The latest [toast], which the window shows for a few seconds. The sequence number lets the window
+ * tell a repeated toast with the same text apart from the one already showing.
+ */
 object Toasts {
     var current by mutableStateOf<Pair<Int, String>?>(null)
         private set
@@ -37,11 +40,11 @@ object Toasts {
 
 actual fun toast(text: String) = Toasts.show(text)
 
-/** The desktop has no network-change events to listen to; Retry is on screen. */
+/** The desktop has no network-change events to listen to, so the user presses the on-screen Retry instead. */
 @Composable
 internal actual fun RetryOnNewNetwork(onRetry: () -> Unit) {}
 
-/** [KeyValueStore] in one JSON file, rewritten whole on each edit: settings are a few dozen keys. */
+/** [KeyValueStore] in one JSON file. Rewriting the whole file on each edit is fine for a few dozen settings. */
 class JsonFileStore(private val file: File) : KeyValueStore {
     private val values: MutableMap<String, Any?> = runCatching {
         Json.parseToJsonElement(file.readText()) as JsonObject

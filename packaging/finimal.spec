@@ -1,6 +1,6 @@
-# Fedora package around the tree tools/linux-packages.sh stages. Java and libmpv come from Fedora, so their fixes
-# arrive with system updates.
-# xz, as the .deb: Ubuntu's rpmbuild (CI) defaults to gzip, which left the package 40 % bigger.
+# Fedora package for the tree tools/linux-packages.sh stages. Java and libmpv come from Fedora, so their fixes arrive
+# with system updates.
+# xz like the .deb: Ubuntu's rpmbuild (used in CI) defaults to gzip, which made the package 40% bigger.
 %global _binary_payload w9.xzdio
 
 Name:           finimal
@@ -10,7 +10,7 @@ Summary:        Jellyfin client for movies and TV
 License:        GPL-3.0-only
 URL:            https://github.com/zakius/finimal
 ExclusiveArch:  x86_64
-# Skia's library would otherwise pull its every link as a requirement; Java's full JRE brings X11 and fonts.
+# Otherwise rpm lists every library Skia links against as a requirement; the full Java package already brings X11 and fonts.
 AutoReqProv:    no
 Requires:       (java-25-openjdk or java-21-openjdk or java-latest-openjdk)
 Requires:       mpv-libs libglvnd-glx

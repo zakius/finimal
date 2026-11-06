@@ -55,7 +55,7 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 
 class MainActivity : ComponentActivity() {
-    // Denied is fine: downloads run without the notification. Android stops asking after two denials.
+    // A denial is fine, since downloads run without the notification. Android stops asking after two denials.
     private val notifications = registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
     private var openDownloads by mutableStateOf(false)
 
@@ -66,16 +66,16 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         AndroidApp.instance.activity = this
-        // The splash goes the moment the first frame is ready, instead of after Android's fade-out (about 130 ms).
+        // Remove the splash as soon as the first frame is ready, skipping Android's fade-out (about 130 ms).
         if (Build.VERSION.SDK_INT >= 31) splashScreen.setOnExitAnimationListener { it.remove() }
         enableEdgeToEdge()
-        // A recreated activity has its stack restored; don't push Downloads again.
+        // A recreated activity restores its back stack, so don't push Downloads again.
         if (savedInstanceState == null) openDownloads = intent.getBooleanExtra(EXTRA_DOWNLOADS, false)
         setContent { Theme { Root(openDownloads, { openDownloads = false }) { id, onBack, onPlay -> PlayerScreen(id, onBack, onPlay) } } }
         val decor = window.decorView
         decor.viewTreeObserver.addOnDrawListener(object : ViewTreeObserver.OnDrawListener {
             override fun onDraw() {
-                decor.post { // not from inside onDraw
+                decor.post { // A listener can't be removed from inside onDraw.
                     decor.viewTreeObserver.removeOnDrawListener(this)
                     AndroidApp.instance.afterFirstFrame()
                 }

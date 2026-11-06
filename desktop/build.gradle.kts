@@ -1,4 +1,3 @@
-// The desktop app: the shared UI in a window, playback through libmpv.
 import org.jetbrains.compose.desktop.application.dsl.TargetFormat
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import java.nio.ByteBuffer
@@ -18,7 +17,7 @@ java {
 }
 kotlin { compilerOptions { jvmTarget = JvmTarget.JVM_21 } }
 
-// JNA's jar carries its native part for ~30 platforms; the app is built for Linux and Windows on x86-64 only.
+// JNA's jar bundles native code for about 30 platforms; keep only Linux and Windows x86-64, the ones the app ships for.
 val jna = configurations.create("jna")
 val jnaTrimmed = tasks.register<Jar>("jnaTrimmed") {
     archiveFileName = "jna.jar"
@@ -35,7 +34,7 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-swing:1.11.0")
     jna("net.java.dev.jna:jna:5.19.1")
     implementation(files(jnaTrimmed))
-    // Screensaver inhibition over D-Bus; the transport uses the JDK's own Unix sockets.
+    // D-Bus, to keep the screensaver off during playback. This transport uses the JDK's own Unix sockets.
     implementation("com.github.hypfvieh:dbus-java-core:5.2.2")
     implementation("com.github.hypfvieh:dbus-java-transport-native-unixsocket:5.2.2")
     testImplementation(kotlin("test"))
@@ -49,22 +48,22 @@ compose.desktop {
     application {
         mainClass = "com.zakius.finimal.desktop.MainKt"
         jvmArgs += "-Dfinimal.version=$versionName"
-        // The release distribution (createReleaseDistributable) drops what the app never calls: about half the jars.
+        // ProGuard strips code the app never calls from release builds, about half the jars' size.
         buildTypes.release.proguard {
             configurationFiles.from(project.file("proguard-rules.pro"))
             obfuscate = true
         }
         nativeDistributions {
-            // Linux ships as a Flatpak (packaging/flatpak), built from createDistributable's app image.
+            // MSI only: tools/flatpak.sh and tools/linux-packages.sh build the Linux packages from the app image.
             targetFormats(TargetFormat.Msi)
             packageName = "finimal"
             packageVersion = versionName
             description = "Jellyfin client for movies and TV"
             vendor = "zakius"
             licenseFile = rootProject.file("LICENSE")
-            // windows/libmpv-2.dll from tools/fetch-libmpv-windows.sh; Linux uses the distribution's libmpv2.
+            // Holds windows/libmpv-2.dll from tools/fetch-libmpv-windows.sh. Linux uses the system libmpv.
             appResourcesRootDir = layout.projectDirectory.dir("resources")
-            // Beyond java.base and the desktop modules: OkHttp's DNS and TLS, JNA, and dbus-java's login as the user's uid.
+            // Modules beyond java.base and the desktop ones: OkHttp's DNS and TLS, JNA, and dbus-java's login as the user's uid.
             modules("java.naming", "jdk.crypto.ec", "jdk.unsupported", "jdk.security.auth")
             windows {
                 iconFile = rootProject.file("packaging/finimal.ico")
@@ -78,16 +77,18 @@ compose.desktop {
     }
 }
 
-// Skia's library (Linux; on Windows its icudtl.dat) carries ICU's whole data (10.4 MB) and reads only its line, word
-// and character breaking. The rest (collation, time zones, locale names, converters, the Chinese/Japanese word
-// dictionary) goes: the blob keeps its place and size, its table of contents lists only what stays, and what's freed
-// is zeros, which the packages' compression takes out. :desktop:skiaCheck shows text lays out as with the full data.
-// Without the dictionary, word steps (Ctrl+arrow, double-click) in Chinese and Japanese go one character at a time.
+// Skia carries all of ICU's data (10.4 MB, inside the library on Linux, in icudtl.dat on Windows) but only uses the
+// line, word and character break rules. This removes the rest: collation, time zones, locale names, converters and the
+// Chinese/Japanese word dictionary. The blob keeps its position and size, its table of contents lists only the kept
+// items, and the freed bytes become zeros, which the packages' compression removes. :desktop:skiaCheck verifies that
+// text lays out as with the full data. Without the dictionary, word navigation (Ctrl+arrow, double-click) in Chinese and
+// Japanese moves one character at a time.
 fun trimSkiaIcu(lib: File) {
     val bytes = lib.readBytes()
     val b = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
-    // ICU's common data: a header ("CmnD" at 12), then the table: count, (name offset, data offset) pairs, the names,
-    // the items in name order, each up to where the next begins. Offsets count from the table.
+    // ICU common data layout: a header (magic bytes 0xda27 at offset 2, format "CmnD" at 12), then the table of
+    // contents: an item count, a (name offset, data offset) pair per item, the names, then the items in name order.
+    // Each item runs up to the start of the next. Offsets are relative to the table.
     val header = (0 until bytes.size - 16).single { i ->
         bytes[i + 2] == 0xda.toByte() && bytes[i + 3] == 0x27.toByte() && String(bytes, i + 12, 4) == "CmnD"
     }
@@ -101,7 +102,7 @@ fun trimSkiaIcu(lib: File) {
         if (n.startsWith("brkitr/")) n != "brkitr/cjdict.dict"
         else '/' !in n && (n.endsWith(".icu") || n.endsWith(".nrm") || n.removeSuffix(".res") in keepTop)
     }
-    // The last item's size isn't recorded; it's a locale's (zu_ZA.res), which goes.
+    // The last item's size isn't recorded. It is a locale (zu_ZA.res), so it is always dropped.
     check(kept.size in 20 until count && count - 1 !in kept) { "${lib.name}: unexpected ICU data" }
     val out = bytes.copyOf()
     val o = ByteBuffer.wrap(out).order(ByteOrder.LITTLE_ENDIAN)
@@ -117,7 +118,8 @@ fun trimSkiaIcu(lib: File) {
     }
     lib.writeBytes(out)
 }
-// Linux: also Skia's symbol table (3 MB). Its exported symbols stay; the Java runtime keeps its own for crash logs.
+// On Linux, also strip Skia's symbol table (3 MB), keeping its exported symbols. The Java runtime's libraries keep their
+// symbols, for readable crash logs.
 tasks.matching { it.name == "createDistributable" || it.name == "createReleaseDistributable" }.configureEach {
     doLast {
         val libs = outputs.files.asFileTree.matching { include("**/lib/app/*skiko*.so", "**/app/icudtl.dat") }.files
@@ -139,14 +141,14 @@ tasks.register<JavaExec>("skiaCheck") {
     classpath = sourceSets["test"].runtimeClasspath
     mainClass = "com.zakius.finimal.desktop.SkiaCheckKt"
     val windows = System.getProperty("os.name").startsWith("Windows")
-    val app = "compose/binaries/main-release/app/finimal/" + if (windows) "app" else "lib/app" // jpackage's layouts
+    val app = "compose/binaries/main-release/app/finimal/" + if (windows) "app" else "lib/app" // jpackage's layout per OS
     args(skiaFull.get().destinationDir.path, layout.buildDirectory.dir(app).get().asFile.path)
     dependsOn(skiaFull, "createReleaseDistributable")
 }
 
-// Compose's default ProGuard rules keep all of Kotlin's standard library, names and all, and with it much that the
-// app never calls: without that one rule the release jars are 5.6 MB smaller. Skia's native code needs only Function0
-// (proguard-rules.pro).
+// Compose's default ProGuard rules keep the whole Kotlin standard library, unobfuscated, including much the app never
+// calls. Dropping that one rule makes the release jars 5.6 MB smaller. Skia's native code needs only Function0, which
+// proguard-rules.pro keeps.
 afterEvaluate {
     val proguard = tasks.withType<org.jetbrains.compose.desktop.application.tasks.AbstractProguardTask>()
     val stock = proguard.first().defaultComposeRulesFile.get().asFile

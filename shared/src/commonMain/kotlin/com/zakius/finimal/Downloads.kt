@@ -15,16 +15,16 @@ data class Download(
     val auto: Boolean,
     val queuedAt: Long = 0,
     val paused: Boolean = false,
-    /** The server refused the file (HTTP 4xx, e.g. deleted there); paused with it. Resuming tries again. */
+    /** The server refused the file (HTTP 4xx, for example because it was deleted there). Set together with [paused]; resuming tries again. */
     val failed: Boolean = false,
-    /** The disk was full even after evicting the buffer; paused with it. Resuming tries again. */
+    /** The disk was full even after evicting the buffer. Set together with [paused]; resuming tries again. */
     val storageFull: Boolean = false,
     /** The device can't play the file, so it is stored as the server's transcode, in the transcodes folder. */
     val transcoded: Boolean = false,
 )
 
 val queueOrder = compareBy<Download>({ it.queuedAt }, { it.item.parentIndexNumber }, { it.item.indexNumber })
-/** Finished downloads: grouped by series in season order, movies last. */
+/** Orders finished downloads by series and then season order, with movies last. */
 val shelfOrder = compareBy<Download>({ it.item.seriesId == null }, { it.item.seriesName }, { it.item.seriesId },
     { it.item.parentIndexNumber }, { it.item.indexNumber }, { it.item.name })
 
@@ -48,11 +48,14 @@ fun scratchKey(item: BaseItemDto): String {
     return "${item.id}-${source?.eTag ?: source?.size ?: 0}"
 }
 
-/** Downloads as the screens see them; null on a platform without downloads yet. Reads files: call off the main thread unless noted. */
+/**
+ * Downloads as the screens see them. [Platform.downloads] is null on a platform without downloads yet.
+ * Most calls read files, so call them off the main thread unless noted otherwise.
+ */
 interface Downloads {
-    /** Bumped on every change, so open screens re-read statuses at once; read in composition. */
+    /** Bumped on every change so that open screens re-read statuses at once. Safe to read in composition. */
     val changes: Int
-    /** The selected SD card was missing at start: the queue waits for it. */
+    /** The selected SD card was missing at start, so the queue waits until it comes back. */
     val storageMissing: Boolean
     fun downloads(): List<Download>
     fun download(id: String): Download?
@@ -70,12 +73,12 @@ interface Downloads {
     fun rememberState(id: String, state: PlayState?)
     fun bufferedBytes(): Long
     fun freeBytes(): Long
-    /** App-specific storage volumes; 1+ are removable. */
+    /** App-specific storage volumes. Index 0 is internal storage; the rest are removable. */
     fun storageRoots(): List<File>
     /** Moves storage to root [index], deleting every download and the buffer. */
     fun switchStorage(index: Int)
-    /** Each account has its own downloads and queue; the bytes of an item are shared. Re-reads for the current account. */
+    /** Re-reads downloads for the current account. Each account has its own downloads and queue, but the stored bytes of an item are shared. */
     fun accountChanged()
-    /** Bytes downloaded only by other accounts on this device; their titles stay theirs. */
+    /** Bytes downloaded only by other accounts on this device. Their titles stay private to them. */
     fun otherAccountsBytes(): Long
 }

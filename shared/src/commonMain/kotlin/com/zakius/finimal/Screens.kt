@@ -119,15 +119,15 @@ import finimal.core.PlayState
 import finimal.core.TICKS_PER_MS
 import kotlin.math.abs
 
-/** Last good list per server, user and list, so a list you come back to shows at once while it reloads. Main thread only. */
+/** The last good list per server, user and list, so a list you come back to shows at once while it reloads. Main thread only. */
 private val lastGood = object : LinkedHashMap<List<Any?>, List<BaseItemDto>>(16, 0.75f, true) {
-    // Every search query and sort is its own entry; keep the recent ones.
+    // Every search query and sort is its own entry, so keep only the most recent ones.
     override fun removeEldestEntry(eldest: MutableMap.MutableEntry<List<Any?>, List<BaseItemDto>>) = size > 20
 }
 
 /**
  * The same lists on disk, so a cold start shows the last list at once instead of "Loading…".
- * Display only: play state is drawn from pending local state over it, and a fresh fetch replaces it.
+ * For display only: pending local play state is drawn over it, and a fresh fetch replaces it.
  */
 object ListSnapshots {
     private val json = Json { ignoreUnknownKeys = true }
@@ -139,7 +139,7 @@ object ListSnapshots {
     fun write(key: List<Any?>, list: List<BaseItemDto>) { runCatching { dir.mkdirs(); file(key).writeAtomically(json.encodeToString(list)) } }
     fun clear() { dir.deleteRecursively() }
 
-    /** Libraries, the usual first screen, read at app start off the main thread, so the first frame can show it. */
+    /** Reads Libraries, the usual first screen, off the main thread at app start, so the first frame can show it. */
     fun prefetchLibraries() {
         val key = listOf(App.prefs.baseUrl, App.prefs.userId)
         read(key)?.let { prefetched = key to it }
@@ -155,24 +155,24 @@ private val LocalFocusedKey = compositionLocalOf<MutableState<String?>> { mutabl
 fun FocusMemory(content: @Composable () -> Unit) =
     CompositionLocalProvider(LocalFocusedKey provides rememberSaveable { mutableStateOf<String?>(null) }, content = content)
 
-/** Before the item's clickable: records D-pad focus under [key] and takes it back when the item shows again. Touch never focuses. */
+/** Put before the item's clickable. Records D-pad focus under [key] and takes it back when the item shows again. Touch never focuses. */
 private fun Modifier.focusMemory(key: Any): Modifier = composed {
     val memory = LocalFocusedKey.current
     val requester = remember { FocusRequester() }
     val k = key.toString()
-    val shown = LocalShown.current // Root clears focus while another screen covers this one
+    val shown = LocalShown.current // Root clears focus while another screen covers this one.
     LaunchedEffect(Unit) { snapshotFlow { shown.value }.collect { if (it && memory.value == k) requester.requestFocus() } }
     focusRequester(requester).onFocusChanged { if (it.isFocused) memory.value = k }
 }
 
-/** A list, and why the refresh behind it failed when it is an older copy. */
+/** A list, plus the refresh error when the list shown is an older copy because the refresh failed. */
 class Load(val result: Result<List<BaseItemDto>>?, val refreshError: Throwable?)
 
 /**
  * Loads [block] after pushing unsynced progress, so the list never shows state older than this device's.
  * Loads again each time the screen comes back on top. Until the load ends, the list from the last visit
- * shows (from memory, else from disk when [persist]); unsynced local state is drawn over it. A failed load
- * keeps that list and says why above it.
+ * shows (from memory, else from disk when [persist]), with unsynced local state drawn over it. A failed load
+ * keeps that list and says why below it.
  */
 @Composable
 private fun loadFresh(vararg keys: Any?, refresh: Int, persist: Boolean = true, block: suspend () -> List<BaseItemDto>): Load {
@@ -183,14 +183,14 @@ private fun loadFresh(vararg keys: Any?, refresh: Int, persist: Boolean = true, 
     val shown = LocalShown.current
     LaunchedEffect(k, refresh) { snapshotFlow { shown.value }.collectLatest { if (it) coroutineScope {
         refreshError = null
-        if (last?.second?.isFailure == true) last = null // a retry shows "Loading…" again
+        if (last?.second?.isFailure == true) last = null // A retry shows "Loading…" again.
         if (last?.first != k) (lastGood[cacheKey] ?: if (persist) withContext(Dispatchers.IO) { ListSnapshots.read(cacheKey) } else null)
             ?.let { last = k to Result.success(it) }
         val pushed = App.server.flush()
-        // An unreachable server would only time out a second time on the fetch.
+        // If the flush found the server unreachable, the fetch would only time out a second time.
         val result = if (pushed != null && unreachable(pushed)) Result.failure(pushed) else runCatching { block() }
             .onFailure { if (it is InvalidStatusException && it.status == 401) App.server.expire() }
-        ensureActive() // covered meanwhile: not a failure, and the next visit loads again
+        ensureActive() // If the screen was covered meanwhile, this isn't a failure; the next visit loads again.
         val prev = last
         when {
             result.isSuccess -> {
@@ -208,7 +208,7 @@ private fun loadFresh(vararg keys: Any?, refresh: Int, persist: Boolean = true, 
 
 /**
  * Download statuses while the screen is shown, null until first read. Re-read on every download
- * change, and polled every second while one runs, else every 5 s. Not while covered by another screen.
+ * change, and polled every second while one runs, else every 5 s. Polling stops while another screen covers this one.
  */
 @Composable
 fun rememberDownloadStatuses(): Map<String, DownloadStatus>? {
@@ -233,7 +233,7 @@ private suspend fun downloadAll(episodes: List<BaseItemDto>) {
     withContext(Dispatchers.IO) {
         for (ep in episodes) {
             if (downloads.download(ep.id.toString()) != null) continue
-            // Episodes fetched with sources queue as local writes, so leaving the screen can't stop it partway.
+            // Episodes already fetched with sources queue as purely local writes, so leaving the screen can't stop it partway.
             runCatching { downloads.startDownload(ep.takeIf { it.mediaSources != null } ?: App.server.item(ep.id.toString()), auto = false) }
                 .onSuccess { queued++ }.onFailure { if (it is CancellationException) throw it; failures += it }
         }
@@ -256,7 +256,7 @@ private fun downloadAllAction(fetch: suspend () -> List<BaseItemDto>): () -> Uni
     var busy by remember { mutableStateOf(false) }
     var pending by remember { mutableStateOf<List<BaseItemDto>?>(null) }
     val scope = rememberCoroutineScope()
-    // A fetch that ends after the screen was covered asks once it is back on top, not over another screen.
+    // If the fetch ends after the screen was covered, the question waits until the screen is back on top.
     pending?.takeIf { LocalShown.current.value }?.let { eps ->
         val total = eps.mapNotNull { it.mediaSources?.firstOrNull()?.size }.takeIf { it.size == eps.size }?.sum()
         Confirm("Download ${eps.size} episode${if (eps.size == 1) "" else "s"}" + (total?.let { ", about ${formatBytes(it)}" } ?: "") + "?", "Download", {
@@ -289,7 +289,7 @@ private fun BarMenu(content: @Composable (close: () -> Unit) -> Unit) {
     }
 }
 
-/** "Mark played" for many episodes at once; asks first, as it drops their resume points. */
+/** "Mark played" for many episodes at once. Asks first, because it drops their resume points. */
 @Composable
 private fun markAllAction(onChanged: () -> Unit): (List<BaseItemDto>) -> Unit {
     var asking by remember { mutableStateOf<List<BaseItemDto>?>(null) }
@@ -372,8 +372,8 @@ private fun Loaded(load: Load, onRetry: () -> Unit, onDownloads: () -> Unit, con
                 if (App.downloads != null) TextButton(onClick = onDownloads) { Text("Downloads") }
             }
         }
-        // The note about a failed refresh goes under the list, which shrinks from below: a note above it would push down
-        // what is under the pointer.
+        // The note about a failed refresh goes under the list, so the list shrinks from below. A note above it would push
+        // down whatever is under the pointer.
         else -> Column(Modifier.fillMaxSize()) {
             Box(Modifier.weight(1f)) { content(result.getOrThrow()) }
             load.refreshError?.let { e ->
@@ -392,11 +392,9 @@ private fun Loaded(load: Load, onRetry: () -> Unit, onDownloads: () -> Unit, con
 @Composable
 private fun Empty(text: String) = Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) { Text(text) }
 
-// --- login --------------------------------------------------------------------------------------
-
 @Composable
 fun LoginScreen(modifier: Modifier, onBack: (() -> Unit)? = null, onDone: () -> Unit) {
-    // Adding an account: another user of the same server, which stays as it is.
+    // Adding an account logs in another user of the same server, so the server fields are locked.
     val adding = onBack != null
     val saved = remember { splitServerAddress(App.prefs.baseUrl) }
     var url by rememberSaveable { mutableStateOf(saved.first) }
@@ -430,7 +428,7 @@ fun LoginScreen(modifier: Modifier, onBack: (() -> Unit)? = null, onDone: () -> 
             Text(if (adding) "Add account" else "finimal", style = MaterialTheme.typography.headlineMedium)
         }
         if (App.sessionExpired && !adding) Text("The server ended this session. Log in again; unsynced progress is kept.")
-        // The port apart, prefilled from the host; one written into the server field wins (see serverCandidates).
+        // The port has its own field, prefilled from the host. A port typed into the server field wins (see serverCandidates).
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             OutlinedTextField(url, { url = it; error = null; if (!portEdited) defaultPortFor(it)?.let { p -> port = p } }, label = { Text("Server") }, placeholder = { Text("jellyfin.example.com") }, singleLine = true, enabled = !busy && !adding,
                 modifier = Modifier.weight(1f), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Next))
@@ -460,14 +458,12 @@ fun LoginScreen(modifier: Modifier, onBack: (() -> Unit)? = null, onDone: () -> 
     }
 }
 
-// --- browsing -------------------------------------------------------------------------------------
-
 @Composable
 fun LibrariesScreen(modifier: Modifier, push: (Screen) -> Unit) {
     var refresh by remember { mutableIntStateOf(0) }
     val libs = loadFresh(refresh = refresh) { App.server.libraries() }
     var me by remember { mutableStateOf(App.prefs.accounts().firstOrNull { it.userId == App.prefs.userId }) }
-    // Accounts from before names were kept: the name comes from the server once.
+    // Accounts migrated from before names were stored have an empty name. Fetch it from the server once.
     LaunchedEffect(Unit) {
         val m = me?.takeIf { it.name.isEmpty() } ?: return@LaunchedEffect
         runCatching { App.server.userName() }.getOrNull()?.takeIf { it.isNotEmpty() }?.let { App.prefs.setName(m.userId, it); me = m.copy(name = it) }
@@ -504,7 +500,7 @@ fun LibraryScreen(modifier: Modifier, screen: Screen.Library, push: (Screen) -> 
     val searchOnly = screen.id == null
     val focus = remember { FocusRequester() }
     val keyboard = LocalSoftwareKeyboardController.current
-    var focusedOnce by rememberSaveable { mutableStateOf(false) } // not again when coming back
+    var focusedOnce by rememberSaveable { mutableStateOf(false) } // Don't grab focus again when coming back.
     LaunchedEffect(Unit) { if (searchOnly && !focusedOnce) { focusedOnce = true; focus.requestFocus(); keyboard?.show() } }
     val items = if (searchOnly && query.isBlank()) Load(Result.success(emptyList()), null)
         else loadFresh(screen.id, sort, unplayed, query, refresh = refresh, persist = query.isBlank()) { App.server.items(screen.id, sort, unplayed, query) }
@@ -553,7 +549,7 @@ private fun Poster(
     onStartOver: (() -> Unit)? = null,
     onChanged: (() -> Unit)? = null,
 ) {
-    // Derived: a local change then recomposes only the row whose state it changed, not every row.
+    // Derived, so a local change recomposes only the row whose state it changed, not every row.
     val local by remember(item) { derivedStateOf { item.localState() } }
     val (state, unsynced) = local
     var menu by remember { mutableStateOf(false) }
@@ -581,7 +577,7 @@ private fun Poster(
             }
             if (unsynced) Text("not synced", color = Color.White, style = MaterialTheme.typography.labelSmall,
                 modifier = Modifier.align(Alignment.BottomStart).padding(bottom = if (focused) 7.dp else 4.dp).background(Color(0xAA000000)))
-            ProgressBar(item, state, Modifier.align(Alignment.BottomStart).padding(if (focused) 3.dp else 0.dp)) // inside the focus border
+            ProgressBar(item, state, Modifier.align(Alignment.BottomStart).padding(if (focused) 3.dp else 0.dp)) // Stays inside the focus border.
             onChanged?.let { ItemMenu(item, state?.played == true, unsynced, menu, { menu = false }, download != null, onStartOver, it) }
         }
         Text(item.name.orEmpty(), maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall)
@@ -592,7 +588,7 @@ private fun Poster(
 fun SeriesScreen(modifier: Modifier, screen: Screen.Series, push: (Screen) -> Unit, pop: () -> Unit) {
     var refresh by remember { mutableIntStateOf(0) }
     val seasons = loadFresh(screen.id, refresh = refresh) { App.server.seasons(screen.id) }
-    // Every episode, for Continue; a show with one season lists them here instead of a one-row season list.
+    // Every episode, for Continue. A show with one season lists its episodes here instead of a one-row season list.
     val episodes = loadFresh(screen.id, "episodes", refresh = refresh) { App.server.episodes(screen.id) }
     val statuses = rememberDownloadStatuses()
     var keepNext by remember { mutableIntStateOf(App.prefs.keepNext(screen.id)) }
@@ -602,7 +598,7 @@ fun SeriesScreen(modifier: Modifier, screen: Screen.Series, push: (Screen) -> Un
     val all = episodes.result?.getOrNull()
     val onlySeason = seasons.result?.getOrNull()?.singleOrNull()
     val shownEpisodes = onlySeason?.let { s -> all?.filter { it.seasonId == s.id } }
-    // With one season the rows are its episodes; with several, "all" is the series' episodes outside specials.
+    // With one season, "all" means its episodes as shown. With several, it means every episode outside the specials.
     val markable = (shownEpisodes ?: all?.filter { it.parentIndexNumber != 0 && it.locationType != LocationType.VIRTUAL })?.takeIf { it.isNotEmpty() }
     Column(modifier.fillMaxSize()) {
         Bar(screen.name, pop) {
@@ -624,7 +620,7 @@ fun SeriesScreen(modifier: Modifier, screen: Screen.Series, push: (Screen) -> Un
                 App.platform.scheduleHousekeeping()
             }
         }
-        val listState = rememberLazyListState() // outside Loaded, so the scroll survives its "Loading…" pass
+        val listState = rememberLazyListState() // Outside Loaded, so the scroll survives its "Loading…" pass.
         Loaded(seasons, { refresh++ }, { push(Screen.Downloads) }) { list ->
             if (list.isEmpty()) Empty("This series has no seasons")
             else if (shownEpisodes != null) LazyColumn(state = listState) {
@@ -642,7 +638,7 @@ fun SeriesScreen(modifier: Modifier, screen: Screen.Series, push: (Screen) -> Un
                     }).padding(16.dp)) {
                         Text(season.name.orEmpty(), Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
                         val left = season.userData?.unplayedItemCount ?: 0
-                        // From the server, so it lags local plays until the next sync; episode rows show local state.
+                        // This count comes from the server, so it lags local plays until the next sync. Episode rows show local state.
                         Text(if (left == 0) "✓" else "$left unplayed", Modifier.semantics { if (left == 0) contentDescription = "Played" })
                     }
                     HorizontalDivider()
@@ -657,14 +653,14 @@ fun SeasonScreen(modifier: Modifier, screen: Screen.Season, push: (Screen) -> Un
     var refresh by remember { mutableIntStateOf(0) }
     val episodes = loadFresh(screen.seasonId, refresh = refresh) { App.server.episodes(screen.seriesId, screen.seasonId) }
     val statuses = rememberDownloadStatuses()
-    val listState = rememberLazyListState() // outside Loaded, so the scroll survives its "Loading…" pass when coming back
+    val listState = rememberLazyListState() // Outside Loaded, so the scroll survives its "Loading…" pass when coming back.
     val scope = rememberCoroutineScope()
     val downloadAll = downloadAllAction { App.server.episodes(screen.seriesId, screen.seasonId, sources = true) }
     val markAll = markAllAction { refresh++ }
     val list = episodes.result?.getOrNull()
-    // Within this season only: a season nobody started has no up-next to point at.
+    // Only highlight up-next within a season someone has started; an untouched season has nothing to point at.
     val next = list?.takeIf { l -> l.any { it.localState().first?.lastPlayedMs != null } }?.let(::upNext)
-    var scrolled by rememberSaveable { mutableStateOf(false) } // once; coming back keeps the scroll
+    var scrolled by rememberSaveable { mutableStateOf(false) } // Scroll to up-next only once; coming back keeps the user's scroll.
     LaunchedEffect(next != null) {
         val i = list.orEmpty().indexOf(next)
         if (!scrolled && i > 0) { scrolled = true; listState.scrollToItem(i - 1) }
@@ -719,7 +715,7 @@ fun EpisodeRow(
     onStartOver: (() -> Unit)? = null,
     onChanged: () -> Unit = {},
 ) {
-    // Derived: a local change then recomposes only the row whose state it changed, not every row.
+    // Derived, so a local change recomposes only the row whose state it changed, not every row.
     val local by remember(ep) { derivedStateOf { ep.localState() } }
     val (state, unsynced) = local
     var menu by remember { mutableStateOf(false) }
@@ -795,13 +791,11 @@ private fun ItemMenu(item: BaseItemDto, played: Boolean, unsynced: Boolean, expa
     }
 }
 
-// --- downloads ------------------------------------------------------------------------------------
-
 @Composable
 fun DownloadsScreen(modifier: Modifier, push: (Screen) -> Unit, pop: () -> Unit) {
-    val media = App.downloads!! // the screen is only offered where there are downloads
+    val media = App.downloads!! // The screen is only offered where there are downloads.
     val statuses = rememberDownloadStatuses()
-    // (header key, header, status): unfinished first in queue order, then finished by series, movies last.
+    // Triples of (header key, header, status): unfinished first in queue order, then finished by series, with movies last.
     val downloads = remember(statuses) {
         val (done, queue) = statuses.orEmpty().values.partition { it.fill == Fill.DONE }
         queue.sortedWith(compareBy(queueOrder) { it.download }).map { Triple("h-queue", "Queue", it) } +
@@ -864,12 +858,10 @@ fun DownloadsScreen(modifier: Modifier, push: (Screen) -> Unit, pop: () -> Unit)
     }
 }
 
-// --- settings -------------------------------------------------------------------------------------
-
 @Composable
 fun SettingsScreen(modifier: Modifier, pop: () -> Unit, onAccounts: () -> Unit, onLoggedOut: () -> Unit) {
     val p = App.prefs
-    var refresh by remember { mutableIntStateOf(0) } // bumps to redraw after a pref changes
+    var refresh by remember { mutableIntStateOf(0) } // Bumped to redraw after a pref changes.
     @Composable
     fun toggle(label: String, value: Boolean, enabled: Boolean = true, set: (Boolean) -> Unit) = Row(
         Modifier.fillMaxWidth().toggleable(value, enabled = enabled, role = Role.Switch) { set(it); refresh++ }.padding(horizontal = 16.dp, vertical = 4.dp),
@@ -908,14 +900,14 @@ fun SettingsScreen(modifier: Modifier, pop: () -> Unit, onAccounts: () -> Unit, 
                 if (android) toggle("Buffer to end on metered networks", p.bufferOnMetered) { p.bufferOnMetered = it }
                 if (android && downloads != null) toggle("Download on metered networks", p.downloadOnMetered) { p.downloadOnMetered = it; downloads.kickDownloads(restart = true) }
                 Stepper("Buffer cache limit (GB)", p.cacheLimitGb, listOf(1, 2, 5, 10, 20, 50, 100)) { p.cacheLimitGb = it; refresh++ }
-                if (downloads != null && (downloads.storageRoots().size > 1 || downloads.storageMissing)) { // missing: switching back is the way out of a lost card
+                if (downloads != null && (downloads.storageRoots().size > 1 || downloads.storageMissing)) { // When the card is missing, switching back to internal storage is the way out.
                     toggle("Store on SD card (switching deletes downloads and the buffer)", p.storageIndex > 0, enabled = !moving) {
                         moveTo = if (it) 1 else 0
                     }
                 }
 
                 Text("Playback", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(16.dp))
-                // Android applies it only while a wireless output is connected; the desktop can't tell, so always.
+                // Android applies the delay only while a wireless output is connected. The desktop can't tell, so it always applies it.
                 Stepper(if (android) "Wireless audio delay (ms), for Bluetooth headphones and speakers" else "Audio delay (ms)", p.audioDelayMs, AUDIO_DELAYS_MS) { App.platform.setAudioDelay(it); refresh++ }
                 Stepper("Skip step (s)", p.doubleTapSeconds, (5..60 step 5).toList()) { p.doubleTapSeconds = it; refresh++ }
                 // Files past these limits start as a transcode. Auto asks the hardware decoders per file.
@@ -928,7 +920,7 @@ fun SettingsScreen(modifier: Modifier, pop: () -> Unit, onAccounts: () -> Unit, 
                         FilterChip(p.maxHeight == h, { p.maxHeight = h; refresh++ }, { Text(label) })
                     }
                 }
-                // The desktop player decodes everything; the limit above is for bandwidth there.
+                // The desktop player decodes every codec, so there the height limit above only serves bandwidth.
                 if (android) Text("Direct play codecs", Modifier.padding(16.dp, 8.dp, 16.dp, 0.dp))
                 if (android) Row(Modifier.padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     listOf("Auto", "H.264 only", "All").forEachIndexed { i, label ->
@@ -973,7 +965,7 @@ fun SettingsScreen(modifier: Modifier, pop: () -> Unit, onAccounts: () -> Unit, 
     }
 }
 
-/** A right click does what a long press does: the mouse's way to an item's menu. Touch has no secondary button. */
+/** A right click does what a long press does, opening an item's menu with the mouse. Touch has no secondary button. */
 private fun Modifier.onSecondaryClick(action: (() -> Unit)?): Modifier = if (action == null) this else pointerInput(action) {
     awaitPointerEventScope {
         while (true) {
@@ -983,19 +975,19 @@ private fun Modifier.onSecondaryClick(action: (() -> Unit)?): Modifier = if (act
     }
 }
 
-/** − value + over [options]; a stored value off the list shows as the nearest. */
+/** A "− value +" control that steps through [options]. A stored value not in the list shows as the nearest option. */
 @Composable
 private fun Stepper(label: String, value: Int, options: List<Int>, show: (Int) -> String = Int::toString, set: (Int) -> Unit) =
     Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
         val i = options.indices.minBy { abs(options[it] - value) }
         Text(label, Modifier.weight(1f))
         TextButton(onClick = { set(options[i - 1]) }, enabled = i > 0) { Text("−", Modifier.semantics { contentDescription = "Decrease $label, now ${show(options[i])}" }) }
-        // A fixed width: "−" must not move under the pointer when the value gets a digit longer.
+        // A fixed width, so "−" doesn't move under the pointer when the value gets a digit longer.
         Text(show(options[i]), Modifier.widthIn(min = 48.dp), textAlign = TextAlign.Center, maxLines = 1)
         TextButton(onClick = { set(options[i + 1]) }, enabled = i < options.lastIndex) { Text("+", Modifier.semantics { contentDescription = "Increase $label, now ${show(options[i])}" }) }
     }
 
-/** Chapter starts as marks across a seek bar laid over them; the bar's ends sit [inset] in from its sides. */
+/** Draws chapter starts as marks under a seek bar laid over them. The bar's ends sit [inset] in from its sides. */
 @Composable
 fun ChapterMarks(chapters: List<Chapter>, durationMs: Long, modifier: Modifier, inset: androidx.compose.ui.unit.Dp = 10.dp) =
     androidx.compose.foundation.Canvas(modifier) {
@@ -1007,8 +999,6 @@ fun ChapterMarks(chapters: List<Chapter>, durationMs: Long, modifier: Modifier, 
             drawLine(Color.White, androidx.compose.ui.geometry.Offset(x, center.y - half), androidx.compose.ui.geometry.Offset(x, center.y + half), 2.dp.toPx())
         }
     }
-
-// --- accounts -------------------------------------------------------------------------------------
 
 /** The account's initial in a circle. */
 @Composable
@@ -1073,7 +1063,7 @@ private fun PinDialog(title: String, onDismiss: () -> Unit, onPin: (String) -> B
     // Typing goes straight in, from a keyboard or a TV remote's number keys.
     val focus = remember { FocusRequester() }
     LaunchedEffect(Unit) { focus.requestFocus() }
-    // A wrong PIN clears; focus goes back to the field, as the now disabled OK can't keep it.
+    // A wrong PIN clears the field, and focus goes back to it, because the now disabled OK button can't keep focus.
     fun submit() { if (!onPin(pin)) { wrong = true; pin = ""; focus.requestFocus() } }
     AlertDialog(onDismiss,
         title = { Text(title) },

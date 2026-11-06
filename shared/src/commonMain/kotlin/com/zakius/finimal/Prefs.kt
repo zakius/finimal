@@ -5,7 +5,10 @@ import kotlinx.serialization.json.Json
 import java.security.MessageDigest
 import java.security.SecureRandom
 
-/** A login kept on this device. [pin] is "salt:hash" ([Prefs.pinHash]); a household lock, not security: the token sits beside it. */
+/**
+ * A login kept on this device. [pin] is "salt:hash" (see [Prefs.pinHash]). The PIN is only a household lock,
+ * not security, because the token is stored right beside it.
+ */
 @Serializable
 data class Account(val userId: String, val name: String, val token: String, val pin: String? = null)
 
@@ -16,12 +19,12 @@ class Prefs(private val p: KeyValueStore) {
     /** Server clock minus device clock, from the last response; see [Server.now]. */
     var clockOffsetMs by long("clockOffsetMs")
 
-    /** The accounts on [baseUrl]: one server, its users. The current one is [userId], with its token in [token]. */
+    /** The accounts on [baseUrl]; only one server is kept at a time. The current account is [userId], with its token in [token]. */
     fun accounts(): List<Account> = (p["accounts"] as String?)?.let { runCatching { json.decodeFromString<List<Account>>(it) }.getOrNull() }.orEmpty()
 
     /**
-     * Adds or refreshes [user]'s account and makes it current, in one write, so a kill in between can't leave a token
-     * without its user. Another server replaces every account: one server at a time.
+     * Adds or refreshes [user]'s account and makes it current in one write, so a kill in between can't leave a token
+     * without its user. Logging in to a different server replaces every account.
      */
     fun login(url: String, token: String, user: String, name: String) {
         val kept = if (url == baseUrl) accounts().filter { it.userId != user } else emptyList()
@@ -32,7 +35,7 @@ class Prefs(private val p: KeyValueStore) {
     fun switchTo(a: Account) = p.edit { put("token", a.token); put("userId", a.userId) }
 
     fun setPin(userId: String, pin: String?) = update(userId) { it.copy(pin = pin?.let(::pinHash)) }
-    /** Accounts from before names were kept get theirs from the server. */
+    /** Fills in the name of an account migrated from before names were stored (see init). */
     fun setName(userId: String, name: String) = update(userId) { it.copy(name = name) }
     private fun update(userId: String, change: (Account) -> Account) =
         p.edit { put("accounts", json.encodeToString(accounts().map { if (it.userId == userId) change(it) else it })) }
@@ -54,7 +57,7 @@ class Prefs(private val p: KeyValueStore) {
     /** Applied only while a wireless output is connected; see [AudioDelay]. */
     var audioDelayMs by int("audioDelayMs", 0)
     var storageIndex by int("storageIndex", 0)
-    /** 0 picks by device ([Platform.autoTv]), 1 touch, 2 TV. */
+    /** 0 picks by device ([Platform.autoTv]), 1 forces touch, 2 forces TV. */
     var interfaceMode by int("interfaceMode", 0)
 
     /** Direct play limits; see [finimal.core.playsDirectly]. 0 is Auto. */
@@ -94,11 +97,11 @@ class Prefs(private val p: KeyValueStore) {
     /** The server ended the session: logged out, the account and its PIN kept for logging in again. */
     fun endSession() = p.edit { put("token", null); put("userId", null) }
 
-    /** Settings that follow the account rather than the device: under "<userId>/". */
+    /** The key for a setting that follows the account rather than the device. */
     private fun u(key: String) = "$userId/$key"
 
     init {
-        // Before accounts, one login and its settings unprefixed: they become the first account's.
+        // Versions without multiple accounts stored one login and its settings without a user prefix. Move them to the first account.
         val user = userId
         val token = token
         if (p["accounts"] == null && user != null && token != null) {

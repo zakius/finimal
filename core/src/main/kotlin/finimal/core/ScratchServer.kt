@@ -9,12 +9,12 @@ import java.util.UUID
 import kotlin.concurrent.thread
 
 /**
- * Serves [Scratch] entries over HTTP on the loopback interface, so any player streams through the chunks on disk.
- * Each request is a reader [Scratch.Demand]: the filler fetches [ahead] bytes in front of what was sent. The path
- * carries a random token: other apps on the device can reach a loopback port too.
+ * Serves [Scratch] entries over HTTP on the loopback interface, so any player can stream from the chunks on disk.
+ * Each request opens a reader [Scratch.Demand], and the filler fetches [ahead] bytes beyond what was sent. The path
+ * carries a random token because other apps on the device can reach a loopback port too.
  */
 class ScratchServer(private val scratch: () -> Scratch, private val ahead: Long = 64L * 1024 * 1024, private val waitMs: Long = 20_000) : Closeable {
-    // Not getLoopbackAddress(): on Android that can be ::1, which the 127.0.0.1 in [url] doesn't reach.
+    // Not getLoopbackAddress(), which on Android can be ::1, and the 127.0.0.1 in [url] doesn't reach that.
     private val socket = ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"))
     private val token = UUID.randomUUID().toString()
 
@@ -23,15 +23,15 @@ class ScratchServer(private val scratch: () -> Scratch, private val ahead: Long 
             while (!socket.isClosed) {
                 val client = try { socket.accept() } catch (e: IOException) { break }
                 thread(name = "scratch-client", isDaemon = true) {
-                    // The player hangs up mid-body all the time (a seek, probing the index at the end). On Android an
-                    // exception escaping a thread ends the app.
+                    // The player often hangs up mid-body, on a seek or after probing the index at the end. Swallow it,
+                    // because on Android an exception escaping a thread kills the app.
                     try { client.use(::serve) } catch (e: IOException) {}
                 }
             }
         }
     }
 
-    /** For an entry that has its [Scratch.Entry.source] set. */
+    /** Works only for an entry whose [Scratch.Entry.source] is set. */
     fun url(key: String) = "http://127.0.0.1:${socket.localPort}/$token/$key"
 
     override fun close() = socket.close()
@@ -52,7 +52,7 @@ class ScratchServer(private val scratch: () -> Scratch, private val ahead: Long 
         val range = headers["range"]?.let { Regex("bytes=(\\d+)-(\\d*)").matchEntire(it) }
         val from = range?.groupValues?.get(1)?.toLong() ?: 0
         val demand = try { entry.demand(from, ahead, Scratch.Priority.READ) } catch (e: IllegalStateException) {
-            return respond("404 Not Found", "Content-Length: 0") // no source: not something this app opened
+            return respond("404 Not Found", "Content-Length: 0") // No source, so this app never opened it.
         }
         demand.use {
             val length = try { entry.awaitLength(waitMs) } catch (e: HttpStatus) {

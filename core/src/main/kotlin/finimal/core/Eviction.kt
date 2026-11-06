@@ -16,8 +16,8 @@ fun evictionOrder(entries: List<CacheEntry>, limitBytes: Long, protectedKey: Str
 }
 
 /**
- * The buffer limit, lowered so the volume keeps max(2 GB, 5 %) free: a full disk fails downloads,
- * play-state writes and other apps, and the setting alone can't know how much room is left.
+ * The buffer limit, lowered so the volume keeps 2 GB or 5 % free, whichever is more. A full disk breaks
+ * downloads, play-state writes and other apps, and the setting alone can't know how much room is left.
  */
 fun bufferLimit(limitBytes: Long, bufferedBytes: Long, freeBytes: Long, volumeBytes: Long): Long =
-    minOf(limitBytes, bufferedBytes + freeBytes - maxOf(2_000_000_000L, volumeBytes / 20)).coerceAtLeast(0)
+    minOf(limitBytes, bufferedBytes + freeBytes - maxOf(2_000_000_000L, volumeBytes * 5 / 100)).coerceAtLeast(0)

@@ -23,7 +23,7 @@ class ScratchTest {
     /** Not a multiple of the chunk size, so the last chunk is short. */
     private val content = ByteArray(16 * chunk + 1234) { (it * 31 % 251).toByte() }
 
-    // Origin knobs.
+    // How the test origin server behaves. Each test sets what it needs.
     @Volatile private var honorRange = true
     @Volatile private var status = 200
     @Volatile private var failFirst = 0

@@ -32,10 +32,10 @@ private interface Kernel32 : com.sun.jna.Library {
 }
 
 /**
- * Keeps the screen on while a video plays. mpv does this itself only with its own window; embedded, it's ours to do.
- * Linux: the desktop portal's Inhibit (what a Flatpak may use), else org.freedesktop.ScreenSaver. Windows:
- * SetThreadExecutionState, which holds while the thread that set it lives, so everything runs on one worker thread,
- * which also keeps a slow D-Bus from holding up the player.
+ * Keeps the screen on while a video plays. mpv does this itself only when it has its own window, so the embedded
+ * player must do it here. On Linux it uses the desktop portal's Inhibit (which a Flatpak may use), falling back to
+ * org.freedesktop.ScreenSaver. On Windows it uses SetThreadExecutionState, which holds only while the thread that set
+ * it lives. So everything runs on one worker thread, which also keeps a slow D-Bus from holding up the player.
  */
 object ScreenSaver {
     private val worker = Executors.newSingleThreadExecutor { Thread(it, "screensaver").apply { isDaemon = true } }
@@ -48,7 +48,7 @@ object ScreenSaver {
         release = runCatching { hold() }.onFailure { System.err.println("finimal: can't keep the screen on: $it") }.getOrNull()
     }
 
-    /** For --check-player on Windows: sets and clears the state as playing would, on the same thread; throws if it can't. */
+    /** For --check-player on Windows. Sets and clears the state on the worker thread as playback would, and throws if it can't. */
     fun checkWindows() {
         if (!System.getProperty("os.name").startsWith("Windows")) return
         worker.submit { hold()!!.invoke() }.get()
@@ -57,9 +57,8 @@ object ScreenSaver {
     private fun hold(): (() -> Unit)? {
         if (System.getProperty("os.name").startsWith("Windows")) {
             val kernel = com.sun.jna.Native.load("kernel32", Kernel32::class.java)
-            // ES_CONTINUOUS alone clears the other flags.
             check(kernel.SetThreadExecutionState(ES_CONTINUOUS or ES_DISPLAY_REQUIRED or ES_SYSTEM_REQUIRED) != 0) { "SetThreadExecutionState failed" }
-            return { kernel.SetThreadExecutionState(ES_CONTINUOUS) }
+            return { kernel.SetThreadExecutionState(ES_CONTINUOUS) } // ES_CONTINUOUS alone clears the other flags.
         }
         val conn = bus ?: DBusConnectionBuilder.forSessionBus().build().also { bus = it }
         return runCatching {
@@ -79,4 +78,4 @@ object ScreenSaver {
 private const val ES_CONTINUOUS = 0x80000000.toInt()
 private const val ES_DISPLAY_REQUIRED = 0x2
 private const val ES_SYSTEM_REQUIRED = 0x1
-private const val INHIBIT_IDLE = 8
+private const val INHIBIT_IDLE = 8L

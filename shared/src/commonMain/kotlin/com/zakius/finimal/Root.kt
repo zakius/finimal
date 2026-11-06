@@ -72,7 +72,7 @@ sealed interface Screen {
 @Composable
 fun Theme(content: @Composable () -> Unit) {
     val colors = platformColors(isSystemInDarkTheme())
-    // Material's focus highlight (10%) can't be seen from a sofa; this is what shows where the D-pad is.
+    // Material's default 10% focus highlight can't be seen from a sofa, and it is the only sign of where D-pad focus is.
     val ripple = RippleConfiguration(rippleAlpha = RippleAlpha(draggedAlpha = 0.16f, focusedAlpha = 0.35f, hoveredAlpha = 0.08f, pressedAlpha = 0.1f))
     MaterialTheme(colorScheme = colors) {
         CompositionLocalProvider(LocalRippleConfiguration provides ripple) { Surface(Modifier.fillMaxSize(), content = content) }
@@ -80,8 +80,8 @@ fun Theme(content: @Composable () -> Unit) {
 }
 
 /**
- * The screen stack. [player] plays an item: each platform has its own. [openDownloads] pushes Downloads once, for the
- * download notification.
+ * The screen stack. [player] is the platform's own player for an item. [openDownloads] pushes Downloads once, when the
+ * download notification is tapped.
  */
 @Composable
 fun Root(openDownloads: Boolean, openedDownloads: () -> Unit, player: @Composable (itemId: String, onBack: () -> Unit, onPlay: (String) -> Unit) -> Unit) {
@@ -94,7 +94,7 @@ fun Root(openDownloads: Boolean, openedDownloads: () -> Unit, player: @Composabl
 
     // Each stack entry keeps its UI state (scroll, sort, search) while covered; leaving the stack drops it.
     val saved = rememberSaveableStateHolder()
-    // Bumped by reset: a fresh Libraries after switching accounts must not be the old one's composition.
+    // Bumped by reset, so a fresh Libraries screen after switching accounts doesn't reuse the old account's composition.
     var epoch by rememberSaveable { mutableIntStateOf(0) }
     fun keyOf(i: Int) = "$epoch:$i:${stack[i]}"
     fun push(s: Screen) = stack.add(s)
@@ -103,9 +103,9 @@ fun Root(openDownloads: Boolean, openedDownloads: () -> Unit, player: @Composabl
 
     NavigationBackHandler(rememberNavigationEventState(NavigationEventInfo.None), isBackEnabled = stack.size > 1, onBackCompleted = ::pop)
     LaunchedEffect(openDownloads) {
-        // Not over "Who's watching?": the account still loaded there may have a PIN.
+        // Never open over "Who's watching?", because the account still loaded there may be protected by a PIN.
         if (openDownloads && App.prefs.loggedIn && stack.first() != Screen.Accounts && stack.last() != Screen.Downloads) {
-            // A covered player would play on unseen, and a download opened from the list would start a second one.
+            // Close the player first: covered, it would keep playing unseen, and opening a download from the list would start a second one.
             if (stack.last() is Screen.Play) pop()
             push(Screen.Downloads)
         }
@@ -113,22 +113,22 @@ fun Root(openDownloads: Boolean, openedDownloads: () -> Unit, player: @Composabl
     }
     LaunchedEffect(App.sessionExpired) { if (App.sessionExpired) reset(Screen.Login) }
     val topKey = keyOf(stack.lastIndex)
-    // D-pad focus stays on a covered screen's item otherwise; the screen coming back on top takes its own back.
+    // Otherwise D-pad focus would stay on an item of the covered screen. A screen coming back on top restores its own focus.
     val focus = LocalFocusManager.current
     LaunchedEffect(topKey) { focus.clearFocus(force = true) }
-    // TVs may crop the picture's edges (overscan); Android TV's guideline margin keeps the UI inside.
+    // TVs may crop the picture's edges (overscan). These are Android TV's recommended margins, which keep the UI inside.
     val padded = Modifier.safeDrawingPadding().then(if (App.tv) Modifier.padding(horizontal = 48.dp, vertical = 27.dp) else Modifier)
     val back = rememberVectorPainter(Icons.AutoMirrored.Filled.ArrowBack)
     val more = rememberVectorPainter(Icons.Default.MoreVert)
     val settings = rememberVectorPainter(Icons.Default.Settings)
     val play = rememberVectorPainter(Icons.Default.PlayArrow)
     val icons = remember(back, more, settings, play) { ListIcons(back, more, settings, play) }
-    // Covered screens stay composed, so going back only lays out and draws: rebuilding the poster grid took 13 ms of the
-    // main thread on the phone (2026-10-26). Screens read LocalShown to pause their own work while covered.
-    // key() gives each entry its own state, so the next episode never inherits the previous player.
+    // Covered screens stay composed so that going back only lays out and draws. Rebuilding the poster grid cost about
+    // 13 ms of main-thread time on a phone. Screens read LocalShown to pause their own work while covered.
+    // key() gives each entry its own state, so the next episode never inherits the previous player's state.
     CompositionLocalProvider(LocalIcons provides icons) { stack.forEachIndexed { i, screen -> key(keyOf(i)) {
         val shown = i == stack.lastIndex
-        // A State, not a value: screens watch it from their effects, so covering or uncovering one recomposes nothing.
+        // Passed as a State rather than a value: screens watch it from their effects, so covering or uncovering a screen recomposes nothing.
         val shownState = rememberUpdatedState(shown)
         Box(if (shown) Modifier.fillMaxSize() else Modifier.hidden(), propagateMinConstraints = true) {
             CompositionLocalProvider(LocalShown provides shownState) { saved.SaveableStateProvider(keyOf(i)) { FocusMemory { when (screen) {
@@ -149,8 +149,8 @@ fun Root(openDownloads: Boolean, openedDownloads: () -> Unit, player: @Composabl
 }
 
 /**
- * At a cold start with several accounts, who is watching; the only one opens at once. Logged out with accounts left,
- * the picker too: one of them may have a PIN.
+ * At a cold start with several accounts, the first screen asks who is watching; a single account opens at once. When
+ * logged out with saved accounts left, the picker shows too, because one of them may have a PIN.
  */
 private fun startScreen() = when {
     App.prefs.accounts().size > 1 || !App.prefs.loggedIn && App.prefs.accounts().isNotEmpty() -> Screen.Accounts
@@ -159,17 +159,17 @@ private fun startScreen() = when {
 }
 
 /**
- * The list screens' icons, one painter each for the whole activity. Each Icon otherwise renders its own bitmap, and
- * the first bitmap a frame uploads stalled the main thread 7 to 8 ms on the phone's GPU driver (2026-10-26): once
- * per screen opened. The player keeps its own: its play icon is bigger, and a shared painter redraws at each size.
+ * The list screens' icons, one painter each for the whole activity. Otherwise each Icon renders its own bitmap, and on
+ * a phone's GPU driver the first bitmap a frame uploads stalled the main thread for 7 to 8 ms on every screen opened.
+ * The player keeps its own icons: its play icon is bigger, and a shared painter would redraw at each size.
  */
 class ListIcons(val back: Painter, val more: Painter, val settings: Painter, val play: Painter)
 val LocalIcons = staticCompositionLocalOf<ListIcons> { error("provided by Root") }
 
-/** False while another screen covers this one; see Root. Read it in effects (snapshotFlow), not in composition. */
+/** False while another screen covers this one (see Root). Read it in effects through snapshotFlow, not in composition. */
 val LocalShown = staticCompositionLocalOf<State<Boolean>> { mutableStateOf(true) }
 
-// Composed but never measured or placed: not drawn or touched, and no semantics for accessibility services.
+// Composed but laid out at zero size and never placed, so it is not drawn, gets no touches, and exposes no semantics to accessibility services.
 private fun Modifier.hidden() = clearAndSetSemantics {}.layout { _, c -> layout(c.minWidth, c.minHeight) {} }
 
 fun episodeLabel(ep: BaseItemDto) = "S${ep.parentIndexNumber ?: "?"}E${ep.indexNumber ?: "?"} · ${ep.name.orEmpty()}"
@@ -179,7 +179,7 @@ fun formatMs(ms: Long): String {
     return if (s >= 3600) "%d:%02d:%02d".format(s / 3600, s / 60 % 60, s % 60) else "%d:%02d".format(s / 60, s % 60)
 }
 
-/** In season order, never the server's Next Up; specials and missing episodes are skipped. */
+/** The next episode in season order, never the server's Next Up. Specials and missing episodes are skipped. */
 fun nextEpisode(item: BaseItemDto, siblings: List<BaseItemDto>): BaseItemDto? {
     val playable = siblings.filter { it.parentIndexNumber != 0 && it.locationType != LocationType.VIRTUAL }
     return playable.getOrNull(playable.indexOfFirst { it.id == item.id } + 1)?.takeIf { playable.any { p -> p.id == item.id } }
@@ -188,16 +188,16 @@ fun nextEpisode(item: BaseItemDto, siblings: List<BaseItemDto>): BaseItemDto? {
 fun playerTitle(item: BaseItemDto) =
     if (item.type == BaseItemKind.EPISODE) "${item.seriesName.orEmpty()} · ${episodeLabel(item)}" else item.name.orEmpty()
 
-/** The audio stream of [source] in language [lang], for a transcode, which carries one audio track. */
+/** The audio stream of [source] in language [lang], to pick for a transcode, which carries only one audio track. */
 fun audioIndex(source: MediaSourceInfo, lang: String) =
     source.mediaStreams?.firstOrNull { it.type == MediaStreamType.AUDIO && sameLanguage(it.language, lang) }?.index
 
-/** Players shorten codes ("ja"), the server keeps three letters ("jpn"). */
+/** Players use short codes ("ja") while the server keeps three letters ("jpn"). */
 fun sameLanguage(a: String?, b: String?) = a != null && b != null &&
     runCatching { Locale.forLanguageTag(a).isO3Language == Locale.forLanguageTag(b).isO3Language }.getOrDefault(a == b)
 
 /**
- * Subtitle streams players add by URL or from a fetched copy: the server's separate files and, for a [transcode],
+ * Subtitle streams that players add by URL or from a fetched copy: the server's external files and, for a [transcode],
  * the embedded text ones, which the server extracts with their styling. A transcode drops embedded subtitles.
  */
 fun sideloadedSubs(item: BaseItemDto, transcode: Boolean): List<MediaStream> =
@@ -206,7 +206,7 @@ fun sideloadedSubs(item: BaseItemDto, transcode: Boolean): List<MediaStream> =
 
 /** For a transcode: a picture subtitle (PGS, VobSub) in [lang] to burn into the video, when no text one is in that language. */
 fun burnInIndex(source: MediaSourceInfo, lang: String?): Int? {
-    // "" is subtitles off, which "und" would otherwise match.
+    // "" means subtitles off. Without this check it would match streams of undetermined language ("und").
     if (lang.isNullOrEmpty()) return null
     val subs = source.mediaStreams.orEmpty().filter { it.type == MediaStreamType.SUBTITLE && sameLanguage(it.language, lang) }
     return subs.firstOrNull()?.takeIf { subs.none { s -> s.isTextSubtitleStream } }?.index
@@ -214,24 +214,22 @@ fun burnInIndex(source: MediaSourceInfo, lang: String?): Int? {
 
 class Chapter(val name: String, val startMs: Long)
 
-/** The file's chapters, from the server; a lone chapter is no chapters at all. */
+/** The file's chapters, from the server. A single chapter counts as no chapters at all. */
 fun chapters(item: BaseItemDto): List<Chapter> =
     item.chapters.orEmpty().map { Chapter(it.name.orEmpty(), it.startPositionTicks / TICKS_PER_MS) }.takeIf { it.size > 1 }.orEmpty()
 
 /** Choices for the wireless audio delay; negative values are for audio that arrives early. */
 val AUDIO_DELAYS_MS = (-200..500 step 50).toList()
 
-// --- per platform ------------------------------------------------------------------------------------
-
-/** Android 12+ takes the wallpaper's colours; elsewhere Material's defaults. */
+/** Android 12 and later use the wallpaper's colours; other platforms use Material's defaults. */
 @Composable
 internal expect fun platformColors(dark: Boolean): ColorScheme
 
-/** The smaller side of the window, in dp: the poster grid gets bigger cells on tablets and desktops. */
+/** The smaller side of the window, in dp. The poster grid uses it to give tablets and desktops bigger cells. */
 @Composable
 internal expect fun smallestWidthDp(): Int
 
-/** A short message over the UI: Android's toast; on the desktop a note at the bottom of the window. */
+/** A short message over the UI: a toast on Android, and a note at the bottom of the window on the desktop. */
 expect fun toast(text: String)
 
 /**

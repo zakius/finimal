@@ -36,13 +36,13 @@ object DesktopPlatform : Platform {
 
     override fun configure(options: JellyfinOptions.Builder) {
         val id = store["deviceId"] as String? ?: UUID.randomUUID().toString().also { id -> store.edit { put("deviceId", id) } }
-        // Not InetAddress.getLocalHost(): it resolves the name, which can stall seconds where it doesn't resolve (a sandbox).
+        // Not InetAddress.getLocalHost(), which resolves the name and can stall for seconds where that fails, as in a sandbox.
         val name = System.getenv("COMPUTERNAME") ?: runCatching { File("/proc/sys/kernel/hostname").readText().trim() }.getOrNull()
             ?.takeIf { it.isNotEmpty() } ?: "Desktop"
         options.deviceInfo = DeviceInfo(id, name)
     }
 
-    // No background job scheduler here: push unsynced progress now, while the app runs.
+    // The desktop has no background job scheduler, so push unsynced progress now, while the app runs.
     override fun scheduleHousekeeping() { scope.launch { App.server.flush() } }
     override fun askNotifications() {}
     override fun decoderSummary(): String? = null

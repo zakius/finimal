@@ -29,12 +29,13 @@ object AudioDelay {
     /** Called on the main thread when a wireless output connects or disconnects. */
     var onWirelessChanged: (() -> Unit)? = null
 
-    /** Starts tracking outputs once; the callback reports the current ones at once. */
+    /** Starts tracking outputs, once per process. The callback reports the outputs present at registration right away. */
     fun watch(context: Context) {
         ms = App.prefs.audioDelayMs
         if (watching) return
         watching = true
-        val am = context.applicationContext.getSystemService(AudioManager::class.java) // registered for good: never an activity
+        // The callback is never unregistered, so register it on the application context rather than an activity.
+        val am = context.applicationContext.getSystemService(AudioManager::class.java)
         am.registerAudioDeviceCallback(object : AudioDeviceCallback() {
             fun update() {
                 val now = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS).any { it.type in wirelessTypes }

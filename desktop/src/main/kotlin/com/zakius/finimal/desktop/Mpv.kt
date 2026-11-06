@@ -51,23 +51,25 @@ private interface LibMpv : Library {
 private interface LibC : Library { fun setlocale(category: Int, locale: String): Pointer? }
 
 private object Lib {
-    /** The runtime package ships only the versioned name (Debian's libmpv2: libmpv.so.2); Windows builds name the DLL libmpv-2. */
+    /** Linux runtime packages ship only the versioned name (Debian's libmpv2 has libmpv.so.2), and Windows builds name the DLL libmpv-2. */
     val mpv: LibMpv by lazy {
-        // libmpv refuses to start unless numbers parse the C way, and the JVM sets the user's locale (a decimal comma
-        // in Polish). LC_NUMERIC is 1 on Linux and 4 on macOS; Windows has no such check.
         val os = System.getProperty("os.name")
-        // Windows has no system libmpv: the app carries one in its resources folder. A newer libmpv-2.dll in
-        // %APPDATA%\finimal comes first, so mpv can be updated without a new finimal.
+        // Windows has no system libmpv, so the app ships one in its resources folder. A newer libmpv-2.dll in
+        // %APPDATA%\finimal takes precedence, so mpv can be updated without a new finimal release.
         val dirs = listOfNotNull(System.getenv("APPDATA")?.let { "$it\\finimal" }.takeIf { os.startsWith("Windows") },
             System.getProperty("compose.application.resources.dir"))
         if (dirs.isNotEmpty()) System.setProperty("jna.library.path", dirs.joinToString(java.io.File.pathSeparator))
-        if (!os.startsWith("Windows")) Native.load("c", LibC::class.java).setlocale(if (os.startsWith("Mac")) 4 else 1, "C")
+        // libmpv refuses to start unless numbers parse the C way, but the JVM sets the user's locale, which may use a
+        // decimal comma. Windows libmpv has no such check.
+        if (!os.startsWith("Windows")) Native.load("c", LibC::class.java).setlocale(if (os.startsWith("Mac")) LC_NUMERIC_MAC else LC_NUMERIC_LINUX, "C")
         val names = listOf("mpv", "libmpv.so.2", "libmpv-2", "mpv-2", "mpv-1")
         names.firstNotNullOfOrNull { runCatching { Native.load(it, LibMpv::class.java) }.getOrNull() }
             ?: throw UnsatisfiedLinkError("libmpv not found (tried ${names.joinToString()}). On Linux install libmpv2.")
     }
 }
 
+private const val LC_NUMERIC_LINUX = 1
+private const val LC_NUMERIC_MAC = 4
 private const val FORMAT_STRING = 1
 private const val FORMAT_FLAG = 3
 private const val FORMAT_DOUBLE = 5
@@ -85,8 +87,8 @@ private const val RENDER_UPDATE_FRAME = 1L
 
 /**
  * One libmpv player drawing into Skia bitmaps through mpv's software renderer, so Compose draws our controls over it.
- * Nothing here blocks the UI thread: commands go async, properties arrive as observed events (the Android mpv build
- * froze reading properties on the main thread while the core was busy), and frames render on their own thread.
+ * Nothing here blocks the UI thread. Commands run async, properties arrive as observed events, and frames render on
+ * their own thread. The Android mpv build froze when it read properties on the main thread while the core was busy.
  */
 class Mpv(options: Map<String, String>) {
     private val lib = Lib.mpv
@@ -107,29 +109,28 @@ class Mpv(options: Map<String, String>) {
     var error by mutableStateOf<String?>(null); private set
     /** Bumped when the track list changes, so menus re-read [tracks]. */
     var tracksChanged by mutableIntStateOf(0); private set
-    /** The latest frame. */
     var frame by mutableStateOf<ImageBitmap?>(null); private set
 
-    /** Runs on the event thread once a file is loaded: external subtitles, track choices. */
+    /** Runs on the event thread once a file is loaded, to add external subtitles and pick tracks. */
     var onLoaded: () -> Unit = {}
 
     private var render: Pointer? = null
     private lateinit var renderThread: Thread
     private lateinit var eventThread: Thread
-    /** Calls into the handle hold it shared; destroying it takes it alone, so no call ever runs on a freed handle. */
+    /** Calls into the handle hold this lock shared, and destroying the handle takes it exclusively, so no call ever runs on a freed handle. */
     private val handle = ReentrantReadWriteLock()
     private val renderSignal = Object()
     @Volatile private var dirty = false
     @Volatile private var closed = false
     @Volatile private var targetW = 0
     @Volatile private var targetH = 0
-    // Not the property of mpv's update callback alone: JNA would collect a callback nobody references.
+    // Held in a field because mpv's native reference doesn't keep it alive: JNA would garbage-collect a callback nothing in the JVM references.
     private val updateCallback = LibMpv.UpdateCallback { synchronized(renderSignal) { dirty = true; renderSignal.notifyAll() } }
 
     init {
-        // Ours first; config files and key bindings would only get in the way of an embedded player.
-        // No scripts: the built-in ones (stats, console, the ytdl hook, which runs yt-dlp on extension-less http URLs
-        // like the scratch proxy's) do nothing for an embedded player but cost start time.
+        // Config files and key bindings would only get in the way of an embedded player. Scripts are off because the
+        // built-in ones do nothing useful here but cost start time. The ytdl hook would even run yt-dlp on
+        // extension-less http URLs like the scratch proxy's.
         val defaults = mapOf("config" to "no", "input-default-bindings" to "no", "osc" to "no", "load-scripts" to "no", "ytdl" to "no",
             "vo" to "libmpv", "keep-open" to "yes", "hwdec" to "auto-copy", "idle" to "yes", "terminal" to "no")
         // FINIMAL_MPV_LOG=<file> keeps mpv's own log, for bug reports.
@@ -158,13 +159,13 @@ class Mpv(options: Map<String, String>) {
     private fun events() {
         while (true) {
             val e = lib.mpv_wait_event(ctx, -1.0)
-            // close() wakes this with an empty event; the handle is destroyed only after this thread is gone.
+            // close() wakes this thread with an empty event. The handle is destroyed only after this thread exits.
             if (closed) return
             when (e.getInt(0)) {
                 EVENT_SHUTDOWN -> return
                 EVENT_FILE_LOADED -> { onLoaded(); loaded = true; tracksChanged++ }
                 EVENT_END_FILE -> e.getPointer(16)?.let { d ->
-                    // Stopped or failed: no position left to report.
+                    // The file stopped or failed, so there is no position left to report.
                     loaded = false
                     if (d.getInt(0) == END_FILE_REASON_ERROR) error = "Playback failed (mpv error ${d.getInt(4)})."
                 }
@@ -175,7 +176,7 @@ class Mpv(options: Map<String, String>) {
                     val d = if (format == FORMAT_DOUBLE && data != null) data.getDouble(0) else null
                     val f = if (format == FORMAT_FLAG && data != null) data.getInt(0) != 0 else null
                     when (name) {
-                        // Every frame would recompose the player; a quarter second is what the clock and reports need.
+                        // Updating on every frame would recompose the player. A quarter second is enough for the clock and reports.
                         "time-pos" -> (d ?: 0.0).let { if (kotlin.math.abs(it - position) >= 0.25 || it == 0.0) position = it }
                         "duration" -> duration = d ?: 0.0
                         "demuxer-cache-time" -> cachedUntil = d ?: 0.0
@@ -195,7 +196,7 @@ class Mpv(options: Map<String, String>) {
         }
     }
 
-    /** The size frames render at, in pixels: the video area. */
+    /** Sets the size, in pixels, that frames render at, which is the video area. */
     fun resize(width: Int, height: Int) {
         if (width == targetW && height == targetH) return
         targetW = width
@@ -203,7 +204,7 @@ class Mpv(options: Map<String, String>) {
         synchronized(renderSignal) { dirty = true; renderSignal.notifyAll() }
     }
 
-    // Three bitmaps: Compose may still draw the last one while the next is written.
+    // Keeps up to three bitmaps, because Compose may still be drawing the previous one while the next is written.
     private val bitmaps = ArrayDeque<Bitmap>()
 
     private fun renderLoop() {
@@ -219,10 +220,10 @@ class Mpv(options: Map<String, String>) {
             val w = targetW
             val h = targetH
             if (w <= 0 || h <= 0) continue
-            // A resize redraws the last frame at the new size; mpv only announces new frames.
+            // mpv only announces new frames, so after a resize, redraw the last frame at the new size.
             if (flags and RENDER_UPDATE_FRAME == 0L && current?.width == w && current.height == h) continue
             val bitmap = bitmaps.removeFirstOrNull()?.takeIf { it.width == w && it.height == h }
-                ?: Bitmap().apply { allocPixels(ImageInfo(w, h, ColorType.BGRA_8888, ColorAlphaType.OPAQUE), (w * 4 + 63) / 64 * 64) }
+                ?: Bitmap().apply { allocPixels(ImageInfo(w, h, ColorType.BGRA_8888, ColorAlphaType.OPAQUE), roundUp(w * 4, 64)) }
             val pixels = bitmap.peekPixels() ?: continue
             val fields = listOf(
                 RENDER_PARAM_SW_SIZE to Memory(8).apply { setInt(0, w); setInt(4, h) },
@@ -233,7 +234,7 @@ class Mpv(options: Map<String, String>) {
             val params = renderParams(fields)
             if (closed) return
             lib.mpv_render_context_render(r, params)
-            // The native call reads them; until here nothing else references them, and freeing one would crash it.
+            // mpv reads these during the native call and nothing else references them, so the GC must not free them before here.
             Reference.reachabilityFence(fields)
             Reference.reachabilityFence(pixels)
             bitmap.notifyPixelsChanged()
@@ -244,7 +245,9 @@ class Mpv(options: Map<String, String>) {
         }
     }
 
-    /** mpv_render_param[], ending with the zero entry: { int type; void *data } is 16 bytes on 64-bit. */
+    private fun roundUp(n: Int, multiple: Int) = (n + multiple - 1) / multiple * multiple
+
+    /** Builds an mpv_render_param[] ending with a zero entry. Each { int type; void *data } entry is 16 bytes on 64-bit. */
     private fun renderParams(list: List<Pair<Int, Pointer>>): Memory {
         val m = Memory(16L * (list.size + 1)).apply { clear() }
         list.forEachIndexed { i, (type, data) -> m.setInt(16L * i, type); m.setPointer(16L * i + 8, data) }
@@ -260,8 +263,9 @@ class Mpv(options: Map<String, String>) {
     fun load(url: String, startSeconds: Double) {
         error = null
         loaded = false
-        // Not loadfile's per-file options: their position moved in mpv 0.38 (an index came first), and 0.37 (Ubuntu
-        // 24.04) refused the command. Commands run in order, so the start is set when the file opens.
+        // Set the start property rather than pass loadfile's per-file options. Their argument position moved in mpv 0.38,
+        // which added an index before them, and 0.37 (Ubuntu 24.04) rejects the newer form. Commands run in order, so
+        // the start is set by the time the file opens.
         set("start", "$startSeconds")
         command("loadfile", url, "replace")
     }
@@ -272,7 +276,7 @@ class Mpv(options: Map<String, String>) {
     fun pause() { pauseWanted = true; set("pause", "yes") }
     fun seek(seconds: Double, exact: Boolean = true) = command("seek", "$seconds", if (exact) "absolute+exact" else "absolute+keyframes")
 
-    /** Reads a property; for the event thread and menus, never the UI thread's frame path. */
+    /** Reads a property. Call it from the event thread or menus, never on the UI thread's frame path. */
     fun get(name: String): String? = handle.read {
         if (closed) return null
         val p = lib.mpv_get_property_string(ctx, name) ?: return null
@@ -281,14 +285,14 @@ class Mpv(options: Map<String, String>) {
 
     class Track(val id: String, val type: String, val language: String?, val title: String?, val selected: Boolean, val channels: Int?)
 
-    /** The track list; blocks on the core, so call it off the UI thread. */
+    /** Reads the track list. It blocks on the core, so call it off the UI thread. */
     fun tracks(): List<Track> = (0 until (get("track-list/count")?.toIntOrNull() ?: 0)).map { i ->
         val p = "track-list/$i/"
         Track(get("${p}id").orEmpty(), get("${p}type").orEmpty(), get("${p}lang"), get("${p}title"), get("${p}selected") == "yes",
             get("${p}demux-channel-count")?.toIntOrNull())
     }
 
-    /** Frees mpv off the calling thread: shutting the core down waits for its threads. */
+    /** Frees mpv off the calling thread, because shutting the core down waits for its threads. */
     fun close() {
         if (closed) return
         closed = true

@@ -23,7 +23,6 @@ own-account       | OwnAccountOnly | {"a", "b"} | TRUE  | pass
 own-account-flush | OwnAccountOnly | {"a", "b"} | FALSE | pass
 '
 
-# --- tools ------------------------------------------------------------------------------------
 if [[ ! -f "$JAR" ]]; then
   mkdir -p "$(dirname "$JAR")"
   curl -fsSL -o "$JAR.tmp" "https://github.com/tlaplus/tlaplus/releases/download/$TLA_VERSION/tla2tools.jar"
@@ -36,7 +35,6 @@ JAVA="${JAVA:-$(command -v java || true)}"
 [[ -z "$JAVA" ]] && JAVA="$(ls -d "$HOME"/toolchain/jdk-*/bin/java 2>/dev/null | tail -1 || true)"
 [[ -x "$JAVA" ]] || { echo "No java: set JAVA=/path/to/bin/java (11 or newer)." >&2; exit 2; }
 
-# --- drift: covered code changed since the sync commit? ----------------------------------------
 SYNC="$(sed -n 's/^Sync commit: `\([0-9a-f]*\)`.*/\1/p' "$HERE/SKILL.md")"
 COVERED=($(awk '/^## Coverage/{on=1;next} /^## /{on=0} on' "$HERE/SKILL.md" | grep -o '`[a-z][^`.]*/[^`]*\.kt`' | tr -d '`' | sort -u))
 drift=0
@@ -48,7 +46,6 @@ if ! git -C "$REPO" diff --quiet "$SYNC" -- "${COVERED[@]}"; then
   echo
 fi
 
-# --- check ------------------------------------------------------------------------------------
 OUT="$(mktemp -d "${TMPDIR:-/tmp}/play-state-sync.XXXXXX")"
 status=0
 while IFS='|' read -r run inv accounts reports expected; do

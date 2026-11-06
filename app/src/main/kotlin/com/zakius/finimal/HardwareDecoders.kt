@@ -16,7 +16,7 @@ import org.jellyfin.sdk.model.api.MediaStreamType
  * frames, which is how a file ends up choppy instead of transcoded.
  */
 object HardwareDecoders : Decoders {
-    /** Server codec name → decoder MIME type and the 10-bit profiles that decoder must list. */
+    /** Maps the server's codec name to the decoder MIME type and the profiles that mean the decoder supports 10-bit. */
     private val codecs = mapOf(
         "h264" to ("video/avc" to setOf(CodecProfileLevel.AVCProfileHigh10)),
         "hevc" to ("video/hevc" to setOf(CodecProfileLevel.HEVCProfileMain10, CodecProfileLevel.HEVCProfileMain10HDR10)),
@@ -55,10 +55,10 @@ object HardwareDecoders : Decoders {
     /** The tallest common 16:9 height [codec] plays at 30 fps, or null below 720p. */
     fun tallest(codec: String) = listOf(2160, 1440, 1080, 720).firstOrNull { fits(codec, it * 16 / 9, it, 30f) }
 
-    /** The size transcodes are made at on Auto. */
+    /** The transcode height used when the quality setting is Auto. */
     val h264Height by lazy { tallest("h264") ?: 480 }
 
-    /** For Settings: "H.264 1080p, HEVC 10-bit 4K". */
+    /** The decoder summary shown in Settings, such as "H.264 1080p, HEVC 10-bit 4K". */
     fun summary() = listOf("h264" to "H.264", "hevc" to "HEVC", "vp9" to "VP9", "av1" to "AV1").filter { hasCodec(it.first, false) }
         .joinToString { (codec, name) ->
             name + (if (hasCodec(codec, true)) " 10-bit" else "") + (tallest(codec)?.let { if (it == 2160) " 4K" else " ${it}p" } ?: "")
@@ -71,7 +71,10 @@ fun videoInfo(source: MediaSourceInfo): VideoInfo? {
         v.realFrameRate ?: v.averageFrameRate ?: 30f, (v.bitDepth ?: 8) > 8)
 }
 
-/** Under the direct play settings. An item without stream details plays directly; a failure still switches. */
+/**
+ * Whether [item] fits the direct play settings. An item without stream details is assumed to play directly; if it then
+ * fails to decode, the player still switches to a transcode.
+ */
 fun playsDirectly(item: BaseItemDto): Boolean {
     val video = item.mediaSources?.firstOrNull()?.let(::videoInfo) ?: return true
     val p = App.prefs

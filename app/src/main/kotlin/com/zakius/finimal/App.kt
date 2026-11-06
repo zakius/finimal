@@ -24,21 +24,21 @@ import org.jellyfin.sdk.JellyfinOptions
 class AndroidApp : Application(), Platform, SingletonImageLoader.Factory, Configuration.Provider {
     @android.annotation.SuppressLint("MissingSuperCall") // called on the fonts thread
     override fun onCreate() {
-        // Android's own Application.onCreate is empty. ASUS's applies its FlipFont theme and rebuilds the system font
-        // map, theme or not: 31 ms of main thread at each cold start on a Zenfone 10. Here it runs beside the rest of
-        // start-up; Activity.onCreate makes the same call under the same lock, so the activity waits for it there.
-        // With the ICU warm-up below: main-thread CPU to the first frame 93 → 62 ms, cold start 146 → 138 ms (2026-10-26).
+        // Stock Android's Application.onCreate is empty, but ASUS's applies its FlipFont theme and rebuilds the system
+        // font map, which costs 31 ms of main thread on every cold start on a Zenfone 10. Running it on another thread
+        // overlaps it with the rest of start-up. Activity.onCreate makes the same call under the same lock, so the
+        // activity still waits for it to finish.
         thread(name = "fonts") { superOnCreate() }
         instance = this
         appContext = this
         App.platform = this
         Media.onAppStart(this)
         thread(name = "warm-up") {
-            // ICU's locale-key data, which the first line break would load in the first frame (10 ms). Not by laying
-            // out text: that would race the font swap above.
+            // Load ICU's locale-key data now; otherwise the first line break loads it during the first frame (10 ms).
+            // This avoids laying out text, which would race the font swap above.
             java.util.Locale.forLanguageTag(java.util.Locale.getDefault().toLanguageTag() + "-u-lb-normal").displayName
             if (App.prefs.loggedIn) ListSnapshots.prefetchLibraries()
-            App.server // the first list load needs the API client right after the first frame
+            App.server // Built now because the first list load needs it right after the first frame.
         }
     }
 
@@ -58,11 +58,12 @@ class AndroidApp : Application(), Platform, SingletonImageLoader.Factory, Config
     }
     private var startedUp = false
 
-    // WorkManager starts when first used, not from its start-up provider before onCreate; see AndroidManifest.xml.
+    // WorkManager initializes on first use instead of from its start-up provider before onCreate; see AndroidManifest.xml.
     override val workManagerConfiguration get() = Configuration.Builder().build()
 
-    // Shared connections, own dispatcher: a screen of thumbnails must not queue behind or ahead of API calls (5 per host each).
-    // No ServiceLoader scan of the APK on the first image: the one fetcher used is added here.
+    // Images share the API client's connections but get their own dispatcher, so a screen of thumbnails and the API
+    // calls don't queue behind each other (OkHttp allows 5 requests per host per dispatcher).
+    // The only fetcher is added by hand, which skips a ServiceLoader scan of the APK on the first image.
     override fun newImageLoader(context: PlatformContext) = ImageLoader.Builder(context)
         .serviceLoaderEnabled(false)
         .components { add(OkHttpNetworkFetcherFactory(callFactory = { App.http.newBuilder().dispatcher(Dispatcher()).build() })) }
@@ -78,7 +79,10 @@ class AndroidApp : Application(), Platform, SingletonImageLoader.Factory, Config
     override val appCache: File get() = cacheDir
     override val android get() = true
     override val store by lazy { PrefsStore(getSharedPreferences("finimal", Context.MODE_PRIVATE)) }
-    /** Android TV, or a box with no touchscreen (an STB on a plain Android launcher). Some boxes claim one; the setting overrides. */
+    /**
+     * Android TV, or a box without a touchscreen (a set-top box on a plain Android launcher). Some boxes claim a
+     * touchscreen they lack, which is why the user can override this in Settings.
+     */
     override val autoTv by lazy {
         getSystemService(UiModeManager::class.java).currentModeType == UI_MODE_TYPE_TELEVISION ||
             !packageManager.hasSystemFeature(PackageManager.FEATURE_TOUCHSCREEN)

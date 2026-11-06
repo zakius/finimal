@@ -10,7 +10,7 @@ data class EpisodeRef(val id: String, val state: PlayState?)
 fun keepNextWindow(episodes: List<EpisodeRef>, n: Int): List<String> {
     val anchor = episodes.withIndex()
         .filter { it.value.state?.lastPlayedMs != null }
-        // Ties go to the later episode: marking a season played on the server gives every episode one date.
+        // Ties go to the later episode, because marking a season played on the server gives every episode the same date.
         .maxWithOrNull(compareBy({ it.value.state!!.lastPlayedMs!! }, { it.index }))
     if (anchor == null) return episodes.take(n).map { it.id }
     val current = anchor.value.takeUnless { it.state!!.played }

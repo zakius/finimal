@@ -92,7 +92,7 @@ object Media : Downloads {
     fun playlist(d: Download) = File(transcodeDir(d.item.id.toString()), PLAYLIST).takeIf { d.transcoded && it.exists() }
     fun isDone(d: Download) = if (d.transcoded) playlist(d) != null else scratch.entry(key(d.item)).complete
 
-    /** Loopback HTTP over [scratch], for the player. */
+    /** A loopback HTTP server over [scratch] that the player reads from. */
     private val proxy by lazy { ScratchServer({ scratch }) }
 
     /** [item]'s entry, with the server's file as its source. */
@@ -125,24 +125,28 @@ object Media : Downloads {
         scratch = openScratch()
     }
 
-    /** Off the main thread, after the first frame; see [App.afterFirstFrame]. */
+    /** Runs off the main thread after the first frame; see [AndroidApp.afterFirstFrame]. */
     fun afterFirstFrame(context: Context) {
         val wm = WorkManager.getInstance(context)
         wm.cancelAllWorkByTag(FILL_TAG)
-        // Media3's cache, which held downloads and the buffer before 0.7. Its downloads fetch again into the scratch.
+        // Media3's cache held downloads and the buffer before 0.7. Those downloads are fetched again into the scratch.
         storageRoots().forEach { File(it, "media").deleteRecursively() }
         context.deleteDatabase("exoplayer_internal.db")
-        // Replaced unless running, so a queue left waiting out a retry backoff starts at once.
+        // Replace the queued worker unless one is running, so a queue that is waiting out a retry backoff starts now.
         kickDownloads(restart = wm.getWorkInfosForUniqueWork("downloads").get().none { it.state == WorkInfo.State.RUNNING })
         Housekeeping.enqueue(context)
     }
 
-    /** App-specific storage; index 1+ are removable volumes. Read once per process: a card is checked again at the next start. */
+    /**
+     * App-specific storage roots: index 0 is primary storage and higher indexes are removable volumes. The list is read
+     * once per process, so a card inserted later is seen at the next start.
+     */
     private val roots by lazy { ctx.getExternalFilesDirs(null).filterNotNull().ifEmpty { listOf(ctx.filesDir) } }
     override fun storageRoots(): List<File> = roots
     private fun storageRoot() = storageRoots().getOrElse(App.prefs.storageIndex) { storageRoots()[0] }
     private fun openScratch() = Scratch(File(storageRoot(), "scratch"), http).apply {
-        // Buffer first; a fill that still can't write then stops buffering and downloading.
+        // On a full disk, evict buffered data first. If that frees nothing, the fill fails, which stops buffering and
+        // downloading.
         onStorageFull = { val before = freeBytes(); evict(); freeBytes() > before }
     }
 
@@ -173,12 +177,13 @@ object Media : Downloads {
     fun upstreamFactory() = DefaultDataSource.Factory(ctx, OkHttpDataSource.Factory(http))
 
     /**
-     * For the player, through [proxy] or straight to the server for a transcode. 30 s reads: the proxy waits up to
-     * 20 s for the filler, and the server holds an HLS segment request open until ffmpeg has written it.
+     * The player's data source: through [proxy], or straight to the server for a transcode. The 30-second read timeout
+     * covers the proxy waiting up to 20 seconds for the filler, and the server holding an HLS segment request open until
+     * ffmpeg has written the segment.
      */
     fun playerFactory() = DefaultDataSource.Factory(ctx, OkHttpDataSource.Factory(http.newBuilder().readTimeout(30, TimeUnit.SECONDS).build()))
 
-    /** The file's length once the server told it; -1 before. */
+    /** The file length reported by the server, or -1 until it is known. */
     fun lengthOf(key: String) = scratch.entry(key).length
 
     /** How far, in ms, the scratch reaches without a gap from [positionMs]; bytes map to time linearly. */
@@ -190,17 +195,17 @@ object Media : Downloads {
         return (start + e.contiguous(start)) * durationMs / len
     }
 
-    // --- downloads -------------------------------------------------------------------------------
-
-
     /** A folder of records per account: an account sees, queues and deletes only its own. */
     private val recordsRoot get() = File(ctx.filesDir, "downloads")
     private val downloadsDir get() = File(recordsRoot, App.prefs.userId ?: "none").apply { mkdirs() }
     private fun metaFile(id: String) = File(downloadsDir, "$id.json")
     private fun otherRecordDirs() = recordsRoot.listFiles().orEmpty().filter { it.isDirectory && it != downloadsDir }
-    /** Another account has [id] downloaded, decodable or not: the subtitles stay. */
+    /** Whether another account has a record for [id], readable or not. If so, its subtitles must stay. */
     private fun recordedElsewhere(id: String) = otherRecordDirs().any { it.list().orEmpty().any { n -> n.substringBefore('.') == id } }
-    /** Another account's record needs [d]'s bytes: the same kind of file, direct or transcoded. Undecodable counts. */
+    /**
+     * Whether another account's record needs [d]'s bytes, meaning it downloaded the same kind of file (direct or
+     * transcoded). A record that can't be decoded counts as needing them.
+     */
     private fun ownedElsewhere(d: Download) = otherRecordDirs().any { dir ->
         val id = d.item.id.toString()
         val f = File(dir, "$id.json")
@@ -209,8 +214,8 @@ object Media : Downloads {
     }
 
     /**
-     * Records from before accounts lie loose in the folder; they belong to whoever is logged in, now or at the next
-     * login. Until then [pinnedIds] counts them.
+     * Records written before per-account folders existed lie loose in [recordsRoot]. They are moved to whoever is
+     * logged in, now or at the next login. Until then [pinnedIds] still counts them.
      */
     private fun adoptLooseRecords() {
         if (App.prefs.userId == null) return
@@ -218,7 +223,8 @@ object Media : Downloads {
     }
     private fun write(d: Download) {
         metaFile(d.item.id.toString()).writeAtomically(json.encodeToString(d))
-        // Patched rather than cleared: progress reports write every 10 s, and a re-read decodes every file.
+        // Update the memo in place rather than clearing it. Progress reports write every 10 seconds, and clearing
+        // would make the next read decode every file.
         memo = memo?.filterNot { it.item.id == d.item.id }?.plus(d)
         changes++
     }
@@ -231,20 +237,21 @@ object Media : Downloads {
     /** Decoded files, kept until the next change; the status poll would otherwise re-read every file each second. */
     private var memo: List<Download>? = null
 
-    /** All writes go through [write], [deleteDownload] and [switchStorage], which clear [memo]. */
+    /** Every change goes through [write], [deleteDownload], [switchStorage] or [accountChanged], which keep [memo] current. */
     @Synchronized
     override fun downloads(): List<Download> = memo ?: downloadsDir.listFiles { f -> f.extension == "json" }.orEmpty()
         .mapNotNull { f ->
             runCatching { json.decodeFromString<Download>(f.readText()) }
-                // Undecodable (e.g. SDK schema drift): kept aside, still pinning its bytes through [pinnedIds].
+                // A record that no longer decodes (for example after an SDK schema change) is renamed aside.
+                // Its bytes stay pinned through [pinnedIds].
                 .onFailure { if (it is IllegalArgumentException) f.renameTo(File(f.path + ".corrupt")) }
                 .getOrNull()
         }
         .also { memo = it }
 
     /**
-     * IDs with a meta file of any account, decodable or not, so an unreadable record never turns a download into
-     * evictable buffer. A cache key starts with its item ID.
+     * Item IDs that have a record in any account, readable or not, so an unreadable record never turns a download
+     * into evictable buffer. Cache keys start with the item ID, which is how these match scratch entries.
      */
     private fun pinnedIds() = recordsRoot.listFiles().orEmpty().flatMap { if (it.isDirectory) it.list().orEmpty().toList() else listOf(it.name) }
         .map { it.substringBefore('.') }.toSet()
@@ -271,8 +278,6 @@ object Media : Downloads {
     @Volatile var downloading: String? = null
         set(value) { field = value; changes++ }
 
-
-    /** Next unfinished, unpaused download in queue order. */
     fun nextDownload(): Download? =
         downloads().filter { !it.paused && !isDone(it) }.minWithOrNull(queueOrder)
 
@@ -326,7 +331,7 @@ object Media : Downloads {
         download(id)?.let { write(it.copy(paused = true, failed = !storageFull, storageFull = storageFull)) }
     }
 
-    /** The bytes go outside the lock: a whole episode is hundreds of files on an SD card. */
+    /** Deletes the bytes outside the lock, because a transcoded episode can be hundreds of files on an SD card. */
     override fun deleteDownload(id: String) {
         val d = synchronized(this) {
             val d = download(id)
@@ -340,7 +345,7 @@ object Media : Downloads {
         if (d != null && playing != key(d.item) && !ownedElsewhere(d)) removeDownloadBytes(d)
     }
 
-    /** A direct download open in the player stays, now as buffer, for eviction to take later. */
+    /** A direct download that the player has open can't be deleted; it stays as buffer and eviction removes it later. */
     private fun removeDownloadBytes(d: Download) {
         if (d.transcoded) transcodeDir(d.item.id.toString()).deleteRecursively() else scratch.delete(key(d.item))
     }
@@ -368,12 +373,16 @@ object Media : Downloads {
             lastPlayedDate = state.lastPlayedMs?.let { LocalDateTime.ofInstant(Instant.ofEpochMilli(it), ZoneId.systemDefault()) },
         ) ?: return
         if (data == d.item.userData) return
-        // A convenience copy; the pending store holds the state that syncs. A full disk mustn't crash playback.
+        // This copy only serves offline resume; the pending store holds the state that syncs. A failed write (such as
+        // a full disk) is ignored so it can't crash playback.
         try { write(d.copy(item = d.item.copy(userData = data))) } catch (e: IOException) {}
     }
 
 
-    /** Bytes on disk, percent, and whether it is all there. A transcode counts segments: their sizes aren't known ahead. */
+    /**
+     * Bytes on disk, percent done, and whether the download is complete. A transcode's percent counts segments,
+     * because their sizes aren't known in advance.
+     */
     private fun progress(d: Download): Triple<Long, Int, Boolean> {
         if (!d.transcoded) {
             val e = scratch.entry(key(d.item))
@@ -410,7 +419,7 @@ object Media : Downloads {
         segments.forEachIndexed { n, uri ->
             val file = File(dir, "$n.ts")
             if (file.exists()) return@forEachIndexed
-            // The kept URLs carry the token of their day.
+            // The saved playlist's URLs carry the token from when it was fetched, so swap in the current one.
             val url = base + uri.replace(Regex("ApiKey=[^&]*"), "ApiKey=${App.prefs.token}")
             transcodeHttp.newCall(Request.Builder().url(url).build()).cancellable { r ->
                 if (!r.isSuccessful) throw HttpStatus(r.code)
@@ -429,11 +438,15 @@ object Media : Downloads {
         r.body?.string() ?: throw IOException("empty body")
     }
 
-    /** A blocking call that a stopped worker (paused, network now metered) cancels, rather than fetching on unseen. */
+    /**
+     * Runs the blocking call so that stopping the worker (paused, or the network became metered) cancels it, instead
+     * of letting it keep fetching unseen.
+     */
     private suspend fun <T> Call.cancellable(block: (Response) -> T): T = coroutineScope {
-        // Undispatched: a watcher cancelled before it ran would never cancel the call.
+        // Start undispatched: a watcher cancelled before its first run would never reach the finally that cancels the call.
         val watcher = launch(start = CoroutineStart.UNDISPATCHED) { try { awaitCancellation() } finally { this@cancellable.cancel() } }
-        // Cancelled, the call fails with an IOException: a stop, not a network or storage failure.
+        // A cancelled call fails with an IOException. ensureActive turns that into a cancellation, so it counts as a
+        // stop rather than a network or storage failure.
         try { execute().use(block) } catch (e: IOException) { ensureActive(); throw e } finally { watcher.cancel() }
     }
 
@@ -461,8 +474,6 @@ object Media : Downloads {
             id to DownloadStatus(d, percent, fill, bytes, queue.indexOf(id) + 1, waitingFor)
         }
     }
-
-    // --- buffering -------------------------------------------------------------------------------
 
     /** The open player's buffer-to-end demand. */
     private var buffer: Pair<String, Scratch.Demand>? = null
@@ -508,16 +519,17 @@ object Media : Downloads {
         }
         val limit = bufferLimit(App.prefs.cacheLimitGb * 1_000_000_000L, entries.filter { !it.pinned }.sumOf { it.bytes },
             freeBytes(), storageRoot().totalSpace)
-        // An entry still open (the player, a download) refuses, and goes at a later pass.
+        // An entry that is still open (by the player or a download) refuses deletion and is evicted on a later pass.
         evictionOrder(entries, limit, playing).forEach { scratch.delete(it) }
     }
 
-    /** After a failed write: true when the disk is still nearly full once the buffer is evicted. */
+    /** After a failed write: whether the disk is still nearly full once the buffer is evicted. */
     fun storageFull(): Boolean {
-        if (freeBytes() >= 100_000_000) return false
+        if (freeBytes() >= NEARLY_FULL_BYTES) return false
         evict()
-        return freeBytes() < 100_000_000
+        return freeBytes() < NEARLY_FULL_BYTES
     }
+    private const val NEARLY_FULL_BYTES = 100L * 1000 * 1000
 
     /** Subtitles fetched for items that were only streamed; downloads and the playing item keep theirs. */
     fun dropStreamedSubtitles() {
@@ -555,7 +567,7 @@ object Media : Downloads {
 /** Works through the download queue one episode at a time. */
 class DownloadWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
     override suspend fun doWork(): Result {
-        if (Media.storageMissing) return Result.success() // the next app start kicks the queue again
+        if (Media.storageMissing) return Result.success() // The next app start restarts the queue.
         // An account switch starts a new worker for the new account's queue; this one must not write into it.
         val user = App.prefs.userId
         var current: String? = null
@@ -581,7 +593,8 @@ class DownloadWorker(context: Context, params: WorkerParameters) : CoroutineWork
                 var lastPercent = -1
                 fun report(percent: Int) {
                     val now = System.currentTimeMillis()
-                    // Only a new percentage: each update makes SystemUI rebuild the notification, for hours.
+                    // Update only on a new percentage, at most once a second. Each update makes SystemUI rebuild the
+                    // notification, and a download can run for hours.
                     if (percent >= 0 && percent != lastPercent && now - lastUpdate > 1_000) {
                         lastUpdate = now
                         lastPercent = percent
@@ -597,7 +610,8 @@ class DownloadWorker(context: Context, params: WorkerParameters) : CoroutineWork
                     val entry = Media.entry(d.item)
                     runInterruptible(Dispatchers.IO) { entry.download { bytes, total -> if (total > 0) report((bytes * 100 / total).toInt()) } }
                 } catch (e: HttpStatus) {
-                    // Refused for this item only; retrying would pick it again forever. A 401 is the token: retry.
+                    // Any other 4xx means the server refuses this item, and retrying would pick it again forever.
+                    // A 401 means an expired token, so that one retries.
                     if (e.code !in 400..499 || e.code == 401) throw e
                     Media.failDownload(id)
                 } catch (e: WrongFile) {
@@ -651,7 +665,7 @@ class Housekeeping(context: Context, params: WorkerParameters) : CoroutineWorker
         val user = App.prefs.userId
         fun switched() = App.prefs.userId != user
         val unsynced = server.flush()
-        if (!server.loggedIn) return Result.success() // the token was rejected; logging in pushes again
+        if (!server.loggedIn) return Result.success() // The token was rejected; the next login pushes again.
         if (unsynced != null && transient(unsynced)) return Result.retry()
         // Progress made on other devices reaches offline playback through the stored downloads.
         runCatching {
@@ -671,7 +685,7 @@ class Housekeeping(context: Context, params: WorkerParameters) : CoroutineWorker
             window.filter { it !in have }.forEach { server.item(it).let { item -> if (!switched()) Media.startDownload(item, auto = true) } }
             val auto = have.filterValues { it.auto }.keys
             keepNextDeletions(auto, refs, window).forEach { if (!switched()) Media.deleteDownload(it) }
-        }.onFailure { if (transient(it)) retry = true } // a series gone from the server would fail every retry
+        }.onFailure { if (transient(it)) retry = true } // Only transient errors retry: a series gone from the server would fail every time.
         Media.evict()
         Media.dropStreamedSubtitles()
         return if (retry) Result.retry() else Result.success()

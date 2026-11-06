@@ -10,7 +10,7 @@ import finimal.core.evictionOrder
 import java.io.File
 import org.jellyfin.sdk.model.api.BaseItemDto
 
-/** The desktop's share of the scratch: what plays streams through it and buffers to the end. No downloads yet. */
+/** The desktop's use of the scratch: playback streams through it and buffers to the end of the file. No downloads yet. */
 object DesktopMedia {
     val scratch: Scratch by lazy {
         Scratch(File(App.platform.appFiles, "scratch"), App.http).apply {
@@ -19,7 +19,7 @@ object DesktopMedia {
     }
     private val proxy by lazy { ScratchServer({ scratch }) }
 
-    /** Key of what the player has open; eviction leaves it. */
+    /** The key of what the player has open, which eviction never removes. */
     @Volatile var playing: String? = null
 
     private fun entry(item: BaseItemDto): Scratch.Entry {
@@ -27,12 +27,12 @@ object DesktopMedia {
         return scratch.entry(scratchKey(item)).apply { source({ App.server.streamUrl(item.id.toString(), source.id!!) }, source.size) }
     }
 
-    /** The item's file through the scratch, for mpv. */
+    /** A URL for mpv that serves the item's file through the scratch. */
     fun streamUrl(item: BaseItemDto): String = entry(item).let { proxy.url(scratchKey(item)) }
 
     private var buffer: Pair<String, Scratch.Demand>? = null
 
-    /** Fills from byte [position] to the end while the player is open; a desktop has no metered networks to spare. */
+    /** Fills from byte [position] to the end while the player is open. A desktop doesn't need to save metered data. */
     @Synchronized
     fun startBuffer(item: BaseItemDto, position: Long) {
         val key = scratchKey(item)
@@ -51,7 +51,7 @@ object DesktopMedia {
 
     fun lengthOf(item: BaseItemDto) = scratch.entry(scratchKey(item)).length
 
-    /** Seconds from [position] the scratch reaches without a gap; bytes map to time linearly. */
+    /** The time, in seconds, up to which the scratch holds data from [position] without a gap. Assumes bytes map to time linearly. */
     fun cachedUntil(item: BaseItemDto, position: Double, duration: Double): Double {
         val e = scratch.entry(scratchKey(item))
         val len = e.length
@@ -62,7 +62,7 @@ object DesktopMedia {
 
     private fun freeBytes(): Long = scratch.dir.apply { mkdirs() }.usableSpace
 
-    /** Oldest first, down to the buffer limit in Settings and keeping max(2 GB, 5 %) of the disk free. */
+    /** Deletes the oldest entries until within the buffer limit in Settings, keeping 2 GB or 5 % of the disk free, whichever is more. */
     fun evict() {
         val entries = scratch.keys().map { key -> scratch.entry(key).let { CacheEntry(key, it.bytes(), it.touched(), pinned = false) } }
         val limit = bufferLimit(App.prefs.cacheLimitGb * 1_000_000_000L, entries.sumOf { it.bytes }, freeBytes(), scratch.dir.totalSpace)

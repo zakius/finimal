@@ -1,9 +1,9 @@
 #!/bin/bash
-# The desktop app for Debian/Ubuntu and Fedora: dist/finimal_<version>_amd64.deb and dist/finimal-<version>-1.x86_64.rpm,
-# from the release app image's app files. Both install to /opt/finimal with /usr/bin/finimal and run on the
-# distribution's Java 21+ and libmpv, so their fixes come with system updates (the Flatpak bundles its own).
-# The jars go in stored, not deflated: the package's xz then compresses across all classes, 20 MB down to 9 MB.
-# rpmbuild comes from the host (Ubuntu: the rpm package) or, without it, a Fedora container.
+# Builds dist/finimal_<version>_amd64.deb and dist/finimal-<version>-1.x86_64.rpm from the release app image. Both
+# install to /opt/finimal with /usr/bin/finimal and run on the system's Java 21+ and libmpv, so those get their fixes
+# from system updates (the Flatpak bundles its own).
+# The jars are repacked uncompressed so the package's xz compresses across all classes: 20 MB down to 9 MB.
+# rpmbuild comes from the host (on Ubuntu, the rpm package) or, if missing, a Fedora container.
 # Usage: tools/linux-packages.sh [--no-gradle]
 set -euo pipefail
 cd "$(dirname "$0")/.."

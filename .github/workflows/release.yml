@@ -1,9 +1,10 @@
 name: release
 
-# Pull requests: core and desktop tests and a debug build. A v* tag: tests, the signed release APKs (tools/release.sh),
-# the Linux Flatpak and the .deb and .rpm in parallel jobs, then a GitHub release once all pass. Its notes are the tagged commit's message
-# body, followed by the generated changelog. Pushes to main: tests, an unsigned release build and the Flatpak, which
-# save the Gradle and flatpak-builder caches.
+# Pull requests: tests and a debug build.
+# Pushes to main: tests, an unsigned release build and the Flatpak, which fill the Gradle and flatpak-builder caches.
+# v* tags: tests and all packages in parallel jobs, then a GitHub release once every job passes. The release notes are
+# the release commit's message body followed by the generated changelog.
+# The Windows packages build and get checked on every run.
 on:
   push:
     branches: [main]
@@ -21,20 +22,19 @@ jobs:
           distribution: temurin
           java-version: 21
       - uses: gradle/actions/setup-gradle@v5
-      # The desktop player tests load the distribution's libmpv.
+      # The desktop player tests need the system libmpv.
       - name: Update apt
         id: apt
         timeout-minutes: 10
-        # The runner's Azure mirror of Ubuntu crawled at tens of kB/s, and the install outran its time limit on some
-        # runs; Ubuntu's own mirror, which the containers use, was fast. GitHub's images list their mirrors in
-        # apt-mirrors.txt (ubuntu.sources points there), Azure first. Output stays on so a slow fetch shows.
+        # The runner's default Azure mirror is sometimes slow enough (tens of kB/s) to hit the time limit, so use
+        # archive.ubuntu.com. GitHub's images list their mirrors in apt-mirrors.txt, which ubuntu.sources points at.
         run: |
           echo "http://archive.ubuntu.com/ubuntu/" | sudo tee /etc/apt/apt-mirrors.txt
           sudo sed -i 's|http://azure.archive.ubuntu.com|http://archive.ubuntu.com|g' /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list 2>/dev/null || true
           sudo systemctl stop unattended-upgrades.service apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
           sudo apt-get -o DPkg::Lock::Timeout=300 update -q
           echo "debs=$(apt-get install --print-uris -qq libmpv2 | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
-      # The packages (about 100 MB), keyed by the exact versions apt would fetch: an update makes a new entry.
+      # About 100 MB of .debs, keyed by the exact versions apt would fetch, so a package update makes a new entry.
       - uses: actions/cache@v5
         with:
           path: ~/apt-archives
@@ -60,14 +60,14 @@ jobs:
       - uses: gradle/actions/setup-gradle@v5
       - run: ./gradlew assembleDebug
 
-  # setup-gradle saves its cache only on the default branch, and a tag's run can't read another tag's cache, so
-  # without this every release built from nothing (about 4.5 min).
+  # setup-gradle saves its cache only on the default branch, and a tag's run can't read another tag's cache. This job
+  # fills the cache from main so a release build doesn't start cold (about 4.5 min slower).
   warm:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-26.04
     timeout-minutes: 30
     env:
-      GRADLE_BUILD_ACTION_CACHE_KEY_JOB: release # the cache is keyed by job; app reads this one
+      GRADLE_BUILD_ACTION_CACHE_KEY_JOB: release # caches are keyed by job name; this shares one with the app job
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-java@v6
@@ -105,7 +105,7 @@ jobs:
           name: apks
           path: dist/finimal-*.apk
 
-  # The jpackage app image (Java runtime included), tarred: artifacts drop the executable bit.
+  # The jpackage app image, Java runtime included. It is tarred because artifact upload drops the executable bit.
   desktop-image:
     if: github.event_name == 'push'
     runs-on: ubuntu-26.04
@@ -117,19 +117,19 @@ jobs:
           distribution: temurin
           java-version: 21
       - uses: gradle/actions/setup-gradle@v5
-      # skiaCheck: the app image's Skia, its ICU data trimmed, breaks text as the original does (desktop/build.gradle.kts).
+      # skiaCheck verifies that Skia with trimmed ICU data still breaks text like the original (desktop/build.gradle.kts).
       - run: ./gradlew :desktop:createReleaseDistributable :desktop:skiaCheck && tar -C desktop/build/compose/binaries/main-release -cf desktop-image.tar app
       - uses: actions/upload-artifact@v7
         with:
           name: desktop-image
           path: desktop-image.tar
-      # ProGuard renames the desktop classes; the release keeps the mapping that reads their stack traces (retrace).
+      # ProGuard obfuscates the desktop classes; the release publishes the mapping so retrace can decode stack traces.
       - uses: actions/upload-artifact@v7
         with:
           name: desktop-mapping
           path: desktop/build/proguard-mapping.txt
 
-  # libmpv and FFmpeg build here; flatpak-builder's cache keeps them while the manifest's modules are unchanged.
+  # Builds libmpv and FFmpeg; flatpak-builder's cache keeps them until the manifest changes.
   flatpak:
     needs: desktop-image
     runs-on: ubuntu-26.04
@@ -156,7 +156,7 @@ jobs:
           name: flatpak
           path: finimal-x86_64.flatpak
 
-  # .deb and .rpm on the distributions' Java and libmpv, each installed and checked before it can be published.
+  # .deb and .rpm that run on the distribution's Java and libmpv. Each is installed and checked before publishing.
   linux-packages:
     needs: desktop-image
     runs-on: ubuntu-26.04
@@ -170,12 +170,11 @@ jobs:
         with:
           name: desktop-image
       - run: mkdir -p desktop/build/compose/binaries/main-release && tar -C desktop/build/compose/binaries/main-release -xf desktop-image.tar
-      # The .rpm builds in a Fedora container (the script's way without rpmbuild): no apt on the runner, whose
-      # mirror was slow.
+      # With no rpmbuild on the runner, the script builds the .rpm in a Fedora container, avoiding the slow apt mirror.
       - run: tools/linux-packages.sh --no-gradle
-      # In clean containers, not on the runner: no background upgrades holding apt, and no preinstalled JDKs to hide
-      # what a user's system lacks. All three run at once; each has a step that shows its output, with its own limit.
-      # --init: with timeout as a container's first process (bash execs the last command), Fedora's exited 125.
+      # Clean containers instead of the runner: no background upgrades hold the apt lock, and no preinstalled JDK hides
+      # a missing dependency. All three start at once; the next steps follow each one's output with its own time limit.
+      # --init because bash execs its last command, which made `timeout` PID 1, and the Fedora container exited with 125.
       - name: Start the install checks
         timeout-minutes: 5
         run: |
@@ -200,13 +199,13 @@ jobs:
             dist/finimal_*_amd64.deb
             dist/finimal-*.rpm
 
-  # The Windows app, each as an MSI and a portable zip: the full build carries its Java runtime and libmpv-2.dll
+  # Two Windows builds, each as an MSI and a portable zip. The full build bundles its Java runtime and libmpv-2.dll
   # (Windows has no system libmpv); the small one finds or downloads both (tools/windows-packages.sh).
   windows:
     runs-on: windows-latest
     timeout-minutes: 40
     permissions:
-      contents: write # the small build's libmpv download, published once per libmpv build
+      contents: write # windows-packages.sh publishes the libmpv zip the small build downloads
     defaults:
       run:
         shell: bash
@@ -224,14 +223,14 @@ jobs:
           key: libmpv-windows-${{ hashFiles('tools/fetch-libmpv-windows.sh') }}
       - if: steps.libmpv.outputs.cache-hit != 'true'
         run: tools/fetch-libmpv-windows.sh
-      # jpackage's WiX toolset, which the Compose plugin downloads (about 30 s) unless this zip is there.
+      # The Compose plugin downloads jpackage's WiX toolset (about 30 s) unless this zip is already there.
       - uses: actions/cache@v5
         with:
           path: ${{ env.GRADLE_USER_HOME }}/compose-jb/wix311.zip
           key: wix311
       - run: ./gradlew :desktop:packageReleaseMsi :desktop:createReleaseDistributable :desktop:skiaCheck
-      # The launcher is a windowed program: run from bash it neither waited for the app nor passed on its result. Start-
-      # Process waits for it and keeps its output and exit code.
+      # The launcher is a windowed (GUI subsystem) program, so bash neither waits for it nor gets its exit code.
+      # Start-Process -Wait does both and captures its output.
       - name: Check the player
         timeout-minutes: 3
         shell: pwsh
@@ -239,7 +238,7 @@ jobs:
           $p = Start-Process desktop/build/compose/binaries/main-release/app/finimal/finimal.exe -ArgumentList --check-player -Wait -PassThru -RedirectStandardOutput check.txt -RedirectStandardError check-err.txt
           Get-Content check.txt, check-err.txt
           if ($p.ExitCode -ne 0) { throw "--check-player exited $($p.ExitCode)" }
-      # The check must be able to fail: without libmpv it has to.
+      # Proves the check can fail: without libmpv it must.
       - name: The check fails without libmpv
         timeout-minutes: 3
         shell: pwsh
@@ -262,7 +261,7 @@ jobs:
           [System.Drawing.Graphics]::FromImage($bmp).CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
           $bmp.Save("$PWD/windows-screen.png")
           Stop-Process $app
-      # 7z's default level for both zips: -mx=9 took about a minute longer here for a zip 1% smaller.
+      # 7z's default compression level for both zips: -mx=9 took about a minute longer for a 1% smaller zip.
       - name: Package the full zip
         run: |
           version=$(sed -n 's/^finimal.versionName=//p' gradle.properties)
@@ -273,8 +272,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: tools/windows-packages.sh
-      # No Java on the PATH or in JAVA_HOME, no libmpv: the small build downloads them. One the runner registers (it
-      # may have its own Java installs) is used instead, which the warning tells.
+      # With JAVA_HOME and PATH cleared, the small build has to download Java and libmpv. If it finds a Java the runner
+      # registered instead, the check still passes but warns.
       - name: Check the small build
         timeout-minutes: 5
         shell: pwsh
@@ -306,7 +305,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          fetch-depth: 0 # the notes come from the release commit, which needn't be the tagged one
+          fetch-depth: 0 # the notes come from the "Release X" commit, which may not be the tagged one
       - uses: actions/download-artifact@v8
         with:
           name: apks

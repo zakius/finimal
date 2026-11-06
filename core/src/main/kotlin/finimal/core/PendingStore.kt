@@ -39,13 +39,13 @@ class PendingStore(private val file: File) {
         if (states[itemId] == state && states.remove(itemId) != null) save()
     }
 
-    // A full disk keeps the states in memory; the next put writes them all.
+    // On a full disk the states stay in memory, and the next put writes them all.
     private fun save() = try { file.writeAtomically(json.encodeToString(states.toMap())) } catch (e: IOException) {}
 }
 
 /**
- * Through a synced temp file and a rename, so a crash or power loss leaves the old or the new file, never half of one.
- * Not [File.renameTo]: on Windows it refuses to replace an existing file.
+ * Writes through a synced temp file and a rename, so a crash or power loss leaves the old or the new file, never half
+ * of one. Uses [Files.move] because [File.renameTo] refuses to replace an existing file on Windows.
  */
 fun File.writeAtomically(text: String) {
     val tmp = File("$path.tmp")

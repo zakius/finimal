@@ -56,7 +56,6 @@ internal actual fun RetryOnNewNetwork(onRetry: () -> Unit) {
     }
 }
 
-/** [KeyValueStore] over SharedPreferences. Edits apply in the background, as before the move. */
 class PrefsStore(private val p: SharedPreferences) : KeyValueStore {
     override fun get(key: String): Any? = p.all[key]
     override fun keys(): Set<String> = p.all.keys
