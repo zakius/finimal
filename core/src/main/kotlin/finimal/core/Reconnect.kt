@@ -12,3 +12,29 @@ fun reconnectDelayMs(attempt: Int, firstFailureMs: Long, nowMs: Long): Long? {
     val delays = longArrayOf(1_000, 2_000, 4_000, 8_000, 10_000)
     return delays[minOf(attempt, 4)]
 }
+
+/**
+ * Where a player stands with a dropped connection. Both players keep one of these instead of separate flags, so the
+ * start time and attempt count exist only while retrying, and nothing from one outage carries into the next.
+ *
+ * Idle → (network failure) → Retrying → (loaded with the server answering) → Idle
+ *                                     → (window ran out) → GaveUp → (Retry, then loaded) → Idle
+ */
+sealed interface Reconnect {
+    /** Not reconnecting: playing, or stopped for a reason other than the network. */
+    data object Idle : Reconnect
+
+    /** Reloading at the same position since [sinceMs], after [attempt] reloads. The player shows "Reconnecting…". */
+    data class Retrying(val sinceMs: Long, val attempt: Int) : Reconnect {
+        /** How long to wait before the next reload, or null once the window has run out. */
+        fun delayMs(nowMs: Long): Long? = reconnectDelayMs(attempt, sinceMs, nowMs)
+
+        fun reloaded() = Retrying(sinceMs, attempt + 1)
+    }
+
+    /** The window ran out. The error shows until the user presses Retry. */
+    data object GaveUp : Reconnect
+
+    /** A network failure at [nowMs]. Starts retrying, or keeps the retry under way, so its window counts from the first failure. */
+    fun failed(nowMs: Long): Retrying = this as? Retrying ?: Retrying(nowMs, 0)
+}

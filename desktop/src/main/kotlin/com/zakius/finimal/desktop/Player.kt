@@ -34,7 +34,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import finimal.core.RECONNECT_WINDOW_MS
-import finimal.core.reconnectDelayMs
+import finimal.core.Reconnect
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.first
@@ -205,10 +205,7 @@ private fun Playback(item: BaseItemDto, siblings: List<BaseItemDto>, onBack: () 
     var creditsDone by remember { mutableStateOf(false) }
     var ended by remember { mutableStateOf(false) }
     var lastPositionMs by remember { mutableLongStateOf(0L) }
-    // Set while a dropped connection is being retried. See reconnectDelayMs.
-    var failedSince by remember { mutableStateOf<Long?>(null) }
-    var attempt by remember { mutableIntStateOf(0) }
-    var gaveUp by remember { mutableStateOf(false) }
+    var reconnect by remember { mutableStateOf<Reconnect>(Reconnect.Idle) }
     var reloadAtMs by remember { mutableLongStateOf(0L) }
     // The file really does end early: it ended at the same spot again after a reload, while the server was answering.
     var trustEnd by remember { mutableStateOf(false) }
@@ -348,11 +345,10 @@ private fun Playback(item: BaseItemDto, siblings: List<BaseItemDto>, onBack: () 
             // It ended early again right where it was reloaded, while the server answers, so the file really ends there.
             if (mpv.eof && reloadedAtMs != null && App.server.reachable()) {
                 trustEnd = true
-                failedSince = null
-                attempt = 0
+                reconnect = Reconnect.Idle
                 continue
             }
-            if (failedSince == null) {
+            if (reconnect !is Reconnect.Retrying) {
                 // A load error while the server answers is the file's fault. Show it at once and let Retry load again.
                 if (mpv.error != null && App.server.reachable()) {
                     snapshotFlow { mpv.error == null }.first { it }
@@ -361,18 +357,19 @@ private fun Playback(item: BaseItemDto, siblings: List<BaseItemDto>, onBack: () 
                 playOn = !mpv.pauseWanted
             }
             val now = System.currentTimeMillis()
-            val since = failedSince ?: now
-            failedSince = since
+            val retrying = reconnect.failed(now)
+            reconnect = retrying
             // mpv's own reconnects make a load slow to fail, so the timeout counts from the first failure, however long each attempt takes.
-            val wait = reconnectDelayMs(attempt, since, now)
+            val wait = retrying.delayMs(now)
             val outcome = if (wait != null) {
                 delay(wait)
-                attempt++
+                val current = reconnect
+                if (current is Reconnect.Retrying) reconnect = current.reloaded()
                 if (playOn) mpv.play()
                 reloadedAtMs = lastPositionMs
                 reloadAtMs = lastPositionMs
                 mpv.load(url(), lastPositionMs / 1000.0)
-                withTimeoutOrNull(RECONNECT_WINDOW_MS - (System.currentTimeMillis() - since)) {
+                withTimeoutOrNull(RECONNECT_WINDOW_MS - (System.currentTimeMillis() - retrying.sinceMs)) {
                     snapshotFlow { mpv.loaded || mpv.error != null }.first { it }
                 }
             } else {
@@ -381,19 +378,14 @@ private fun Playback(item: BaseItemDto, siblings: List<BaseItemDto>, onBack: () 
             when {
                 outcome == null -> {
                     mpv.command("stop")
-                    failedSince = null
-                    attempt = 0
-                    gaveUp = true
-                    snapshotFlow { gaveUp }.first { !it }
+                    reconnect = Reconnect.GaveUp
+                    snapshotFlow { reconnect }.first { it != Reconnect.GaveUp }
                     // Wait for Retry's load, which replaces the stopped file's state.
                     snapshotFlow { mpv.loaded || mpv.error != null }.first { it }
                 }
                 // Loaded while the server answers, so the connection is back, and a slow one just buffers. A load can also
                 // succeed from what is on disk without the server, but that one fails again where the data on disk ends.
-                mpv.error == null && App.server.reachable() -> {
-                    failedSince = null
-                    attempt = 0
-                }
+                mpv.error == null && App.server.reachable() -> reconnect = Reconnect.Idle
             }
         }
     }
@@ -413,10 +405,7 @@ private fun Playback(item: BaseItemDto, siblings: List<BaseItemDto>, onBack: () 
             val movedOn = lastPositionMs > reloadAtMs + 1_000
             movedOn || mpv.pauseWanted && mpv.loaded && !mpv.buffering && !mpv.eof && mpv.error == null
         }.collect { back ->
-            if (back && failedSince != null) {
-                failedSince = null
-                attempt = 0
-            }
+            if (back && reconnect is Reconnect.Retrying) reconnect = Reconnect.Idle
         }
     }
     LaunchedEffect(resumedAt) {
@@ -445,8 +434,8 @@ private fun Playback(item: BaseItemDto, siblings: List<BaseItemDto>, onBack: () 
         }
     }
 
-    VideoSurface(mpv, item, transcoding, segments, ended, next, resumedAt, reconnecting = failedSince != null,
-        failure = if (gaveUp) "Can't reach the server." else mpv.error,
+    VideoSurface(mpv, item, transcoding, segments, ended, next, resumedAt, reconnecting = reconnect is Reconnect.Retrying,
+        failure = if (reconnect == Reconnect.GaveUp) "Can't reach the server." else mpv.error,
         title = playerTitle(item),
         onResumeNoteGone = { resumedAt = null },
         onSeek = ::seekTo,
@@ -457,7 +446,7 @@ private fun Playback(item: BaseItemDto, siblings: List<BaseItemDto>, onBack: () 
             onPlay(nextId)
         },
         onRetry = {
-            gaveUp = false
+            if (reconnect == Reconnect.GaveUp) reconnect = Reconnect.Idle
             mpv.play()
             mpv.load(url(), lastPositionMs / 1000.0)
         },

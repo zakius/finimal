@@ -3,7 +3,7 @@
 package com.zakius.finimal
 
 import finimal.core.chapterAt
-import finimal.core.reconnectDelayMs
+import finimal.core.Reconnect
 import android.os.Looper
 import android.os.Handler
 import android.net.Network
@@ -292,9 +292,7 @@ private fun Playback(
     // Where a direct play switched to a transcode; null for a play that started as one, which resumes like any other.
     var transcodeFromMs by remember { mutableStateOf<Long?>(null) }
     var playerError by remember { mutableStateOf<PlaybackException?>(null) }
-    // Set while a network failure is being retried; see reconnectDelayMs.
-    var failedSince by remember { mutableStateOf<Long?>(null) }
-    var attempt by remember { mutableIntStateOf(0) }
+    var reconnect by remember { mutableStateOf<Reconnect>(Reconnect.Idle) }
     var ended by remember { mutableStateOf(false) }
     var segments by remember { mutableStateOf<List<MediaSegmentDto>>(emptyList()) }
     var startTicks by remember { mutableLongStateOf(0L) }
@@ -405,7 +403,7 @@ private fun Playback(
     fun keepScreenOn() {
         playerView.keepScreenOn = player.playWhenReady &&
             player.playbackState != Player.STATE_ENDED &&
-            (player.playerError == null || failedSince != null)
+            (player.playerError == null || reconnect is Reconnect.Retrying)
     }
 
     DisposableEffect(player) {
@@ -434,10 +432,7 @@ private fun Playback(
             }
 
             override fun onPlaybackStateChanged(state: Int) {
-                if (state == Player.STATE_READY) {
-                    failedSince = null
-                    attempt = 0
-                }
+                if (state == Player.STATE_READY) reconnect = Reconnect.Idle
                 // Seeking back from the end screen plays on.
                 if (state == Player.STATE_READY || state == Player.STATE_BUFFERING) ended = false
                 if (state == Player.STATE_READY && !transcoding && localPlaylist == null) {
@@ -463,20 +458,23 @@ private fun Playback(
                 // for a while.
                 if (isNetworkFailure(error)) {
                     val now = System.currentTimeMillis()
-                    val since = failedSince ?: now
-                    val wait = reconnectDelayMs(attempt, since, now)
+                    val retrying = reconnect.failed(now)
+                    val wait = retrying.delayMs(now)
                     if (wait != null) {
-                        failedSince = since
+                        reconnect = retrying
                         scope.launch {
                             delay(wait)
-                            attempt++
+                            // A network callback's reload may have recovered meanwhile; then there is nothing to count.
+                            val current = reconnect
+                            if (current is Reconnect.Retrying) reconnect = current.reloaded()
                             if (player.playbackState == Player.STATE_IDLE) player.reload()
                         }
                         return
                     }
+                    reconnect = Reconnect.GaveUp
+                } else {
+                    reconnect = Reconnect.Idle
                 }
-                failedSince = null
-                attempt = 0
                 val decodeProblem = error.errorCode in listOf(
                     PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED,
                     PlaybackException.ERROR_CODE_DECODING_FORMAT_EXCEEDS_CAPABILITIES,
@@ -520,8 +518,9 @@ private fun Playback(
     }
 
     // When a network comes back, retry immediately rather than at the next backoff step.
-    DisposableEffect(player, failedSince != null) {
-        if (failedSince == null) return@DisposableEffect onDispose {}
+    val retrying = reconnect is Reconnect.Retrying
+    DisposableEffect(player, retrying) {
+        if (!retrying) return@DisposableEffect onDispose {}
         val cm = context.getSystemService(ConnectivityManager::class.java)
         val main = Handler(Looper.getMainLooper())
         // Registration reports the current network immediately. Ignore it, since the backoff already retries on it.
@@ -585,7 +584,7 @@ private fun Playback(
     val video = @Composable { mod: Modifier ->
         val streamCacheKey = if (transcoding || localPlaylist != null) null else cacheKey
         VideoSurface(
-            mod, player, playerView, fullscreen, transcoding, streamCacheKey, segments, ended, next, playerError, failedSince != null,
+            mod, player, playerView, fullscreen, transcoding, streamCacheKey, segments, ended, next, playerError, reconnect is Reconnect.Retrying,
             title = if (item.type == BaseItemKind.EPISODE) "${item.seriesName.orEmpty()} · ${episodeLabel(item)}" else item.name.orEmpty(),
             chapters = chapters,
             resumedAt = resumedAt,
