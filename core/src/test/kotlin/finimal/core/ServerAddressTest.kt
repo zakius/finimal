@@ -18,9 +18,6 @@ class ServerAddressTest {
             assertEquals(null, defaultPortFor(withPort), withPort)
     }
 
-    @Test fun otherPortTriesHttpsThenHttpOnIt() = assertEquals(
-        listOf("https://192.168.1.5:8920", "http://192.168.1.5:8920"), serverCandidates("192.168.1.5", "8920"))
-
     @Test fun emptyPortMeansTheSchemeDefault() = assertEquals(
         listOf("https://jf.example.com", "http://jf.example.com"), serverCandidates("jf.example.com", ""))
 

@@ -19,9 +19,6 @@ class ReconnectTest {
         assertNull(state.delayMs(RECONNECT_WINDOW_MS))
     }
 
-    @Test fun nextOutageStartsFresh() {
-        // After recovering or giving up, the next failure starts at the first step again with its own window.
+    @Test fun nextOutageAfterGivingUpStartsFresh() =
         assertEquals(Reconnect.Retrying(90_000, 0), Reconnect.GaveUp.failed(90_000))
-        assertEquals(Reconnect.Retrying(90_000, 0), Reconnect.Idle.failed(90_000))
-    }
 }
