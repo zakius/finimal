@@ -142,7 +142,7 @@ class ScratchTest {
             assertEquals("bytes 500000-${content.size - 1}/${content.size}", r.header("Content-Range"))
             assertContentEquals(slice(500000), r.body.bytes())
         }
-        assertEquals(500000L / chunk * chunk, starts.first())
+        assertEquals(7L * chunk, starts.first()) // byte 500000 is in chunk 7
     }
 
     @Test fun closedRangeReturnsJustThoseBytes() {
