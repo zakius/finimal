@@ -110,6 +110,15 @@ class ScratchTest {
 
     private fun slice(from: Int, to: Int = content.size) = content.copyOfRange(from, to)
 
+    /** Leaves whole chunks on disk for [key], as an earlier run would have. */
+    private fun onDisk(vararg chunks: Int, key: String = "k"): File {
+        val folder = File(dir, key)
+        folder.mkdirs()
+        File(folder, "length").writeText("${content.size}")
+        for (i in chunks) File(folder, "$i").writeBytes(slice(i * chunk, (i + 1) * chunk))
+        return folder
+    }
+
     private fun reopen() {
         server.close()
         scratch.close()
@@ -133,7 +142,7 @@ class ScratchTest {
             assertEquals("bytes 500000-${content.size - 1}/${content.size}", r.header("Content-Range"))
             assertContentEquals(slice(500000), r.body.bytes())
         }
-        assertEquals(500000L / chunk * chunk, starts.first())
+        assertEquals(7L * chunk, starts.first()) // byte 500000 is in chunk 7
     }
 
     @Test fun closedRangeReturnsJustThoseBytes() {
@@ -205,17 +214,13 @@ class ScratchTest {
     }
 
     @Test fun leftoverPartIsDroppedAndFetchedAgain() {
-        val folder = File(dir, "k")
-        folder.mkdirs()
-        File(folder, "length").writeText("${content.size}")
-        File(folder, "0").writeBytes(slice(0, chunk))
+        val folder = onDisk(0)
         File(folder, "1.part").writeBytes(ByteArray(500) { 9 })
         val e = entry()
-        assertTrue(e.has(0))
-        assertFalse(e.has(1))
         assertFalse(File(folder, "1.part").exists())
         e.download()
         assertFalse(0L in starts, "chunk 0 was on disk")
+        assertTrue(1L * chunk in starts, "chunk 1 was only a .part")
         reopen()
         entry()
         get().use { r -> assertContentEquals(content, r.body.bytes()) }
@@ -241,10 +246,8 @@ class ScratchTest {
 
     @Test fun serverIgnoringRangeStillFillsCorrectly() {
         honorRange = false
-        val e = entry()
-        e.setLength(content.size.toLong())
-        e.putChunk(1, slice(chunk, 2 * chunk))
-        e.download()
+        onDisk(1)
+        entry().download()
         reopen()
         entry()
         get().use { r -> assertContentEquals(content, r.body.bytes()) }
@@ -341,10 +344,8 @@ class ScratchTest {
     }
 
     @Test fun contiguousCountsWholeChunksFromAPosition() {
+        onDisk(2, 3)
         val e = entry()
-        e.setLength(content.size.toLong())
-        e.putChunk(2, slice(2 * chunk, 3 * chunk))
-        e.putChunk(3, slice(3 * chunk, 4 * chunk))
         assertEquals(0, e.contiguous(0))
         assertEquals(2L * chunk - 10, e.contiguous(2L * chunk + 10))
         assertEquals(2L * chunk, e.bytes())

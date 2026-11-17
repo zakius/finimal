@@ -5,23 +5,19 @@ import kotlin.test.assertEquals
 import kotlin.test.assertNull
 
 class ReconnectTest {
-    @Test fun firstFailureStartsTheWindow() {
-        val retrying = Reconnect.Idle.failed(5_000)
-        assertEquals(Reconnect.Retrying(5_000, 0), retrying)
-        assertEquals(1_000L, retrying.delayMs(5_000))
+    @Test fun backsOffThenGivesUpAfterTheWindow() {
+        val delays = (0..5).map { Reconnect.Retrying(5_000, it).delayMs(6_000) }
+        assertEquals(listOf(1_000L, 2_000L, 4_000L, 8_000L, 10_000L, 10_000L), delays)
+        assertEquals(10_000L, Reconnect.Retrying(5_000, 40).delayMs(5_000 + 59_999))
+        assertNull(Reconnect.Retrying(5_000, 3).delayMs(5_000 + RECONNECT_WINDOW_MS))
     }
 
-    @Test fun laterFailuresKeepTheWindowAndBackOff() {
-        var state = Reconnect.Idle.failed(0).reloaded().reloaded()
-        state = state.failed(30_000)
-        assertEquals(Reconnect.Retrying(0, 2), state)
-        assertEquals(4_000L, state.delayMs(30_000))
-        assertNull(state.delayMs(RECONNECT_WINDOW_MS))
-    }
+    @Test fun firstFailureStartsTheWindow() =
+        assertEquals(Reconnect.Retrying(5_000, 0), Reconnect.Idle.failed(5_000))
 
-    @Test fun nextOutageStartsFresh() {
-        // After recovering or giving up, the next failure starts at the first step again with its own window.
+    @Test fun laterFailuresKeepTheWindow() =
+        assertEquals(Reconnect.Retrying(0, 2), Reconnect.Idle.failed(0).reloaded().reloaded().failed(30_000))
+
+    @Test fun nextOutageAfterGivingUpStartsFresh() =
         assertEquals(Reconnect.Retrying(90_000, 0), Reconnect.GaveUp.failed(90_000))
-        assertEquals(Reconnect.Retrying(90_000, 0), Reconnect.Idle.failed(90_000))
-    }
 }

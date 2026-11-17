@@ -120,7 +120,7 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
                 val i = f.name.toIntOrNull()
                 if (i != null) {
                     present.set(i)
-                } else if (f.name.endsWith(".part") || f.name.endsWith(".import")) {
+                } else if (f.name.endsWith(".part")) {
                     f.delete()
                 }
             }
@@ -214,36 +214,6 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
             demands.clear()
             call?.cancel()
             (this as Object).notifyAll()
-        }
-
-        /** Sets the length of a file whose chunks come from elsewhere, such as a migration. Call it before [putChunk]. */
-        @Synchronized
-        fun setLength(total: Long) {
-            if (length == total) return
-            check(length < 0) { "length is $length, not $total" }
-            folder.mkdirs()
-            File(folder, "length").writeAtomically("$total")
-            length = total
-        }
-
-        @Synchronized
-        fun has(i: Int) = present[i]
-
-        /** Stores the whole chunk [i] without going through the filler. */
-        fun putChunk(i: Int, bytes: ByteArray) {
-            synchronized(this) {
-                require(bytes.size.toLong() == chunkLength(i)) { "chunk $i is ${chunkLength(i)} bytes, not ${bytes.size}" }
-            }
-            val part = File(folder, "$i.import")
-            FileOutputStream(part).use { out ->
-                out.write(bytes)
-                out.fd.sync()
-            }
-            if (!part.renameTo(chunkFile(i))) throw IOException("rename failed")
-            synchronized(this) {
-                present.set(i)
-                (this as Object).notifyAll()
-            }
         }
 
         /**
