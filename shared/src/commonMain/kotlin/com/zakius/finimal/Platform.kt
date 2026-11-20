@@ -37,6 +37,12 @@ interface Platform {
     /** "h264 1080p60, hevc 4K…" for Settings; null hides the line. */
     fun decoderSummary(): String?
     fun setAudioDelay(ms: Int)
+    /** Bytes currently held in the unpinned playback buffer. */
+    fun bufferBytes(): Long
+    /** Trims the playback buffer to the configured limit. */
+    fun evictBuffer()
+    /** Deletes all unpinned, non-playing entries from the playback buffer. */
+    fun clearBuffer()
 }
 
 /** Settings storage: SharedPreferences on Android, a JSON file on the desktop. Numbers come back as any [Number]. */
@@ -70,6 +76,8 @@ object App {
      * doesn't have to build the API client.
      */
     var sessionExpired by mutableStateOf(false)
+    /** Username of the account whose session expired, so LoginScreen can prefill it. */
+    var expiredUserName by mutableStateOf<String?>(null)
 
     /**
      * Unsynced play states of the logged-in account. Each server and user has its own file, so

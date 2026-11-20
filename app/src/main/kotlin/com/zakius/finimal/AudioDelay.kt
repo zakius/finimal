@@ -54,6 +54,7 @@ object AudioDelay {
         ms = delayMs
     }
 
+    val isWireless get() = wireless
     val us get() = if (wireless) ms * 1_000L else 0L
 
     /** Renderers whose audio clock runs [us] behind. */

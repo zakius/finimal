@@ -21,6 +21,16 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.border
+import androidx.compose.foundation.focusable
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isAltPressed
+import androidx.compose.ui.input.key.isCtrlPressed
+import androidx.compose.ui.input.key.isMetaPressed
+import androidx.compose.ui.input.key.isShiftPressed
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.text.input.VisualTransformation
 import org.jellyfin.sdk.model.api.LocationType
 import finimal.core.EpisodeRef
@@ -331,6 +341,7 @@ private fun downloadAllAction(fetch: suspend () -> List<BaseItemDto>): () -> Uni
     return action@{
         if (busy) return@action
         busy = true
+        toast("Checking episodes…")
         scope.launch {
             runCatching { fetch() }
                 .onSuccess { fetched ->
@@ -494,19 +505,38 @@ private fun Loaded(load: Load, onRetry: () -> Unit, onDownloads: () -> Unit, con
 private fun Empty(text: String) = Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) { Text(text) }
 
 @Composable
-fun LoginScreen(modifier: Modifier, onBack: (() -> Unit)? = null, onDone: () -> Unit) {
-    // Adding an account logs in another user of the same server, so the server fields are locked.
+fun LoginScreen(
+    modifier: Modifier,
+    onBack: (() -> Unit)? = null,
+    title: String? = null,
+    subtitle: String? = null,
+    initialUser: String? = null,
+    onSwitchAccount: (() -> Unit)? = null,
+    onDone: () -> Unit,
+) {
+    // Adding an account or resetting a PIN logs into the same server, so the server fields are locked.
     val adding = onBack != null
     val saved = remember { splitServerAddress(App.prefs.baseUrl) }
     var url by rememberSaveable { mutableStateOf(saved.first) }
     var port by rememberSaveable { mutableStateOf(saved.second) }
     // Typing the server refills the port with defaultPortFor's guess until the user writes their own.
     var portEdited by rememberSaveable { mutableStateOf(false) }
-    var user by rememberSaveable { mutableStateOf("") }
+    val prefilledUser = initialUser ?: if (App.sessionExpired && !adding) App.expiredUserName.orEmpty() else ""
+    var user by rememberSaveable { mutableStateOf(prefilledUser) }
     var pass by remember { mutableStateOf("") }
     var error by remember { mutableStateOf<Throwable?>(null) }
     var busy by remember { mutableStateOf(false) }
     var showPass by remember { mutableStateOf(false) }
+    val userFocus = remember { FocusRequester() }
+    val passFocus = remember { FocusRequester() }
+    var focusedOnce by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        if (!focusedOnce) {
+            focusedOnce = true
+            if (prefilledUser.isNotBlank()) runCatching { passFocus.requestFocus() }
+            else if (adding) runCatching { userFocus.requestFocus() }
+        }
+    }
     val scope = rememberCoroutineScope()
     val portOk = isValidPort(port.trim())
     val canSubmit = portOk && url.isNotBlank() && user.isNotBlank()
@@ -533,9 +563,10 @@ fun LoginScreen(modifier: Modifier, onBack: (() -> Unit)? = null, onDone: () -> 
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             if (onBack != null) IconButton(onClick = onBack) { Icon(LocalIcons.current.back, "Back") }
-            Text(if (adding) "Add account" else "finimal", style = MaterialTheme.typography.headlineMedium)
+            Text(title ?: if (adding) "Add account" else "finimal", style = MaterialTheme.typography.headlineMedium)
         }
-        if (App.sessionExpired && !adding) Text("The server ended this session. Log in again; unsynced progress is kept.")
+        if (subtitle != null) Text(subtitle)
+        else if (App.sessionExpired && !adding) Text("The server ended this session. Log in again; unsynced progress is kept.")
         // The port has its own field, prefilled from the host. A port typed into the server field wins (see serverCandidates).
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             OutlinedTextField(
@@ -581,7 +612,7 @@ fun LoginScreen(modifier: Modifier, onBack: (() -> Unit)? = null, onDone: () -> 
             label = { Text("Username") },
             singleLine = true,
             enabled = !busy,
-            modifier = Modifier.fillMaxWidth().semantics { contentType = ContentType.Username },
+            modifier = Modifier.fillMaxWidth().focusRequester(userFocus).semantics { contentType = ContentType.Username },
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
         )
         OutlinedTextField(
@@ -593,7 +624,7 @@ fun LoginScreen(modifier: Modifier, onBack: (() -> Unit)? = null, onDone: () -> 
             label = { Text("Password") },
             singleLine = true,
             enabled = !busy,
-            modifier = Modifier.fillMaxWidth().semantics { contentType = ContentType.Password },
+            modifier = Modifier.fillMaxWidth().focusRequester(passFocus).semantics { contentType = ContentType.Password },
             visualTransformation = if (showPass) VisualTransformation.None else PasswordVisualTransformation(),
             trailingIcon = { TextButton(onClick = { showPass = !showPass }) { Text(if (showPass) "Hide" else "Show") } },
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = ImeAction.Done),
@@ -609,8 +640,13 @@ fun LoginScreen(modifier: Modifier, onBack: (() -> Unit)? = null, onDone: () -> 
                 ErrorText(message + where, e.message ?: e.javaClass.simpleName, MaterialTheme.colorScheme.error)
             }
         }
-        Button(enabled = !busy && canSubmit, onClick = ::submit) {
-            if (busy) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp) else Text("Log in")
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Button(enabled = !busy && canSubmit, onClick = ::submit) {
+                if (busy) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp) else Text("Log in")
+            }
+            if (App.sessionExpired && !adding && onSwitchAccount != null && App.prefs.accounts().isNotEmpty()) {
+                TextButton(enabled = !busy, onClick = onSwitchAccount) { Text("Switch account") }
+            }
         }
     }
     }
@@ -631,12 +667,25 @@ fun LibrariesScreen(modifier: Modifier, push: (Screen) -> Unit) {
             me = m.copy(name = name)
         }
     }
-    Column(modifier.fillMaxSize()) {
+    Column(
+        modifier
+            .fillMaxSize()
+            .screenShortcuts(
+                onRefresh = { refresh++ },
+                onSearch = { push(Screen.Library(null, "Search")) },
+            )
+    ) {
         Bar("finimal", null) {
-            TextButton(onClick = { push(Screen.Library(null, "Search")) }) { Text("Search") }
-            if (App.downloads != null) TextButton(onClick = { push(Screen.Downloads) }) { Text("Downloads") }
+            IconButton(onClick = { push(Screen.Library(null, "Search")) }) { Icon(LocalIcons.current.search, "Search") }
+            if (App.downloads != null) IconButton(onClick = { push(Screen.Downloads) }) { Icon(LocalIcons.current.download, "Downloads") }
             IconButton(onClick = { push(Screen.Settings) }) { Icon(LocalIcons.current.settings, "Settings") }
             IconButton(onClick = { push(Screen.Accounts) }) { Avatar(me?.name.orEmpty(), Modifier.semantics { contentDescription = "Accounts" }) }
+            BarMenu { close ->
+                DropdownMenuItem({ Text("Refresh") }, {
+                    close()
+                    refresh++
+                })
+            }
         }
         Loaded(libs, { refresh++ }, { push(Screen.Downloads) }) { list ->
             if (list.isEmpty()) Empty("No movie or TV libraries on this server")
@@ -661,47 +710,117 @@ fun LibrariesScreen(modifier: Modifier, push: (Screen) -> Unit) {
 /** A library's poster grid; with a null id it searches every library. */
 @Composable
 fun LibraryScreen(modifier: Modifier, screen: Screen.Library, push: (Screen) -> Unit, pop: () -> Unit) {
-    var sort by rememberSaveable { mutableStateOf(Sort.NAME) }
-    var unplayed by rememberSaveable { mutableStateOf(false) }
+    val searchOnly = screen.id == null
+    var sort by rememberSaveable { mutableStateOf(if (screen.id != null) App.prefs.librarySort(screen.id) else Sort.NAME) }
+    var unplayed by rememberSaveable { mutableStateOf(if (screen.id != null) App.prefs.libraryUnplayed(screen.id) else false) }
     var search by rememberSaveable { mutableStateOf("") }
     var query by rememberSaveable { mutableStateOf("") }
+    var searchOpen by rememberSaveable { mutableStateOf(searchOnly) }
+    val showSearch = searchOnly || searchOpen || search.isNotEmpty()
+    var searchFocused by remember { mutableStateOf(false) }
+    var searchFocusTrigger by remember { mutableIntStateOf(0) }
     var refresh by remember { mutableIntStateOf(0) }
     LaunchedEffect(search) {
         delay(400)
         query = search
     }
-    val searchOnly = screen.id == null
     val focus = remember { FocusRequester() }
     val keyboard = LocalSoftwareKeyboardController.current
     var focusedOnce by rememberSaveable { mutableStateOf(false) } // Don't grab focus again when coming back.
     LaunchedEffect(Unit) {
         if (searchOnly && !focusedOnce) {
             focusedOnce = true
-            focus.requestFocus()
+            runCatching { focus.requestFocus() }
             keyboard?.show()
         }
+    }
+    LaunchedEffect(searchFocusTrigger) {
+        if (searchFocusTrigger > 0 && showSearch) {
+            runCatching { focus.requestFocus() }
+            keyboard?.show()
+        }
+    }
+    fun openSearch() {
+        searchOpen = true
+        searchFocusTrigger++
     }
     val items = if (searchOnly && query.isBlank()) {
         Load(Result.success(emptyList()), null)
     } else {
         loadFresh(screen.id, sort, unplayed, query, refresh = refresh, persist = query.isBlank()) { App.server.items(screen.id, sort, unplayed, query) }
     }
-    Column(modifier.fillMaxSize()) {
-        Bar(screen.name, pop)
-        OutlinedTextField(search, { search = it }, label = { Text("Search") }, singleLine = true,
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp).focusRequester(focus),
+    Column(
+        modifier
+            .fillMaxSize()
+            .screenShortcuts(
+                onRefresh = { refresh++ },
+                onSearch = ::openSearch,
+                searchFocused = searchFocused,
+                focusOnShow = !showSearch,
+            )
+    ) {
+        Bar(screen.name, pop) {
+            if (!searchOnly) {
+                IconButton(onClick = {
+                    if (showSearch) {
+                        searchOpen = false
+                        search = ""
+                        query = ""
+                        keyboard?.hide()
+                    } else {
+                        openSearch()
+                    }
+                }) { Icon(LocalIcons.current.search, "Search") }
+            }
+            BarMenu { close ->
+                DropdownMenuItem({ Text("Refresh") }, {
+                    close()
+                    refresh++
+                })
+            }
+        }
+        if (showSearch) OutlinedTextField(
+            search,
+            { search = it },
+            label = { Text("Search") },
+            singleLine = true,
+            trailingIcon = if (search.isNotEmpty()) {
+                {
+                    IconButton(onClick = {
+                        search = ""
+                        query = ""
+                    }) { Icon(LocalIcons.current.close, "Clear search") }
+                }
+            } else {
+                null
+            },
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp)
+                .focusRequester(focus)
+                .onFocusChanged { searchFocused = it.isFocused },
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
             keyboardActions = KeyboardActions(onSearch = {
                 query = search
                 keyboard?.hide()
-            }))
-        if (!searchOnly) Row(
+            }),
+        )
+        val libraryId = screen.id
+        if (libraryId != null) Row(
             Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             // The server orders search results by how well they match, whatever the sort.
-            Sort.entries.forEach { s -> FilterChip(sort == s, { sort = s }, { Text(s.label) }, enabled = query.isBlank()) }
-            FilterChip(unplayed, { unplayed = !unplayed }, { Text("Unplayed") })
+            Sort.entries.forEach { s ->
+                FilterChip(sort == s, {
+                    sort = s
+                    App.prefs.setLibrarySort(libraryId, s)
+                }, { Text(s.label) }, enabled = query.isBlank())
+            }
+            FilterChip(unplayed, {
+                unplayed = !unplayed
+                App.prefs.setLibraryUnplayed(libraryId, unplayed)
+            }, { Text("Unplayed") })
         }
         val statuses = rememberDownloadStatuses()
         val scope = rememberCoroutineScope()
@@ -805,6 +924,21 @@ private fun Poster(
             }
         }
         Text(item.name.orEmpty(), maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall)
+        if (item.type == BaseItemKind.MOVIE) {
+            val meta = listOfNotNull(
+                item.productionYear?.toString(),
+                item.runTimeTicks?.takeIf { it > 0 }?.let(::formatRuntime),
+            ).joinToString(" · ")
+            if (meta.isNotEmpty()) {
+                Text(
+                    meta,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
     }
 }
 
@@ -816,6 +950,7 @@ fun SeriesScreen(modifier: Modifier, screen: Screen.Series, push: (Screen) -> Un
     val episodes = loadFresh(screen.id, "episodes", refresh = refresh) { App.server.episodes(screen.id) }
     val statuses = rememberDownloadStatuses()
     var keepNext by remember { mutableIntStateOf(App.prefs.keepNext(screen.id)) }
+    var showKeepNextDialog by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val downloadAll = downloadAllAction { App.server.episodes(screen.id, sources = true).filter { it.parentIndexNumber != 0 } }
     val markAll = markAllAction { refresh++ }
@@ -826,16 +961,65 @@ fun SeriesScreen(modifier: Modifier, screen: Screen.Series, push: (Screen) -> Un
     } else {
         null
     }
+    // Only highlight up-next within a single season someone has started; an untouched season has nothing to point at.
+    val seasonNext = if (shownEpisodes != null && shownEpisodes.any { ep -> ep.localState().first?.lastPlayedMs != null }) {
+        upNext(shownEpisodes)
+    } else {
+        null
+    }
+    val listState = rememberLazyListState() // Outside Loaded, so the scroll survives its "Loading…" pass.
+    var scrolled by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(seasonNext != null) {
+        val i = shownEpisodes.orEmpty().indexOf(seasonNext)
+        if (!scrolled && i > 0) {
+            scrolled = true
+            listState.scrollToItem(i - 1)
+        }
+    }
+    fun updateKeepNext(n: Int) {
+        if (keepNext == 0 && n > 0) App.platform.askNotifications()
+        keepNext = n
+        App.prefs.setKeepNext(screen.id, n)
+        scope.launch(Dispatchers.IO) {
+            if (n == 0) App.downloads?.releaseKeepNext(screen.id)
+            App.platform.scheduleHousekeeping()
+        }
+    }
+    if (showKeepNextDialog) {
+        AlertDialog(
+            onDismissRequest = { showKeepNextDialog = false },
+            title = { Text("Keep next episodes") },
+            text = {
+                Stepper(
+                    "Episodes downloaded",
+                    keepNext,
+                    (0..20).toList(),
+                    { count -> if (count == 0) "off" else "$count" },
+                    Modifier.fillMaxWidth(),
+                    ::updateKeepNext,
+                )
+            },
+            confirmButton = { TextButton(onClick = { showKeepNextDialog = false }) { Text("Done") } },
+        )
+    }
     // With one season, "all" means its episodes as shown. With several, it means every episode outside the specials.
     val markCandidates = shownEpisodes ?: all?.filter { ep -> ep.parentIndexNumber != 0 && ep.locationType != LocationType.VIRTUAL }
     val markable = if (markCandidates.isNullOrEmpty()) null else markCandidates
-    Column(modifier.fillMaxSize()) {
+    Column(modifier.fillMaxSize().screenShortcuts(onRefresh = { refresh++ })) {
         Bar(screen.name, pop) {
-            if (App.downloads != null || markable != null) BarMenu { close ->
+            BarMenu { close ->
+                DropdownMenuItem({ Text("Refresh") }, {
+                    close()
+                    refresh++
+                })
                 if (App.downloads != null) {
                     DropdownMenuItem({ Text("Download all") }, {
                         close()
                         downloadAll()
+                    })
+                    DropdownMenuItem({ Text("Keep next episodes…") }, {
+                        close()
+                        showKeepNextDialog = true
                     })
                 }
                 if (markable != null) {
@@ -849,29 +1033,36 @@ fun SeriesScreen(modifier: Modifier, screen: Screen.Series, push: (Screen) -> Un
         }
         val next = if (all != null) upNext(all) else null
         if (next != null) ContinueButton(next) { push(Screen.Play(next.id.toString())) }
-        if (App.downloads != null) Stepper(
-            "Keep next episodes downloaded:",
-            keepNext,
-            (0..20).toList(),
-            { count -> if (count == 0) "off" else "$count" },
-        ) { n ->
-            if (keepNext == 0) App.platform.askNotifications()
-            keepNext = n
-            App.prefs.setKeepNext(screen.id, n)
-            scope.launch(Dispatchers.IO) {
-                if (n == 0) App.downloads?.releaseKeepNext(screen.id)
-                App.platform.scheduleHousekeeping()
+        if (App.downloads != null && keepNext > 0) {
+            val plural = if (keepNext == 1) "" else "s"
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clickable { showKeepNextDialog = true }
+                    .padding(horizontal = 16.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "Keeping next $keepNext episode$plural downloaded",
+                    Modifier.weight(1f),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text("Change", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
             }
         }
-        val listState = rememberLazyListState() // Outside Loaded, so the scroll survives its "Loading…" pass.
         Loaded(seasons, { refresh++ }, { push(Screen.Downloads) }) { list ->
             if (list.isEmpty()) Empty("This series has no seasons")
             else if (shownEpisodes != null) LazyColumn(state = listState) {
                 items(shownEpisodes, key = { it.id }) { ep ->
-                    EpisodeRow(ep, statuses?.get(ep.id.toString()),
+                    EpisodeRow(
+                        ep,
+                        statuses?.get(ep.id.toString()),
+                        highlighted = ep.id == seasonNext?.id,
                         onPlay = { push(Screen.Play(ep.id.toString())) },
                         onStartOver = { scope.launch { startOver(ep, push) } },
-                        onChanged = { refresh++ })
+                        onChanged = { refresh++ },
+                    )
                 }
             }
             else LazyColumn(state = listState) {
@@ -886,9 +1077,20 @@ fun SeriesScreen(modifier: Modifier, screen: Screen.Series, push: (Screen) -> Un
                             .padding(16.dp)
                     ) {
                         Text(season.name.orEmpty(), Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
-                        val left = season.userData?.unplayedItemCount ?: 0
-                        // This count comes from the server, so it lags local plays until the next sync. Episode rows show local state.
-                        Text(if (left == 0) "✓" else "$left unplayed", Modifier.semantics { if (left == 0) contentDescription = "Played" })
+                        val left = if (all != null) {
+                            all.count { ep ->
+                                ep.seasonId == season.id &&
+                                    ep.locationType != LocationType.VIRTUAL &&
+                                    ep.localState().first?.played != true
+                            }
+                        } else {
+                            season.userData?.unplayedItemCount ?: 0
+                        }
+                        Text(
+                            if (left == 0) "✓" else "$left unplayed",
+                            Modifier.semantics { if (left == 0) contentDescription = "Played" },
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     }
                     HorizontalDivider()
                 }
@@ -917,9 +1119,13 @@ fun SeasonScreen(modifier: Modifier, screen: Screen.Season, push: (Screen) -> Un
             listState.scrollToItem(i - 1)
         }
     }
-    Column(modifier.fillMaxSize()) {
+    Column(modifier.fillMaxSize().screenShortcuts(onRefresh = { refresh++ })) {
         Bar(screen.name, pop) {
-            if (App.downloads != null || !list.isNullOrEmpty()) BarMenu { close ->
+            BarMenu { close ->
+                DropdownMenuItem({ Text("Refresh") }, {
+                    close()
+                    refresh++
+                })
                 if (App.downloads != null) {
                     DropdownMenuItem({ Text("Download season") }, {
                         close()
@@ -962,8 +1168,15 @@ private fun ContinueButton(ep: BaseItemDto, onClick: () -> Unit) {
     Button(onClick, Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
         Icon(LocalIcons.current.play, null)
         val verb = if (position > 0) "Continue " else "Play "
-        val timeLeft = if (minutesLeft != null) " · ${minutesLeft.coerceAtLeast(1)} min left" else ""
-        Text(verb + episodeLabel(ep) + timeLeft, Modifier.padding(start = 8.dp), maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(
+            verb + episodeLabel(ep),
+            Modifier.padding(start = 8.dp).weight(1f, fill = false),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        if (minutesLeft != null) {
+            Text(" · ${minutesLeft.coerceAtLeast(1)} min left", maxLines = 1)
+        }
     }
 }
 
@@ -1006,7 +1219,7 @@ fun EpisodeRow(
                 download?.label,
                 if (unsynced) "not synced" else null,
             )
-            Text(bits.joinToString(" · "), style = MaterialTheme.typography.labelSmall)
+            Text(bits.joinToString(" · "), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         Box {
             IconButton(onClick = { menu = true }) { Icon(LocalIcons.current.more, "More options") }
@@ -1023,13 +1236,76 @@ private fun ProgressBar(item: BaseItemDto, state: PlayState?, modifier: Modifier
     }
 }
 
+private fun formatRuntime(ticks: Long): String {
+    val totalMin = (ticks / TICKS_PER_MS / 60_000).coerceAtLeast(1)
+    val hours = totalMin / 60
+    val mins = totalMin % 60
+    return when {
+        hours > 0 && mins > 0 -> "${hours}h ${mins}m"
+        hours > 0 -> "${hours}h"
+        else -> "${mins}m"
+    }
+}
+
+@Composable
+private fun ItemInfoDialog(item: BaseItemDto, onDismiss: () -> Unit) {
+    var full by remember(item.id) { mutableStateOf(if (item.overview != null) item else null) }
+    var loading by remember(item.id) { mutableStateOf(item.overview == null) }
+    LaunchedEffect(item.id) {
+        if (item.overview == null) {
+            full = runCatching { App.server.item(item.id.toString()) }.getOrNull() ?: item
+            loading = false
+        }
+    }
+    val shown = full ?: item
+    val subtitle = listOfNotNull(
+        shown.productionYear?.toString(),
+        shown.runTimeTicks?.takeIf { it > 0 }?.let(::formatRuntime),
+    ).joinToString(" · ")
+    val title = if (shown.type == BaseItemKind.EPISODE) {
+        val series = shown.seriesName
+        if (series.isNullOrBlank()) episodeLabel(shown) else "$series · ${episodeLabel(shown)}"
+    } else {
+        shown.name.orEmpty()
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title) },
+        text = {
+            Column(
+                Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                if (subtitle.isNotEmpty()) {
+                    Text(subtitle, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                if (loading) {
+                    Box(Modifier.fillMaxWidth().padding(vertical = 8.dp), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
+                    }
+                } else {
+                    val overview = shown.overview?.trim().orEmpty()
+                    Text(
+                        overview.ifEmpty { "No description available" },
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = if (overview.isEmpty()) MaterialTheme.colorScheme.onSurfaceVariant else Color.Unspecified,
+                    )
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
+    )
+}
+
 /** Actions of an episode or movie. */
 @Composable
 private fun ItemMenu(item: BaseItemDto, played: Boolean, unsynced: Boolean, expanded: Boolean, onDismiss: () -> Unit, downloaded: Boolean, onStartOver: (() -> Unit)?, onChanged: () -> Unit) {
     val id = item.id.toString()
     val scope = rememberCoroutineScope()
     var confirm by remember { mutableStateOf(false) }
+    var showInfo by remember { mutableStateOf(false) }
     ConfirmDelete(if (confirm) item else null, { confirm = false }, onChanged)
+    if (showInfo) ItemInfoDialog(item) { showInfo = false }
     DropdownMenu(expanded, onDismiss) {
         if (onStartOver != null) {
             DropdownMenuItem({ Text("Start over") }, {
@@ -1043,6 +1319,10 @@ private fun ItemMenu(item: BaseItemDto, played: Boolean, unsynced: Boolean, expa
                 App.server.setPlayed(listOf(id), !played)
                 onChanged()
             }
+        })
+        DropdownMenuItem({ Text("Info") }, {
+            onDismiss()
+            showInfo = true
         })
         if (App.downloads != null && downloaded) {
             DropdownMenuItem({ Text("Delete download") }, {
@@ -1072,20 +1352,19 @@ private fun ItemMenu(item: BaseItemDto, played: Boolean, unsynced: Boolean, expa
 fun DownloadsScreen(modifier: Modifier, push: (Screen) -> Unit, pop: () -> Unit) {
     val media = App.downloads!! // The screen is only offered where there are downloads.
     val statuses = rememberDownloadStatuses()
-    // Triples of (header key, header, status): unfinished first in queue order, then finished by series, with movies last.
-    val downloads = remember(statuses) {
-        val (done, queue) = statuses.orEmpty().values.partition { status -> status.fill == Fill.DONE }
-        val queueRows = queue
+    val queueItems = remember(statuses) {
+        statuses.orEmpty().values
+            .filter { status -> status.fill != Fill.DONE }
             .sortedWith(compareBy(queueOrder) { status -> status.download })
-            .map { status -> Triple("h-queue", "Queue", status) }
-        val doneRows = done
+    }
+    val doneGroups = remember(statuses) {
+        statuses.orEmpty().values
+            .filter { status -> status.fill == Fill.DONE }
             .sortedWith(compareBy(shelfOrder) { status -> status.download })
-            .map { status ->
+            .groupBy { status ->
                 val seriesId = status.download.item.seriesId
-                if (seriesId != null) Triple("h-$seriesId", status.download.item.seriesName.orEmpty(), status)
-                else Triple("h-movies", "Movies", status)
+                if (seriesId != null) "h-$seriesId" else "h-movies"
             }
-        queueRows + doneRows
     }
     val storage by produceState("", statuses) {
         val (buffered, free, others) = withContext(Dispatchers.IO) {
@@ -1098,72 +1377,154 @@ fun DownloadsScreen(modifier: Modifier, push: (Screen) -> Unit, pop: () -> Unit)
         value = text
     }
     val scope = rememberCoroutineScope()
-    var deleting by remember { mutableStateOf<BaseItemDto?>(null) }
-    ConfirmDelete(deleting, { deleting = null })
+    var deletingSeries by remember { mutableStateOf<Pair<String, List<BaseItemDto>>?>(null) }
+    val delSeries = deletingSeries
+    if (delSeries != null) {
+        val (seriesTitle, seriesItems) = delSeries
+        Confirm(
+            "Delete all ${seriesItems.size} downloaded episodes of $seriesTitle?",
+            "Delete",
+            onConfirm = {
+                scope.launch(Dispatchers.IO) {
+                    for (item in seriesItems) media.deleteDownload(item.id.toString())
+                }
+            },
+            onDismiss = { deletingSeries = null },
+        )
+    }
+    @Composable
+    fun DownloadRow(group: String, status: DownloadStatus) {
+        val d = status.download
+        val id = d.item.id.toString()
+        val (state, unsynced) = d.item.localState()
+        var menu by remember { mutableStateOf(false) }
+        val rowTitle = if (group == "h-queue" && d.item.type == BaseItemKind.EPISODE && !d.item.seriesName.isNullOrBlank()) {
+            "${d.item.seriesName} · ${episodeLabel(d.item)}"
+        } else {
+            itemLabel(d.item)
+        }
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .focusMemory(id)
+                .onSecondaryClick { menu = true }
+                .combinedClickable(onClick = { push(Screen.Play(id)) }, onLongClickLabel = "Actions", onLongClick = { menu = true })
+                .padding(start = 16.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(rowTitle)
+                val size = when {
+                    status.fill != Fill.DONE -> if (status.totalBytes > 0) {
+                        " · ${formatBytes(status.bytes)} / ${formatBytes(status.totalBytes)}"
+                    } else {
+                        " · ${formatBytes(status.bytes)}"
+                    }
+                    status.bytes > 0 -> " · ${formatBytes(status.bytes)}"
+                    else -> ""
+                }
+                val bits = listOfNotNull(
+                    status.label + size,
+                    if (d.auto) "kept by keep-next" else null,
+                    if (state?.played == true) "✓ played" else null,
+                    if (unsynced) "not synced" else null,
+                )
+                Text(bits.joinToString(" · "), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (status.fill != Fill.DONE) LinearProgressIndicator({ status.percent / 100f }, Modifier.fillMaxWidth().padding(top = 4.dp))
+                else ProgressBar(d.item, state)
+            }
+            when (status.fill) {
+                Fill.RUNNING, Fill.QUEUED -> TextButton(onClick = {
+                    scope.launch(Dispatchers.IO) { media.pauseDownload(id) }
+                }) { Text("Pause") }
+                Fill.PAUSED -> TextButton(onClick = {
+                    scope.launch(Dispatchers.IO) {
+                        // A fresh copy of the item when the server answers, else the one saved with the download.
+                        val fresh = runCatching { App.server.item(id) }.getOrDefault(d.item)
+                        media.startDownload(fresh, d.auto)
+                    }
+                }) { Text(if (d.failed) "Retry" else "Resume") }
+                Fill.DONE -> {}
+            }
+            Box {
+                IconButton(onClick = { menu = true }) { Icon(LocalIcons.current.more, "More options") }
+                ItemMenu(
+                    d.item,
+                    state?.played == true,
+                    unsynced,
+                    menu,
+                    { menu = false },
+                    downloaded = true,
+                    onStartOver = { scope.launch { startOver(d.item, push) } },
+                    onChanged = {},
+                )
+            }
+        }
+    }
     Column(modifier.fillMaxSize()) {
         Bar("Downloads", pop)
-        Text(storage, Modifier.padding(horizontal = 16.dp))
+        Text(storage, Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         if (media.storageMissing) Text("SD card not available. Downloads wait for it; restart the app after inserting it.",
             Modifier.padding(horizontal = 16.dp), color = MaterialTheme.colorScheme.error)
-        if (statuses != null && downloads.isEmpty()) Empty("Nothing downloaded. Use ⋮ on an episode or a series, or long-press a movie.")
+        if (statuses != null && queueItems.isEmpty() && doneGroups.isEmpty()) Empty("Nothing downloaded. Use ⋮ on an episode or a series, or long-press a movie.")
         else LazyColumn {
-            var lastGroup: String? = null
-            for ((group, title, status) in downloads) {
-                if (group != lastGroup) {
-                    lastGroup = group
-                    val seriesId = if (status.fill == Fill.DONE) status.download.item.seriesId else null
-                    item(key = group) {
+            if (queueItems.isNotEmpty()) {
+                item(key = "h-queue") {
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(start = 16.dp, end = 8.dp, top = 12.dp, bottom = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text("Queue", Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
+                        if (queueItems.size >= 2) {
+                            val anyActive = queueItems.any { it.fill == Fill.RUNNING || it.fill == Fill.QUEUED }
+                            if (anyActive) {
+                                TextButton(onClick = {
+                                    scope.launch(Dispatchers.IO) {
+                                        // Pause queued items first so pausing the running item doesn't briefly start the next one.
+                                        val ordered = queueItems.filter { it.fill == Fill.QUEUED } + queueItems.filter { it.fill == Fill.RUNNING }
+                                        for (s in ordered) media.pauseDownload(s.download.item.id.toString())
+                                    }
+                                }) { Text("Pause all") }
+                            } else {
+                                TextButton(onClick = {
+                                    scope.launch(Dispatchers.IO) {
+                                        for (s in queueItems) media.startDownload(s.download.item, s.download.auto)
+                                    }
+                                }) { Text("Resume all") }
+                            }
+                        }
+                    }
+                }
+                items(queueItems, key = { it.download.item.id }) { status -> DownloadRow("h-queue", status) }
+            }
+            for ((group, groupItems) in doneGroups) {
+                val first = groupItems.first().download.item
+                val seriesId = first.seriesId
+                val title = if (seriesId != null) first.seriesName.orEmpty() else "Movies"
+                item(key = group) {
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(start = 16.dp, end = 8.dp, top = 12.dp, bottom = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
                         Text(
                             title,
                             style = MaterialTheme.typography.titleMedium,
                             modifier = Modifier
-                                .fillMaxWidth()
-                                .then(if (seriesId != null) Modifier.clickable { push(Screen.Series(seriesId.toString(), title)) } else Modifier)
-                                .padding(16.dp, 12.dp, 16.dp, 4.dp),
+                                .weight(1f)
+                                .then(if (seriesId != null) Modifier.clickable { push(Screen.Series(seriesId.toString(), title)) } else Modifier),
                         )
+                        if (seriesId != null && groupItems.size >= 2) {
+                            TextButton(onClick = { deletingSeries = Pair(title, groupItems.map { it.download.item }) }) {
+                                Text("Delete all")
+                            }
+                        }
                     }
                 }
-                val d = status.download
-                item(key = d.item.id) {
-                    val id = d.item.id.toString()
-                    val (state, unsynced) = d.item.localState()
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .focusMemory(id)
-                            .combinedClickable(onClick = { push(Screen.Play(id)) })
-                            .padding(horizontal = 16.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Column(Modifier.weight(1f)) {
-                            Text(itemLabel(d.item))
-                            val size = if (status.bytes > 0) " · ${formatBytes(status.bytes)}" else ""
-                            val bits = listOfNotNull(
-                                status.label + size,
-                                if (d.auto) "kept by keep-next" else null,
-                                if (state?.played == true) "✓ played" else null,
-                                if (unsynced) "not synced" else null,
-                            )
-                            Text(bits.joinToString(" · "), style = MaterialTheme.typography.labelSmall)
-                            if (status.fill != Fill.DONE) LinearProgressIndicator({ status.percent / 100f }, Modifier.fillMaxWidth().padding(top = 4.dp))
-                            else ProgressBar(d.item, state)
-                        }
-                        when (status.fill) {
-                            Fill.RUNNING, Fill.QUEUED -> TextButton(onClick = {
-                                scope.launch(Dispatchers.IO) { media.pauseDownload(id) }
-                            }) { Text("Pause") }
-                            Fill.PAUSED -> TextButton(onClick = {
-                                scope.launch(Dispatchers.IO) {
-                                    // A fresh copy of the item when the server answers, else the one saved with the download.
-                                    val fresh = runCatching { App.server.item(id) }.getOrDefault(d.item)
-                                    media.startDownload(fresh, d.auto)
-                                }
-                            }) { Text(if (d.failed) "Retry" else "Resume") }
-                            Fill.DONE -> {}
-                        }
-                        TextButton(onClick = { deleting = d.item }) { Text("Delete") }
-                    }
-                }
+                items(groupItems, key = { it.download.item.id }) { status -> DownloadRow(group, status) }
             }
         }
     }
@@ -1173,6 +1534,13 @@ fun DownloadsScreen(modifier: Modifier, push: (Screen) -> Unit, pop: () -> Unit)
 fun SettingsScreen(modifier: Modifier, pop: () -> Unit, onAccounts: () -> Unit, onLoggedOut: () -> Unit) {
     val p = App.prefs
     var refresh by remember { mutableIntStateOf(0) } // Bumped to redraw after a pref changes.
+    var bufferRefresh by remember { mutableIntStateOf(0) }
+    var clearingBuffer by remember { mutableStateOf(false) }
+    val bufferUsed by produceState<Long?>(null, bufferRefresh) {
+        if (!App.platform.android && App.downloads == null) {
+            value = withContext(Dispatchers.IO) { App.platform.bufferBytes() }
+        }
+    }
     @Composable
     fun toggle(label: String, value: Boolean, enabled: Boolean = true, set: (Boolean) -> Unit) = Row(
         Modifier
@@ -1228,7 +1596,12 @@ fun SettingsScreen(modifier: Modifier, pop: () -> Unit, onAccounts: () -> Unit, 
             key(refresh) {
                 val android = App.platform.android
                 val downloads = App.downloads
-                Text("Network", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(16.dp))
+                val storageHeader = when {
+                    android -> "Network and storage"
+                    downloads == null -> "Cache"
+                    else -> "Network"
+                }
+                Text(storageHeader, style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(16.dp))
                 if (android) toggle("Buffer to end on metered networks", p.bufferOnMetered) { p.bufferOnMetered = it }
                 if (android && downloads != null) toggle("Download on metered networks", p.downloadOnMetered) { on ->
                     p.downloadOnMetered = on
@@ -1237,6 +1610,35 @@ fun SettingsScreen(modifier: Modifier, pop: () -> Unit, onAccounts: () -> Unit, 
                 Stepper("Buffer cache limit (GB)", p.cacheLimitGb, listOf(1, 2, 5, 10, 20, 50, 100)) { gb ->
                     p.cacheLimitGb = gb
                     refresh++
+                    scope.launch {
+                        withContext(Dispatchers.IO) { App.platform.evictBuffer() }
+                        bufferRefresh++
+                    }
+                }
+                if (!android && downloads == null) {
+                    val used = bufferUsed
+                    Row(
+                        Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            if (used != null) "Buffer used: ${formatBytes(used)}" else "Buffer used: …",
+                            Modifier.weight(1f),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        TextButton(
+                            enabled = !clearingBuffer && (used == null || used > 0),
+                            onClick = {
+                                clearingBuffer = true
+                                scope.launch {
+                                    withContext(Dispatchers.IO) { App.platform.clearBuffer() }
+                                    clearingBuffer = false
+                                    bufferRefresh++
+                                }
+                            },
+                        ) { Text("Clear buffer") }
+                    }
                 }
                 if (downloads != null && (downloads.storageRoots().size > 1 || downloads.storageMissing)) { // When the card is missing, switching back to internal storage is the way out.
                     toggle("Store on SD card (switching deletes downloads and the buffer)", p.storageIndex > 0, enabled = !moving) { on ->
@@ -1258,11 +1660,25 @@ fun SettingsScreen(modifier: Modifier, pop: () -> Unit, onAccounts: () -> Unit, 
                 // Files past these limits start as a transcode. Auto asks the hardware decoders per file.
                 val decoders = remember { App.platform.decoderSummary() }
                 if (decoders != null) {
-                    Text("Hardware decoders: $decoders", Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.labelSmall)
+                    Text(
+                        "Hardware decoders: $decoders",
+                        Modifier.padding(horizontal = 16.dp),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
                 Text("Direct play up to", Modifier.padding(16.dp, 8.dp, 16.dp, 0.dp))
+                if (!android) {
+                    Text(
+                        "Transcodes taller videos to save bandwidth",
+                        Modifier.padding(horizontal = 16.dp),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
                 Row(Modifier.padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf(Pair(0, "Auto"), Pair(2160, "4K"), Pair(1080, "1080p"), Pair(720, "720p")).forEach { (h, label) ->
+                    val autoLabel = if (android) "Auto" else "No limit"
+                    listOf(Pair(0, autoLabel), Pair(2160, "4K"), Pair(1080, "1080p"), Pair(720, "720p")).forEach { (h, label) ->
                         FilterChip(p.maxHeight == h, {
                             p.maxHeight = h
                             refresh++
@@ -1281,8 +1697,12 @@ fun SettingsScreen(modifier: Modifier, pop: () -> Unit, onAccounts: () -> Unit, 
                 }
                 if (android && p.learnedCodecs().isNotEmpty()) {
                     val codecs = p.learnedCodecs().joinToString { codec -> codec.uppercase() }
-                    Text("Transcoding sooner for $codecs after choppy playback",
-                        Modifier.padding(16.dp, 8.dp, 16.dp, 0.dp), style = MaterialTheme.typography.labelSmall)
+                    Text(
+                        "Transcoding sooner for $codecs after choppy playback",
+                        Modifier.padding(16.dp, 8.dp, 16.dp, 0.dp),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                     TextButton(onClick = {
                         p.forgetLearned()
                         refresh++
@@ -1320,11 +1740,61 @@ fun SettingsScreen(modifier: Modifier, pop: () -> Unit, onAccounts: () -> Unit, 
                     TextButton(onClick = onAccounts) { Text("Accounts and PIN") }
                     TextButton(onClick = { confirmLogout = true }) { Text("Log out") }
                 }
-                Text("finimal ${App.platform.versionName}", Modifier.padding(16.dp), style = MaterialTheme.typography.labelSmall)
+                Text(
+                    "finimal ${App.platform.versionName}",
+                    Modifier.padding(16.dp),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
                 Spacer(Modifier.padding(24.dp))
             }
         }
     }
+}
+
+/** Keyboard shortcuts for list screens: F5 / Ctrl+R refreshes; Ctrl+F or / opens search when supported. */
+private fun Modifier.screenShortcuts(
+    onRefresh: () -> Unit,
+    onSearch: (() -> Unit)? = null,
+    searchFocused: Boolean = false,
+    focusOnShow: Boolean = true,
+): Modifier = composed {
+    val latestRefresh by rememberUpdatedState(onRefresh)
+    val latestSearch by rememberUpdatedState(onSearch)
+    val latestSearchFocused by rememberUpdatedState(searchFocused)
+    val latestFocusOnShow by rememberUpdatedState(focusOnShow)
+    val focusModifier = if (!App.platform.android) {
+        val requester = remember { FocusRequester() }
+        val shown = LocalShown.current
+        LaunchedEffect(Unit) {
+            snapshotFlow { shown.value }.collect { visible ->
+                if (visible && latestFocusOnShow) runCatching { requester.requestFocus() }
+            }
+        }
+        Modifier.focusRequester(requester).focusable()
+    } else {
+        Modifier
+    }
+    this.onPreviewKeyEvent { e ->
+        if (e.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+        val ctrl = e.isCtrlPressed || e.isMetaPressed
+        val noMods = !e.isCtrlPressed && !e.isMetaPressed && !e.isAltPressed
+        when {
+            e.key == Key.F5 || (ctrl && e.key == Key.R) -> {
+                latestRefresh()
+                true
+            }
+            latestSearch != null && ctrl && e.key == Key.F -> {
+                latestSearch?.invoke()
+                true
+            }
+            latestSearch != null && !latestSearchFocused && noMods && !e.isShiftPressed && e.key == Key.Slash -> {
+                latestSearch?.invoke()
+                true
+            }
+            else -> false
+        }
+    }.then(focusModifier)
 }
 
 /** A right click does what a long press does, opening an item's menu with the mouse. Touch has no secondary button. */
@@ -1342,8 +1812,15 @@ private fun Modifier.onSecondaryClick(action: (() -> Unit)?): Modifier = if (act
 
 /** A "− value +" control that steps through [options]. A stored value not in the list shows as the nearest option. */
 @Composable
-private fun Stepper(label: String, value: Int, options: List<Int>, show: (Int) -> String = Int::toString, set: (Int) -> Unit) =
-    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+private fun Stepper(
+    label: String,
+    value: Int,
+    options: List<Int>,
+    show: (Int) -> String = Int::toString,
+    modifier: Modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+    set: (Int) -> Unit,
+) =
+    Row(modifier, verticalAlignment = Alignment.CenterVertically) {
         val i = options.indices.minBy { index -> abs(options[index] - value) }
         Text(label, Modifier.weight(1f))
         TextButton(onClick = { set(options[i - 1]) }, enabled = i > 0) {
@@ -1389,12 +1866,19 @@ private fun Avatar(name: String, modifier: Modifier = Modifier) =
  * the first screen ([pop] null) it is "Who's watching?". The current account sets or removes its own PIN here.
  */
 @Composable
-fun AccountsScreen(modifier: Modifier, pop: (() -> Unit)?, onSwitched: () -> Unit, onAdd: () -> Unit) {
+fun AccountsScreen(
+    modifier: Modifier,
+    pop: (() -> Unit)?,
+    onSwitched: () -> Unit,
+    onAdd: () -> Unit,
+    onForgotPin: (String) -> Unit = {},
+) {
     val p = App.prefs
     var refresh by remember { mutableIntStateOf(0) }
     val accounts = remember(refresh) { p.accounts() }
     var asking by remember { mutableStateOf<Account?>(null) }
     var settingPin by remember { mutableStateOf(false) }
+    var confirmPin by remember { mutableStateOf<String?>(null) }
     val picking = pop == null
     fun open(a: Account) {
         if (a.userId != p.userId) App.server.switchTo(a)
@@ -1402,7 +1886,11 @@ fun AccountsScreen(modifier: Modifier, pop: (() -> Unit)?, onSwitched: () -> Uni
     }
     val askingFor = asking
     if (askingFor != null) {
-        PinDialog("PIN for ${askingFor.name.ifEmpty { "this account" }}", { asking = null }) { pin ->
+        PinDialog(
+            "PIN for ${askingFor.name.ifEmpty { "this account" }}",
+            onDismiss = { asking = null },
+            onForgot = { onForgotPin(askingFor.name) },
+        ) { pin ->
             val matches = p.pinMatches(askingFor, pin)
             if (matches) {
                 asking = null
@@ -1411,11 +1899,32 @@ fun AccountsScreen(modifier: Modifier, pop: (() -> Unit)?, onSwitched: () -> Uni
             matches
         }
     }
-    if (settingPin) PinDialog("New PIN", { settingPin = false }) { pin ->
-        p.setPin(p.userId!!, pin)
-        settingPin = false
-        refresh++
-        true
+    if (settingPin) {
+        val firstPin = confirmPin
+        key(firstPin != null) {
+            if (firstPin == null) {
+                PinDialog("New PIN", onDismiss = { settingPin = false; confirmPin = null }) { pin ->
+                    confirmPin = pin
+                    true
+                }
+            } else {
+                PinDialog(
+                    "Confirm PIN",
+                    onDismiss = { settingPin = false; confirmPin = null },
+                    wrongText = "PINs don't match",
+                ) { pin ->
+                    if (pin == firstPin) {
+                        p.setPin(p.userId!!, pin)
+                        settingPin = false
+                        confirmPin = null
+                        refresh++
+                        true
+                    } else {
+                        false
+                    }
+                }
+            }
+        }
     }
     Column(modifier.fillMaxSize()) {
         Bar(if (picking) "Who's watching?" else "Accounts", pop)
@@ -1436,17 +1945,21 @@ fun AccountsScreen(modifier: Modifier, pop: (() -> Unit)?, onSwitched: () -> Uni
                     Avatar(a.name)
                     val suffix = if (current) " (current)" else ""
                     Text(a.name.ifEmpty { "Account" } + suffix, Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
-                    if (a.pin != null) Text("PIN", style = MaterialTheme.typography.labelSmall)
+                    if (a.pin != null) Text("PIN", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
             TextButton(onClick = onAdd, Modifier.padding(horizontal = 8.dp)) { Text("Add account") }
             if (!picking) {
                 val me = accounts.firstOrNull { account -> account.userId == p.userId }
                 HorizontalDivider()
-                Text("Your PIN is asked when switching to your account. It keeps your titles and history from others on this device.",
-                    Modifier.padding(16.dp), style = MaterialTheme.typography.bodySmall)
+                Text(
+                    "Your PIN is asked when switching to your account. It keeps your titles and history from others on this device.",
+                    Modifier.padding(16.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
                 Row(Modifier.padding(horizontal = 8.dp)) {
-                    TextButton(onClick = { settingPin = true }) { Text(if (me?.pin == null) "Set PIN" else "Change PIN") }
+                    TextButton(onClick = { settingPin = true; confirmPin = null }) { Text(if (me?.pin == null) "Set PIN" else "Change PIN") }
                     if (me?.pin != null) {
                         TextButton(onClick = {
                             p.setPin(me.userId, null)
@@ -1461,39 +1974,53 @@ fun AccountsScreen(modifier: Modifier, pop: (() -> Unit)?, onSwitched: () -> Uni
 
 /** Asks for a PIN of 4 to 8 digits; [onPin] answers whether it was accepted. */
 @Composable
-private fun PinDialog(title: String, onDismiss: () -> Unit, onPin: (String) -> Boolean) {
+private fun PinDialog(
+    title: String,
+    onDismiss: () -> Unit,
+    wrongText: String = "Wrong PIN",
+    onForgot: (() -> Unit)? = null,
+    onPin: (String) -> Boolean,
+) {
     var pin by remember { mutableStateOf("") }
     var wrong by remember { mutableStateOf(false) }
     val ok = pin.length in 4..8
     // Typing goes straight in, from a keyboard or a TV remote's number keys.
     val focus = remember { FocusRequester() }
-    LaunchedEffect(Unit) { focus.requestFocus() }
+    LaunchedEffect(Unit) { runCatching { focus.requestFocus() } }
     // A wrong PIN clears the field, and focus goes back to it, because the now disabled OK button can't keep focus.
     fun submit() {
         if (!onPin(pin)) {
             wrong = true
             pin = ""
-            focus.requestFocus()
+            runCatching { focus.requestFocus() }
         }
     }
     AlertDialog(onDismiss,
         title = { Text(title) },
         text = {
-            OutlinedTextField(
-                pin,
-                { text ->
-                    pin = text.filter(Char::isDigit).take(8)
-                    wrong = false
-                },
-                singleLine = true,
-                isError = wrong,
-                label = { Text("PIN") },
-                supportingText = { Text(if (wrong) "Wrong PIN" else "4 to 8 digits") },
-                modifier = Modifier.focusRequester(focus),
-                visualTransformation = PasswordVisualTransformation(),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword, imeAction = ImeAction.Done),
-                keyboardActions = KeyboardActions(onDone = { if (ok) submit() }),
-            )
+            Column {
+                OutlinedTextField(
+                    pin,
+                    { text ->
+                        pin = text.filter(Char::isDigit).take(8)
+                        wrong = false
+                    },
+                    singleLine = true,
+                    isError = wrong,
+                    label = { Text("PIN") },
+                    supportingText = { Text(if (wrong) wrongText else "4 to 8 digits") },
+                    modifier = Modifier.focusRequester(focus),
+                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword, imeAction = ImeAction.Done),
+                    keyboardActions = KeyboardActions(onDone = { if (ok) submit() }),
+                )
+                if (onForgot != null) {
+                    TextButton(onClick = {
+                        onDismiss()
+                        onForgot()
+                    }) { Text("Forgot PIN?") }
+                }
+            }
         },
         confirmButton = { TextButton(onClick = ::submit, enabled = ok) { Text("OK") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })

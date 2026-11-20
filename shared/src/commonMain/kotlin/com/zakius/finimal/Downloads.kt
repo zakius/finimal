@@ -30,7 +30,15 @@ val shelfOrder = compareBy<Download>({ it.item.seriesId == null }, { it.item.ser
 
 enum class Fill { DONE, RUNNING, QUEUED, PAUSED }
 /** [position] is 1 for the next queued item; [waitingFor] is [Downloads.downloadsWaitingFor]. */
-data class DownloadStatus(val download: Download, val percent: Int, val fill: Fill, val bytes: Long, val position: Int, val waitingFor: String?) {
+data class DownloadStatus(
+    val download: Download,
+    val percent: Int,
+    val fill: Fill,
+    val bytes: Long,
+    val position: Int,
+    val waitingFor: String?,
+    val totalBytes: Long = 0,
+) {
     val label get() = when (fill) {
         Fill.DONE -> if (download.transcoded) "downloaded, transcoded" else "downloaded"
         Fill.RUNNING -> "${waitingFor ?: "downloading"} · $percent%"

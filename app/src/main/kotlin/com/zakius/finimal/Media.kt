@@ -434,18 +434,20 @@ object Media : Downloads {
     }
 
 
+    private class Progress(val bytes: Long, val totalBytes: Long, val percent: Int, val done: Boolean)
+
     /**
-     * Bytes on disk, percent done, and whether the download is complete. A transcode's percent counts segments,
-     * because their sizes aren't known in advance.
+     * Bytes on disk, total bytes (0 for transcoded), percent done, and whether the download is complete. A transcode's
+     * percent counts segments, because their sizes aren't known in advance.
      */
-    private fun progress(d: Download): Triple<Long, Int, Boolean> {
+    private fun progress(d: Download): Progress {
         if (!d.transcoded) {
             val e = scratch.entry(key(d.item))
             val knownLength = e.length
             val len = if (knownLength > 0) knownLength else d.item.mediaSources?.firstOrNull()?.size ?: 0L
             val bytes = e.bytes()
             val percent = if (len > 0) (bytes * 100 / len).toInt() else 0
-            return Triple(bytes, percent, e.complete)
+            return Progress(bytes, len, percent, e.complete)
         }
         val dir = transcodeDir(d.item.id.toString())
         val files = dir.listFiles().orEmpty()
@@ -454,7 +456,7 @@ object Media : Downloads {
         val done = files.count { it.name.endsWith(".ts") }
         val bytes = files.sumOf { it.length() }
         val percent = if (total > 0) done * 100 / total else 0
-        return Triple(bytes, percent, File(dir, PLAYLIST).exists())
+        return Progress(bytes, 0L, percent, File(dir, PLAYLIST).exists())
     }
 
     /**
@@ -553,19 +555,19 @@ object Media : Downloads {
         val waitingFor = downloadsWaitingFor()
         val progress = all.associateWith(::progress)
         val queue = all
-            .filter { d -> !d.paused && d.item.id.toString() != current && !progress[d]!!.third }
+            .filter { d -> !d.paused && d.item.id.toString() != current && !progress[d]!!.done }
             .sortedWith(queueOrder)
             .map { d -> d.item.id.toString() }
         return all.associate { d ->
             val id = d.item.id.toString()
-            val (bytes, percent, done) = progress[d]!!
+            val p = progress[d]!!
             val fill = when {
-                done -> Fill.DONE
+                p.done -> Fill.DONE
                 d.paused -> Fill.PAUSED
                 current == id -> Fill.RUNNING
                 else -> Fill.QUEUED
             }
-            id to DownloadStatus(d, percent, fill, bytes, queue.indexOf(id) + 1, waitingFor)
+            id to DownloadStatus(d, p.percent, fill, p.bytes, queue.indexOf(id) + 1, waitingFor, p.totalBytes)
         }
     }
 
@@ -623,6 +625,15 @@ object Media : Downloads {
         val limit = bufferLimit(limitBytes, bufferedBytes, freeBytes(), storageRoot().totalSpace)
         // An entry that is still open (by the player or a download) refuses deletion and is evicted on a later pass.
         evictionOrder(entries, limit, playing).forEach { scratch.delete(it) }
+    }
+
+    /** Deletes every unpinned, non-playing scratch entry. */
+    fun clearBuffer() {
+        val ids = pinnedIds()
+        val active = playing
+        scratch.keys()
+            .filter { key -> !isPinned(key, ids) && key != active }
+            .forEach { scratch.delete(it) }
     }
 
     /** After a failed write: whether the disk is still nearly full once the buffer is evicted. */

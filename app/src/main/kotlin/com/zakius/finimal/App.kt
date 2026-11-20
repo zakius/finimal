@@ -104,6 +104,9 @@ class AndroidApp : Application(), Platform, SingletonImageLoader.Factory, Config
     override fun askNotifications() { activity?.askNotifications() }
     override fun decoderSummary() = HardwareDecoders.summary()
     override fun setAudioDelay(ms: Int) = AudioDelay.set(ms)
+    override fun bufferBytes() = Media.bufferedBytes()
+    override fun evictBuffer() = Media.evict()
+    override fun clearBuffer() = Media.clearBuffer()
 
     /** The activity on screen, for the notification permission prompt. */
     var activity: MainActivity? = null

@@ -1,8 +1,11 @@
 package com.zakius.finimal.desktop
 
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.TooltipArea
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -11,6 +14,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
@@ -21,12 +26,16 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -47,8 +56,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.addPathNodes
 import androidx.compose.ui.input.key.Key
@@ -59,10 +70,15 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.PointerIcon
+import androidx.compose.ui.input.pointer.PointerInputChange
+import androidx.compose.ui.input.pointer.PointerType
+import androidx.compose.ui.input.pointer.changedToUp
+import androidx.compose.ui.input.pointer.isPrimaryPressed
 import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.zakius.finimal.App
@@ -116,6 +132,10 @@ private val PauseIcon = icon("Pause", "M6,19h4V5H6v14zm8,-14v14h4V5h-4z")
 private val NextIcon = icon("SkipNext", "M6,18l8.5,-6L6,6v12zM16,6v12h2V6h-2z")
 private val FullscreenIcon = icon("Fullscreen", "M7,14H5v5h5v-2H7v-3zm-2,-4h2V7h3V5H5v5zm12,7h-3v2h5v-5h-2v3zM14,5v2h3v3h2V5h-5z")
 private val FullscreenExitIcon = icon("FullscreenExit", "M5,16h3v3h2v-5H5v2zm3,-8H5v2h5V5H8v3zm6,11h2v-3h3v-2h-5v5zm2,-11V5h-2v5h5V8h-3z")
+private val RewindIcon = icon("FastRewind", "M11,18V6l-8.5,6 8.5,6zm0.5,-6l8.5,6V6l-8.5,6z")
+private val ForwardIcon = icon("FastForward", "M4,18l8.5,-6L4,6v12zm9,-12v12l8.5,-6L13,6z")
+private val VolumeUpIcon = icon("VolumeUp", "M3,9v6h4l5,5V4L7,9H3zm13.5,3c0,-1.77 -1.02,-3.29 -2.5,-4.03v8.05c1.48,-0.73 2.5,-2.25 2.5,-4.02zM14,3.23v2.06c2.89,0.86 5,3.54 5,6.71s-2.11,5.85 -5,6.71v2.06c4.01,-0.91 7,-4.49 7,-8.77s-2.99,-7.86 -7,-8.77z")
+private val VolumeOffIcon = icon("VolumeOff", "M16.5,12c0,-1.77 -1.02,-3.29 -2.5,-4.03v2.21l2.45,2.45c0.03,-0.2 0.05,-0.41 0.05,-0.63zm2.5,0c0,0.94 -0.2,1.82 -0.54,2.64l1.51,1.51C20.63,14.91 21,13.5 21,12c0,-4.28 -2.99,-7.86 -7,-8.77v2.06c2.89,0.86 5,3.54 5,6.71zM4.27,3L3,4.27 7.73,9H3v6h4l5,5v-6.73l4.25,4.25c-0.67,0.52 -1.42,0.93 -2.25,1.18v2.06c1.38,-0.31 2.63,-0.95 3.69,-1.81L19.73,21 21,19.73l-9,-9L4.27,3zM12,4L9.91,6.09 12,8.18V4z")
 
 /** Loads the item and the episodes that can follow it, then plays. */
 @Composable
@@ -607,95 +627,142 @@ private fun VideoSurface(
         val blank = java.awt.image.BufferedImage(1, 1, java.awt.image.BufferedImage.TYPE_INT_ARGB)
         PointerIcon(java.awt.Toolkit.getDefaultToolkit().createCustomCursor(blank, java.awt.Point(), "none"))
     }
-    Box(
-        Modifier.fillMaxSize()
-            .background(Color.Black)
-            .onPointerEvent(PointerEventType.Move) { interact() }
-            .onPointerEvent(PointerEventType.Scroll) { e ->
-                val scroll = e.changes.firstOrNull()?.scrollDelta?.y
-                if (scroll != null && scroll != 0f) volumeBy(if (scroll < 0) 5.0 else -5.0)
+    MaterialTheme(colorScheme = darkColorScheme()) {
+        Box(
+            Modifier.fillMaxSize()
+                .background(Color.Black)
+                .onPointerEvent(PointerEventType.Move) { interact() }
+                .onPointerEvent(PointerEventType.Scroll) { e ->
+                    val scroll = e.changes.firstOrNull()?.scrollDelta?.y
+                    if (scroll != null && scroll != 0f) volumeBy(if (scroll < 0) 5.0 else -5.0)
+                }
+                .pointerHoverIcon(cursor)
+                .pointerInput(mpv) {
+                    var lastTapTime = -1L
+                    var lastTapPos = Offset.Zero
+                    var lastTapPausedBefore = false
+                    val doubleTapSlop = 48.dp.toPx()
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = true)
+                        if (down.type == PointerType.Mouse && !currentEvent.buttons.isPrimaryPressed) return@awaitEachGesture
+                        val downPos = down.position
+                        var moved = false
+                        var up: PointerInputChange? = null
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                            if (change.isConsumed) {
+                                moved = true
+                                break
+                            }
+                            if ((change.position - downPos).getDistance() > viewConfiguration.touchSlop) {
+                                moved = true
+                            }
+                            if (change.changedToUp()) {
+                                up = change
+                                break
+                            }
+                            if (!change.pressed) break
+                        }
+                        val release = up ?: return@awaitEachGesture
+                        if (moved) return@awaitEachGesture
+                        release.consume()
+                        val now = release.uptimeMillis
+                        val isDouble = lastTapTime >= 0L &&
+                            now - lastTapTime <= viewConfiguration.doubleTapTimeoutMillis &&
+                            (release.position - lastTapPos).getDistance() <= doubleTapSlop
+                        if (isDouble) {
+                            lastTapTime = -1L
+                            if (lastTapPausedBefore) mpv.pause() else mpv.play()
+                            toggleFullscreen()
+                        } else {
+                            lastTapTime = now
+                            lastTapPos = release.position
+                            lastTapPausedBefore = mpv.paused
+                            togglePlay()
+                            interact()
+                        }
+                    }
+                }
+        ) {
+            Canvas(Modifier.fillMaxSize().onSizeChanged { size -> mpv.resize(size.width, size.height) }) {
+                mpv.frame?.let { drawImage(it) }
             }
-            .pointerHoverIcon(cursor)
-            .pointerInput(Unit) {
-                detectTapGestures(
-                    onTap = {
-                        togglePlay()
-                        interact()
-                    },
-                    onDoubleTap = { toggleFullscreen() },
+
+            val overlayText = overlay
+            if (overlayText != null) {
+                Text(
+                    overlayText,
+                    color = Color.White,
+                    style = MaterialTheme.typography.titleLarge,
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .background(Color(0x99000000), MaterialTheme.shapes.small)
+                        .padding(12.dp),
                 )
             }
-    ) {
-        Canvas(Modifier.fillMaxSize().onSizeChanged { size -> mpv.resize(size.width, size.height) }) {
-            mpv.frame?.let { drawImage(it) }
-        }
-
-        val overlayText = overlay
-        if (overlayText != null) {
-            Text(
-                overlayText,
-                color = Color.White,
-                style = MaterialTheme.typography.titleLarge,
-                modifier = Modifier
-                    .align(Alignment.Center)
-                    .background(Color(0x99000000), MaterialTheme.shapes.small)
-                    .padding(12.dp),
-            )
-        }
-        // While reconnecting, the last frame stays up with a note, instead of the error or the end screen.
-        val error = if (reconnecting) null else failure
-        val ended = ended && !reconnecting
-        if (reconnecting) {
-            Text(
-                "Reconnecting…",
-                Modifier
-                    .align(Alignment.Center)
-                    .background(Color(0x99000000), MaterialTheme.shapes.small)
-                    .padding(12.dp),
-                color = Color.White,
-                style = MaterialTheme.typography.labelLarge,
-            )
-        } else if (mpv.buffering && error == null && !ended) {
-            CircularProgressIndicator(Modifier.align(Alignment.Center), color = Color.White)
-        }
-
-        if (skip != null && !controls) FilledTonalButton(skip.onClick, Modifier.align(Alignment.BottomEnd).padding(32.dp)) { Text(skip.label) }
-
-        if (resumedAt != null && error == null && !ended) {
-            val noteModifier = Modifier
-                .align(Alignment.TopCenter)
-                .padding(top = 64.dp)
-                .background(Color(0x99000000), MaterialTheme.shapes.small)
-                .padding(start = 12.dp)
-            Row(noteModifier, verticalAlignment = Alignment.CenterVertically) {
-                Text("Resumed at ${formatMs(resumedAt)}", color = Color.White, style = MaterialTheme.typography.labelLarge)
-                TextButton(
-                    onClick = {
-                        onSeek(0, true)
-                        onResumeNoteGone()
-                    },
-                ) { Text("Start over") }
+            // While reconnecting, the last frame stays up with a note, instead of the error or the end screen.
+            val error = if (reconnecting) null else failure
+            val ended = ended && !reconnecting
+            if (reconnecting) {
+                Text(
+                    "Reconnecting…",
+                    Modifier
+                        .align(Alignment.Center)
+                        .background(Color(0x99000000), MaterialTheme.shapes.small)
+                        .padding(12.dp),
+                    color = Color.White,
+                    style = MaterialTheme.typography.labelLarge,
+                )
+            } else if (mpv.buffering && error == null && !ended) {
+                CircularProgressIndicator(Modifier.align(Alignment.Center), color = Color.White)
             }
-        }
 
-        if (error != null) {
-            Column(Modifier.align(Alignment.Center).padding(16.dp), Arrangement.spacedBy(8.dp), Alignment.CenterHorizontally) {
-                ErrorText(error, null, Color.White)
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Button(onClick = onRetry) { Text("Retry") }
+            if (skip != null && !controls) FilledTonalButton(skip.onClick, Modifier.align(Alignment.BottomEnd).padding(32.dp)) { Text(skip.label) }
+
+            if (error != null) {
+                Column(Modifier.align(Alignment.Center).padding(16.dp), Arrangement.spacedBy(8.dp), Alignment.CenterHorizontally) {
+                    ErrorText(error, null, Color.White)
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Button(onClick = onRetry) { Text("Retry") }
+                        FilledTonalButton(onClick = onBack) { Text("Back") }
+                    }
+                }
+            } else if (ended) {
+                Column(Modifier.align(Alignment.Center).padding(horizontal = 16.dp), Arrangement.spacedBy(8.dp), Alignment.CenterHorizontally) {
+                    if (next != null) Button(onClick = { onPlay(next.id.toString()) }) {
+                        Text("Play next: ${episodeLabel(next)}", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
                     FilledTonalButton(onClick = onBack) { Text("Back") }
                 }
+            } else if (controls) {
+                Controls(mpv, item, positionMs, durationMs, title, transcoding, fullscreen, skip, next, menu, { menu = it },
+                    stepSeconds = prefs.doubleTapSeconds,
+                    onBack = onBack,
+                    onToggleFullscreen = ::toggleFullscreen,
+                    onSeek = onSeek,
+                    onSeekBy = ::seekBy,
+                    onPlay = onPlay,
+                    onTracksChosen = onTracksChosen,
+                    onInteraction = ::interact)
             }
-        } else if (ended) {
-            Column(Modifier.align(Alignment.Center).padding(horizontal = 16.dp), Arrangement.spacedBy(8.dp), Alignment.CenterHorizontally) {
-                if (next != null) Button(onClick = { onPlay(next.id.toString()) }) {
-                    Text("Play next: ${episodeLabel(next)}", maxLines = 1, overflow = TextOverflow.Ellipsis)
+
+            if (resumedAt != null && error == null && !ended) {
+                val noteModifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 64.dp)
+                    .background(Color(0x99000000), MaterialTheme.shapes.small)
+                    .padding(start = 12.dp)
+                Row(noteModifier, verticalAlignment = Alignment.CenterVertically) {
+                    Text("Resumed at ${formatMs(resumedAt)}", color = Color.White, style = MaterialTheme.typography.labelLarge)
+                    TextButton(
+                        onClick = {
+                            onSeek(0, true)
+                            onResumeNoteGone()
+                        },
+                    ) { Text("Start over") }
                 }
-                FilledTonalButton(onClick = onBack) { Text("Back") }
             }
-        } else if (controls) {
-            Controls(mpv, item, positionMs, durationMs, title, transcoding, fullscreen, skip, next, menu, { menu = it },
-                onBack, ::toggleFullscreen, onSeek, onPlay, onTracksChosen, onInteraction = ::interact)
         }
     }
 }
@@ -713,17 +780,23 @@ private fun Controls(
     next: BaseItemDto?,
     menu: Boolean,
     onMenu: (Boolean) -> Unit,
+    stepSeconds: Int,
     onBack: () -> Unit,
     onToggleFullscreen: () -> Unit,
     onSeek: (Long, Boolean) -> Unit,
+    onSeekBy: (Long) -> Unit,
     onPlay: (String) -> Unit,
     onTracksChosen: (String?, String?) -> Unit,
     onInteraction: () -> Unit,
 ) {
     var sub by remember { mutableStateOf<String?>(null) }
-    var tracks by remember { mutableStateOf<List<Mpv.Track>>(emptyList()) }
+    var tracks by remember { mutableStateOf<List<Mpv.Track>?>(null) }
+    var subtitleScale by remember { mutableIntStateOf(App.prefs.subtitleScale) }
+    var audioDelayMs by remember { mutableIntStateOf(App.prefs.audioDelayMs) }
     var dragging by remember { mutableFloatStateOf(-1f) }
+    var volumeDragging by remember { mutableFloatStateOf(-1f) }
     val chapters = remember(item) { chapters(item) }
+    val stepMs = stepSeconds * 1000L
     LaunchedEffect(menu) {
         while (menu) {
             onInteraction()
@@ -732,10 +805,8 @@ private fun Controls(
     }
     // The end or error screen can replace the controls while the menu is open. Close the menu so it doesn't keep the keys.
     DisposableEffect(Unit) { onDispose { onMenu(false) } }
-    LaunchedEffect(sub, mpv.tracksChanged) {
-        if (sub == "audio" || sub == "text") {
-            tracks = withContext(Dispatchers.IO) { mpv.tracks() }
-        }
+    LaunchedEffect(menu, mpv.tracksChanged) {
+        if (menu) tracks = withContext(Dispatchers.IO) { mpv.tracks() }
     }
     fun close() {
         onMenu(false)
@@ -743,29 +814,46 @@ private fun Controls(
     }
     Box(Modifier.fillMaxSize().background(Color(0x55000000))) {
         Row(Modifier.align(Alignment.TopStart).fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = Color.White) }
+            Tip("Back (Esc)") {
+                IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = Color.White) }
+            }
             Column(Modifier.weight(1f)) {
                 Text(title, color = Color.White, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 if (transcoding) Text("Transcoding to fit the \"Direct play up to\" setting", color = Color.White, style = MaterialTheme.typography.labelSmall)
             }
             Box {
-                IconButton(
-                    onClick = {
-                        onMenu(true)
-                        onInteraction()
-                    },
-                ) { Icon(Icons.Default.MoreVert, "Menu", tint = Color.White) }
+                Tip("Menu") {
+                    IconButton(
+                        onClick = {
+                            onMenu(true)
+                            onInteraction()
+                        },
+                    ) { Icon(Icons.Default.MoreVert, "Menu", tint = Color.White) }
+                }
                 DropdownMenu(expanded = menu, onDismissRequest = ::close) {
                     when (sub) {
                         null -> {
+                            val loaded = tracks
+                            val audioTracks = loaded?.filter { it.type == "audio" }
+                            val audioText = audioTracks?.indexOfFirst { it.selected }?.takeIf { it >= 0 }?.let { i ->
+                                "Audio: ${trackLabel(audioTracks[i]).ifEmpty { "Track ${i + 1}" }}"
+                            } ?: "Audio"
+                            val subTracks = loaded?.filter { it.type == "sub" }
+                            val subText = if (subTracks == null) {
+                                "Subtitles"
+                            } else {
+                                val i = subTracks.indexOfFirst { it.selected }
+                                if (i < 0) "Subtitles: Off" else "Subtitles: ${trackLabel(subTracks[i]).ifEmpty { "Track ${i + 1}" }}"
+                            }
                             DropdownMenuItem({ Text("Speed: ${speedLabel(mpv.speed)}") }, { sub = "speed" })
-                            DropdownMenuItem({ Text("Audio") }, { sub = "audio" })
-                            DropdownMenuItem({ Text("Subtitles") }, { sub = "text" })
-                            DropdownMenuItem({ Text("Subtitle size: ${App.prefs.subtitleScale}%") }, { sub = "size" })
-                            DropdownMenuItem({ Text("Audio delay: ${App.prefs.audioDelayMs} ms") }, { sub = "delay" })
+                            DropdownMenuItem({ Text(audioText) }, { sub = "audio" })
+                            DropdownMenuItem({ Text(subText) }, { sub = "text" })
+                            DropdownMenuItem({ Text("Subtitle size: $subtitleScale%") }, { sub = "size" })
+                            DropdownMenuItem({ Text("Audio delay: $audioDelayMs ms") }, { sub = "delay" })
                             if (chapters.isNotEmpty()) DropdownMenuItem({ Text("Chapters") }, { sub = "chapters" })
                         }
                         "chapters" -> {
+                            SubmenuBack("Chapters") { sub = null }
                             val current = chapterAt(chapters.map { it.startMs }, positionMs)
                             chapters.forEachIndexed { i, c ->
                                 val name = c.name.ifEmpty { "Chapter ${i + 1}" }
@@ -775,56 +863,78 @@ private fun Controls(
                                 }
                             }
                         }
-                        "speed" -> listOf(0.5, 0.75, 1.0, 1.25, 1.5, 2.0).forEach { s ->
-                            Choice(speedLabel(s), mpv.speed == s) {
-                                sessionSpeed = s
-                                mpv.set("speed", "$s")
-                                close()
+                        "speed" -> {
+                            SubmenuBack("Speed") { sub = null }
+                            listOf(0.5, 0.75, 1.0, 1.25, 1.5, 2.0).forEach { s ->
+                                Choice(speedLabel(s), mpv.speed == s) {
+                                    sessionSpeed = s
+                                    mpv.set("speed", "$s")
+                                    close()
+                                }
                             }
                         }
-                        "size" -> listOf(50, 75, 100, 125, 150, 200).forEach { s ->
-                            Choice("$s%", App.prefs.subtitleScale == s) {
-                                App.prefs.subtitleScale = s
-                                mpv.set("sub-scale", "${s / 100.0}")
-                                close()
+                        "size" -> {
+                            SubmenuBack("Subtitle size") { sub = null }
+                            listOf(50, 75, 100, 125, 150, 200).forEach { s ->
+                                Choice("$s%", subtitleScale == s) {
+                                    subtitleScale = s
+                                    App.prefs.subtitleScale = s
+                                    mpv.set("sub-scale", "${s / 100.0}")
+                                }
                             }
                         }
-                        "delay" -> AUDIO_DELAYS_MS.forEach { d ->
-                            Choice("$d ms", App.prefs.audioDelayMs == d) {
-                                App.prefs.audioDelayMs = d
-                                mpv.set("audio-delay", "${-d / 1000.0}")
-                                close()
+                        "delay" -> {
+                            SubmenuBack("Audio delay") { sub = null }
+                            AUDIO_DELAYS_MS.forEach { d ->
+                                Choice("$d ms", audioDelayMs == d) {
+                                    audioDelayMs = d
+                                    App.prefs.audioDelayMs = d
+                                    mpv.set("audio-delay", "${-d / 1000.0}")
+                                }
                             }
                         }
                         "audio", "text" -> {
                             val type = if (sub == "audio") "audio" else "sub"
-                            fun selectedLanguage(t: String): String? {
-                                val language = tracks.firstOrNull { it.type == t && it.selected }?.language
-                                if (language != null) return language
-                                return if (t == "sub") "" else null
-                            }
-                            if (type == "sub") {
-                                Choice("Off", tracks.none { it.type == "sub" && it.selected }) {
-                                    mpv.set("sid", "no")
-                                    onTracksChosen(selectedLanguage("audio"), "")
-                                    close()
+                            SubmenuBack(if (type == "audio") "Audio" else "Subtitles") { sub = null }
+                            val loaded = tracks
+                            if (loaded == null) {
+                                DropdownMenuItem({ Text("Loading…") }, {}, enabled = false)
+                            } else {
+                                val matching = loaded.filter { it.type == type }
+                                fun selectedLanguage(t: String): String? {
+                                    val language = loaded.firstOrNull { it.type == t && it.selected }?.language
+                                    if (language != null) return language
+                                    return if (t == "sub") "" else null
                                 }
-                            }
-                            tracks.filter { it.type == type }.forEachIndexed { i, t ->
-                                Choice(trackLabel(t).ifEmpty { "Track ${i + 1}" }, t.selected) {
-                                    mpv.set(if (type == "audio") "aid" else "sid", t.id)
-                                    val audio = if (type == "audio") t.language else selectedLanguage("audio")
-                                    val subtitle = if (type == "sub") t.language else selectedLanguage("sub")
-                                    onTracksChosen(audio, subtitle)
-                                    close()
+                                if (matching.isEmpty()) {
+                                    DropdownMenuItem({ Text("No tracks") }, {}, enabled = false)
+                                } else {
+                                    if (type == "sub") {
+                                        Choice("Off", matching.none { it.selected }) {
+                                            mpv.set("sid", "no")
+                                            onTracksChosen(selectedLanguage("audio"), "")
+                                            close()
+                                        }
+                                    }
+                                    matching.forEachIndexed { i, t ->
+                                        Choice(trackLabel(t).ifEmpty { "Track ${i + 1}" }, t.selected) {
+                                            mpv.set(if (type == "audio") "aid" else "sid", t.id)
+                                            val audio = if (type == "audio") t.language else selectedLanguage("audio")
+                                            val subtitle = if (type == "sub") t.language else selectedLanguage("sub")
+                                            onTracksChosen(audio, subtitle)
+                                            close()
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
                 }
             }
-            IconButton(onClick = onToggleFullscreen) {
-                Icon(if (fullscreen) FullscreenExitIcon else FullscreenIcon, if (fullscreen) "Exit fullscreen" else "Fullscreen", tint = Color.White)
+            Tip(if (fullscreen) "Exit fullscreen (F)" else "Fullscreen (F)") {
+                IconButton(onClick = onToggleFullscreen) {
+                    Icon(if (fullscreen) FullscreenExitIcon else FullscreenIcon, if (fullscreen) "Exit fullscreen" else "Fullscreen", tint = Color.White)
+                }
             }
         }
 
@@ -836,20 +946,91 @@ private fun Controls(
                 val onDiskMs = (DesktopMedia.cachedUntil(item, shown / 1000.0, durationMs / 1000.0) * 1000).toLong()
                 onDiskMs.coerceAtLeast((mpv.cachedUntil * 1000).toLong())
             }
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(
-                    onClick = {
-                        if (mpv.paused) mpv.play() else mpv.pause()
+            val bufferedNote = if (durationMs > 0 && cached >= durationMs - 2_000) "" else "  (buffered ${formatMs(cached)})"
+            val chapterNote = if (dragging >= 0 && chapters.isNotEmpty()) {
+                val i = chapterAt(chapters.map { it.startMs }, shown)
+                if (i >= 0) " · ${chapters[i].name.ifEmpty { "Chapter ${i + 1}" }}" else ""
+            } else {
+                ""
+            }
+            val shownVolume = if (volumeDragging >= 0f) volumeDragging else if (mpv.muted) 0f else mpv.volume.toFloat().coerceIn(0f, 130f)
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Tip("Back ${stepSeconds}s (←)") {
+                    IconButton(onClick = { onSeekBy(-stepMs); onInteraction() }) {
+                        Icon(RewindIcon, "Back ${stepSeconds}s", tint = Color.White)
+                    }
+                }
+                Tip("Play / Pause (Space)") {
+                    IconButton(
+                        onClick = {
+                            if (mpv.paused) mpv.play() else mpv.pause()
+                            onInteraction()
+                        },
+                    ) {
+                        Icon(if (mpv.paused) Icons.Default.PlayArrow else PauseIcon, if (mpv.paused) "Play" else "Pause", Modifier.size(32.dp), tint = Color.White)
+                    }
+                }
+                Tip("Forward ${stepSeconds}s (→)") {
+                    IconButton(onClick = { onSeekBy(stepMs); onInteraction() }) {
+                        Icon(ForwardIcon, "Forward ${stepSeconds}s", tint = Color.White)
+                    }
+                }
+                if (next != null) {
+                    Tip("Next episode (N)") {
+                        IconButton(onClick = { onPlay(next.id.toString()) }) { Icon(NextIcon, "Next episode", tint = Color.White) }
+                    }
+                }
+                Text(
+                    "${formatMs(shown)} / ${formatMs(durationMs)}$bufferedNote$chapterNote",
+                    color = Color.White,
+                    style = MaterialTheme.typography.labelMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
+                )
+                Tip("Mute (M)") {
+                    IconButton(onClick = { mpv.command("cycle", "mute"); onInteraction() }) {
+                        Icon(if (mpv.muted || shownVolume <= 0f) VolumeOffIcon else VolumeUpIcon, if (mpv.muted) "Unmute" else "Mute", tint = Color.White)
+                    }
+                }
+                Slider(
+                    value = shownVolume.coerceIn(0f, 130f),
+                    valueRange = 0f..130f,
+                    onValueChange = { v ->
+                        volumeDragging = v
+                        if (v > 0f && mpv.muted) mpv.set("mute", "no")
+                        mpv.set("volume", "$v")
                         onInteraction()
                     },
-                ) {
-                    Icon(if (mpv.paused) Icons.Default.PlayArrow else PauseIcon, if (mpv.paused) "Play" else "Pause", Modifier.size(32.dp), tint = Color.White)
-                }
-                if (next != null) IconButton(onClick = { onPlay(next.id.toString()) }) { Icon(NextIcon, "Next episode", tint = Color.White) }
-                Text("${formatMs(shown)} / ${formatMs(durationMs)}  (buffered ${formatMs(cached)})", color = Color.White, style = MaterialTheme.typography.labelMedium)
+                    onValueChangeFinished = { volumeDragging = -1f },
+                    modifier = Modifier.width(100.dp),
+                )
+                Text(
+                    "${shownVolume.toInt()}%",
+                    color = Color.White,
+                    style = MaterialTheme.typography.labelMedium,
+                    textAlign = TextAlign.End,
+                    maxLines = 1,
+                    modifier = Modifier.widthIn(min = 40.dp),
+                )
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(Modifier.weight(1f)) {
+                    Canvas(Modifier.matchParentSize()) {
+                        if (durationMs <= 0 || cached <= 0) return@Canvas
+                        val left = 10.dp.toPx()
+                        val trackWidth = size.width - 2 * left
+                        if (trackWidth <= 0f) return@Canvas
+                        val endX = left + trackWidth * (cached.toFloat() / durationMs).coerceIn(0f, 1f)
+                        drawLine(
+                            color = Color.White.copy(alpha = 0.35f),
+                            start = Offset(left, center.y),
+                            end = Offset(endX, center.y),
+                            strokeWidth = 4.dp.toPx(),
+                            cap = StrokeCap.Round,
+                        )
+                    }
+                    ChapterMarks(chapters, durationMs, Modifier.matchParentSize())
                     Slider(
                         value = shown.toFloat().coerceIn(0f, durationMs.toFloat().coerceAtLeast(1f)),
                         valueRange = 0f..durationMs.toFloat().coerceAtLeast(1f),
@@ -861,15 +1042,37 @@ private fun Controls(
                             if (dragging >= 0) onSeek(dragging.toLong(), false)
                             dragging = -1f
                         },
+                        colors = SliderDefaults.colors(inactiveTrackColor = Color.White.copy(alpha = 0.2f)),
                         modifier = Modifier.fillMaxWidth(),
                     )
-                    ChapterMarks(chapters, durationMs, Modifier.matchParentSize())
                 }
                 if (skip != null) FilledTonalButton(skip.onClick, Modifier.padding(start = 8.dp)) { Text(skip.label) }
             }
         }
     }
 }
+
+@Composable
+private fun SubmenuBack(title: String, onBack: () -> Unit) {
+    DropdownMenuItem({ Text("← $title") }, onBack)
+    HorizontalDivider()
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun Tip(text: String, content: @Composable () -> Unit) = TooltipArea(
+    tooltip = {
+        Surface(
+            color = Color(0xE61C1C1C),
+            contentColor = Color.White,
+            shape = MaterialTheme.shapes.extraSmall,
+            shadowElevation = 4.dp,
+        ) {
+            Text(text, Modifier.padding(horizontal = 8.dp, vertical = 4.dp), style = MaterialTheme.typography.labelSmall)
+        }
+    },
+    content = content,
+)
 
 @Composable
 private fun Choice(label: String, selected: Boolean, onClick: () -> Unit) =

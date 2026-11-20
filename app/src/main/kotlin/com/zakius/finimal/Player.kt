@@ -15,6 +15,7 @@ import android.content.res.Configuration
 import android.media.AudioManager
 import android.net.Uri
 import android.os.SystemClock
+import android.provider.Settings
 import java.util.Locale
 import java.util.UUID
 import androidx.compose.foundation.layout.size
@@ -30,6 +31,7 @@ import org.jellyfin.sdk.model.api.MediaStreamType
 import finimal.core.ResumeGuard
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.LocalActivity
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -57,12 +59,15 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -80,8 +85,10 @@ import androidx.compose.ui.Modifier
 import org.jellyfin.sdk.model.api.MediaSegmentType
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.addPathNodes
 import androidx.compose.ui.input.pointer.pointerInput
@@ -571,10 +578,14 @@ private fun Playback(
         onDispose { lifecycle.removeObserver(observer) }
     }
     fun setFullscreen(on: Boolean) {
+        val wasForced = forcedFullscreen
         forcedFullscreen = on
         if (!rotationLocked) {
-            activity.requestedOrientation =
-                if (on) ActivityInfo.SCREEN_ORIENTATION_USER_LANDSCAPE else ActivityInfo.SCREEN_ORIENTATION_USER_PORTRAIT
+            activity.requestedOrientation = when {
+                on -> ActivityInfo.SCREEN_ORIENTATION_USER_LANDSCAPE
+                wasForced -> ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+                else -> ActivityInfo.SCREEN_ORIENTATION_USER_PORTRAIT
+            }
         }
     }
     LaunchedEffect(fullscreen) { systemBars(activity, hidden = fullscreen) }
@@ -589,7 +600,13 @@ private fun Playback(
         carried = Pair(forcedFullscreen, rotationLocked)
         onPlay(nextId)
     }
-    BackHandler { if (fullscreen && !landscape) setFullscreen(false) else onBack() }
+    BackHandler { if (forcedFullscreen) setFullscreen(false) else onBack() }
+
+    val onTranscode: (() -> Unit)? = if (choppy && !transcoding) ({
+        choppy = false
+        if (videoStream != null) prefs.learnChoppy(videoStream.codec, videoStream.pixelRate)
+        switchToTranscode()
+    }) else null
 
     val video = @Composable { mod: Modifier ->
         val streamCacheKey = if (transcoding || localPlaylist != null) null else cacheKey
@@ -599,11 +616,7 @@ private fun Playback(
             chapters = chapters,
             resumedAt = resumedAt,
             onResumeNoteGone = { resumedAt = null },
-            onTranscode = if (choppy && !transcoding) ({
-                choppy = false
-                if (videoStream != null) prefs.learnChoppy(videoStream.codec, videoStream.pixelRate)
-                switchToTranscode()
-            }) else null,
+            onTranscode = onTranscode,
             onToggleFullscreen = { setFullscreen(!fullscreen) },
             onBack = onBack,
             onPlay = ::playNext,
@@ -628,6 +641,25 @@ private fun Playback(
     Column(Modifier.fillMaxSize().then(if (fullscreen) Modifier else Modifier.statusBarsPadding())) {
         video(if (fullscreen) Modifier.fillMaxSize() else Modifier.fillMaxWidth().aspectRatio(16f / 9))
         if (!fullscreen) {
+            val resumed = resumedAt
+            if (resumed != null && playerError == null && !ended) {
+                Row(
+                    Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceVariant).padding(start = 12.dp, end = 4.dp),
+                    Arrangement.SpaceBetween,
+                    Alignment.CenterVertically,
+                ) {
+                    Text("Resumed at ${formatMs(resumed)}", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.labelLarge)
+                    TextButton(onClick = { player.seekTo(0); resumedAt = null }) { Text("Start over") }
+                }
+            } else if (onTranscode != null && playerError == null && !ended) {
+                Row(
+                    Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceVariant).padding(horizontal = 12.dp, vertical = 4.dp),
+                    Arrangement.Center,
+                    Alignment.CenterVertically,
+                ) {
+                    FilledTonalButton(onTranscode) { Text("Choppy? Transcode") }
+                }
+            }
             val downloads = rememberDownloadStatuses()
             val season = siblings.filter { it.seasonId == item.seasonId }
             val listState = rememberLazyListState()
@@ -748,6 +780,7 @@ private fun VideoSurface(
     // Derived state, so the 250 ms position tick doesn't recompose the whole surface while the controls are hidden.
     val segment by remember(ranges) { derivedStateOf { ranges.firstOrNull { position in it.second } } }
     var fastHold by remember { mutableStateOf(false) }
+    val fastHolding by rememberUpdatedState(fastHold)
     val haptics = LocalHapticFeedback.current
 
     LaunchedEffect(player) {
@@ -903,13 +936,17 @@ private fun VideoSurface(
                         else -> 1
                     }
                     var axis = 0 // 0 undecided, 1 horizontal, 2 vertical, 3 pinch
-                    var total = androidx.compose.ui.geometry.Offset.Zero
+                    var held = false
+                    var total = Offset.Zero
                     var startSpan = 0f
                     val startPos = player.currentPosition
                     val maxVol = audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
                     val startVol = audio.getStreamVolume(AudioManager.STREAM_MUSIC)
                     val windowBright = activity.window.attributes.screenBrightness
-                    val startBright = if (windowBright >= 0) windowBright else 0.5f
+                    val startBright = if (windowBright >= 0) windowBright else runCatching {
+                        val sys = Settings.System.getInt(activity.contentResolver, Settings.System.SCREEN_BRIGHTNESS)
+                        (sys / 255f).coerceIn(0.01f, 1f)
+                    }.getOrDefault(0.5f)
                     val brightnessZone = if (prefs.brightnessOnLeft) 0 else 2
                     // Apply only when the value changes. Each apply calls into the window or audio service, and touch
                     // events arrive far more often than the value changes.
@@ -919,14 +956,26 @@ private fun VideoSurface(
                         val event = awaitPointerEvent()
                         val pressed = event.changes.filter { it.pressed }
                         if (pressed.isEmpty()) break
+                        if (fastHolding) {
+                            held = true
+                            continue
+                        }
+                        if (held) continue
                         if (pressed.size >= 2 && prefs.gesturePinch && fullscreen) {
                             val span = (pressed[0].position - pressed[1].position).getDistance()
                             if (axis != 3) {
                                 axis = 3
                                 startSpan = span
                             }
-                            if (span > startSpan * 1.15f) crop = true
-                            if (span < startSpan * 0.85f) crop = false
+                            val nextCrop = when {
+                                span > startSpan * 1.15f -> true
+                                span < startSpan * 0.85f -> false
+                                else -> crop
+                            }
+                            if (nextCrop != crop) {
+                                crop = nextCrop
+                                overlay = if (crop) "Crop" else "Fit"
+                            }
                             event.changes.forEach { it.consume() }
                             continue
                         }
@@ -939,8 +988,10 @@ private fun VideoSurface(
                         when {
                             axis == 1 && fullscreen && prefs.gestureSeek -> {
                                 val target = clamp(startPos + (total.x / w * SEEK_MS_PER_WIDTH).toLong())
+                                val deltaMs = target - startPos
+                                val sign = if (deltaMs / 1000 < 0) "−" else "+"
                                 scrubTarget = target
-                                overlay = "${formatMs(target)} / ${formatMs(duration)}"
+                                overlay = "$sign${formatMs(abs(deltaMs))} · ${formatMs(target)} / ${formatMs(duration)}"
                                 change.consume()
                             }
                             axis == 2 && !fullscreen && prefs.gestureFullscreen -> change.consume()
@@ -967,73 +1018,84 @@ private fun VideoSurface(
                             }
                         }
                     }
-                    val scrubEnd = scrubTarget
-                    if (scrubEnd != null) player.seekToNearestKeyframe(scrubEnd)
-                    scrubTarget = null
-                    if (axis == 2 && prefs.gestureFullscreen) {
-                        val threshold = h * 0.15f
-                        if (!fullscreen && total.y < -threshold) onToggleFullscreen()
-                        if (fullscreen && zone == 1 && total.y > threshold) onToggleFullscreen()
+                    if (!held) {
+                        val scrubEnd = scrubTarget
+                        if (scrubEnd != null) player.seekToNearestKeyframe(scrubEnd)
+                        scrubTarget = null
+                        if (axis == 2 && prefs.gestureFullscreen) {
+                            val threshold = h * 0.15f
+                            if (!fullscreen && total.y < -threshold) onToggleFullscreen()
+                            if (fullscreen && zone == 1 && total.y > threshold) onToggleFullscreen()
+                        }
+                    } else {
+                        scrubTarget = null
                     }
                 }
             }
     ) {
         AndroidView({ playerView }, Modifier.fillMaxSize())
 
-        val overlayText = overlay
-        if (overlayText != null) {
-            Text(overlayText, color = Color.White, style = MaterialTheme.typography.titleLarge,
-                modifier = Modifier.align(Alignment.Center).background(Color(0x99000000), MaterialTheme.shapes.small).padding(12.dp))
-        }
+        MaterialTheme(colorScheme = darkColorScheme()) {
+            val overlayText = overlay
+            if (overlayText != null) {
+                Text(overlayText, color = Color.White, style = MaterialTheme.typography.titleLarge,
+                    modifier = Modifier.align(Alignment.Center).background(Color(0x99000000), MaterialTheme.shapes.small).padding(12.dp))
+            }
 
-        if (fastHold) Text("2× ▶▶", color = Color.White, style = MaterialTheme.typography.titleMedium,
-            modifier = Modifier.align(Alignment.TopCenter).padding(top = 24.dp).background(Color(0x99000000), MaterialTheme.shapes.small).padding(horizontal = 12.dp, vertical = 6.dp))
+            if (fastHold) Text("2× ▶▶", color = Color.White, style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.align(Alignment.TopCenter).padding(top = 24.dp).background(Color(0x99000000), MaterialTheme.shapes.small).padding(horizontal = 12.dp, vertical = 6.dp))
 
-        if (waiting && playerError == null && !ended) CircularProgressIndicator(Modifier.align(Alignment.Center), color = Color.White)
-        if (reconnecting && playerError == null) Text("Reconnecting…", color = Color.White, style = MaterialTheme.typography.labelLarge,
-            modifier = Modifier.align(Alignment.Center).padding(top = 72.dp).background(Color(0x99000000), MaterialTheme.shapes.small).padding(horizontal = 8.dp, vertical = 4.dp))
+            if (waiting && playerError == null && !ended) CircularProgressIndicator(Modifier.align(Alignment.Center), color = Color.White)
+            if (reconnecting && playerError == null) Text("Reconnecting…", color = Color.White, style = MaterialTheme.typography.labelLarge,
+                modifier = Modifier.align(Alignment.Center).padding(top = 72.dp).background(Color(0x99000000), MaterialTheme.shapes.small).padding(horizontal = 8.dp, vertical = 4.dp))
 
-        // With the controls shown, the skip button sits beside the seek bar instead, so the bar and scrim never cover it.
-        if (skip != null && !controls) SkipButton(skip,
-            Modifier.align(Alignment.BottomEnd).then(if (fullscreen) Modifier.safeDrawingPadding() else Modifier).padding(if (App.tv) 48.dp else 24.dp).takeFocus())
+            // With the controls shown, the skip button sits beside the seek bar instead, so the bar and scrim never cover it.
+            if (skip != null && !controls) SkipButton(skip,
+                Modifier.align(Alignment.BottomEnd).then(if (fullscreen) Modifier.safeDrawingPadding() else Modifier).padding(if (App.tv) 48.dp else 24.dp).takeFocus())
 
-        // Placed below the top bar, so it is visible even though the controls are up at the start.
-        val note = Modifier.align(Alignment.TopCenter).then(if (fullscreen) Modifier.safeDrawingPadding() else Modifier).padding(top = 56.dp)
-        if (resumedAt != null && playerError == null && !ended) Row(note.background(Color(0x99000000), MaterialTheme.shapes.small).padding(start = 12.dp),
-            verticalAlignment = Alignment.CenterVertically) {
-            Text("Resumed at ${formatMs(resumedAt)}", color = Color.White, style = MaterialTheme.typography.labelLarge)
-            TextButton(onClick = { player.seekTo(0); onResumeNoteGone() }) { Text("Start over") }
-        }
-        else if (onTranscode != null && playerError == null && !ended) FilledTonalButton(onTranscode, note) { Text("Choppy? Transcode") }
+            if (playerError != null) {
+                // Shown over the controls' scrim, without the control buttons underneath.
+                Column(Modifier.align(Alignment.Center).padding(16.dp), Arrangement.spacedBy(8.dp), Alignment.CenterHorizontally) {
+                    val known = playbackError(playerError)
+                    val detail = if (known == null) playerError.errorCodeName else null
+                    ErrorText(known ?: "Playback failed.", detail, Color.White)
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Button(onClick = onRetry, Modifier.takeFocus()) { Text("Retry") }
+                        FilledTonalButton(onClick = onBack) { Text("Back") }
+                    }
+                }
+            } else if (ended) {
+                Column(Modifier.align(Alignment.Center).padding(horizontal = 16.dp), Arrangement.spacedBy(8.dp), Alignment.CenterHorizontally) {
+                    if (next != null) Button(onClick = { onPlay(next.id.toString()) }, Modifier.takeFocus()) {
+                        Text("Play next: ${episodeLabel(next)}", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                    FilledTonalButton(onClick = onBack, if (next == null) Modifier.takeFocus() else Modifier) { Text("Back") }
+                }
+            } else if (controls) {
+                var onNext: (() -> Unit)? = null
+                if (next != null) onNext = { onPlay(next.id.toString()) }
+                Controls(
+                    player, position, duration, buffered, playing, fullscreen, transcoding, rotationLocked, title,
+                    onBack, onToggleFullscreen, onRotationLock, onTracksChosen, ::seekBy, onNext, skip,
+                    onInteraction = { lastInteraction = System.currentTimeMillis() },
+                    subtitleView = playerView.subtitleView,
+                    chapters = chapters,
+                )
+            }
 
-        if (playerError != null) {
-            // Shown over the controls' scrim, without the control buttons underneath.
-            Column(Modifier.align(Alignment.Center).padding(16.dp), Arrangement.spacedBy(8.dp), Alignment.CenterHorizontally) {
-                val known = playbackError(playerError)
-                val detail = if (known == null) playerError.errorCodeName else null
-                ErrorText(known ?: "Playback failed.", detail, Color.White)
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Button(onClick = onRetry, Modifier.takeFocus()) { Text("Retry") }
-                    FilledTonalButton(onClick = onBack) { Text("Back") }
+            // Drawn after Controls so its scrim never dims the banner. In portrait it sits below the 16:9 video instead.
+            if (fullscreen && playerError == null && !ended) {
+                val note = Modifier.align(Alignment.TopCenter).safeDrawingPadding().padding(top = 56.dp)
+                if (resumedAt != null) Row(
+                    note.background(Color(0x99000000), MaterialTheme.shapes.small).padding(start = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("Resumed at ${formatMs(resumedAt)}", color = Color.White, style = MaterialTheme.typography.labelLarge)
+                    TextButton(onClick = { player.seekTo(0); onResumeNoteGone() }) { Text("Start over") }
+                } else if (onTranscode != null) {
+                    FilledTonalButton(onTranscode, note) { Text("Choppy? Transcode") }
                 }
             }
-        } else if (ended) {
-            Column(Modifier.align(Alignment.Center).padding(horizontal = 16.dp), Arrangement.spacedBy(8.dp), Alignment.CenterHorizontally) {
-                if (next != null) Button(onClick = { onPlay(next.id.toString()) }, Modifier.takeFocus()) {
-                    Text("Play next: ${episodeLabel(next)}", maxLines = 1, overflow = TextOverflow.Ellipsis)
-                }
-                FilledTonalButton(onClick = onBack, if (next == null) Modifier.takeFocus() else Modifier) { Text("Back") }
-            }
-        } else if (controls) {
-            var onNext: (() -> Unit)? = null
-            if (next != null) onNext = { onPlay(next.id.toString()) }
-            Controls(
-                player, position, duration, buffered, playing, fullscreen, transcoding, rotationLocked, title,
-                onBack, onToggleFullscreen, onRotationLock, onTracksChosen, ::seekBy, onNext, skip,
-                onInteraction = { lastInteraction = System.currentTimeMillis() },
-                subtitleView = playerView.subtitleView,
-                chapters = chapters,
-            )
         }
     }
 }
@@ -1063,6 +1125,8 @@ private fun Controls(
     var menu by remember { mutableStateOf(false) }
     var sub by remember { mutableStateOf<String?>(null) }
     var dragging by remember { mutableFloatStateOf(-1f) }
+    var subtitleScale by remember { mutableIntStateOf(App.prefs.subtitleScale) }
+    var audioDelayMs by remember { mutableIntStateOf(App.prefs.audioDelayMs) }
     // Keep the controls alive while the menu is open, since auto-hiding them would close it.
     LaunchedEffect(menu) {
         while (menu) {
@@ -1082,6 +1146,8 @@ private fun Controls(
             }
             Box {
                 IconButton(onClick = {
+                    subtitleScale = App.prefs.subtitleScale
+                    audioDelayMs = App.prefs.audioDelayMs
                     menu = true
                     onInteraction()
                 }) {
@@ -1091,13 +1157,28 @@ private fun Controls(
                     menu = false
                     sub = null
                 }) {
+                    if (sub != null) {
+                        val subTitle = when (sub) {
+                            "chapters" -> "Chapters"
+                            "speed" -> "Speed"
+                            "size" -> "Subtitle size"
+                            "delay" -> "Wireless audio delay"
+                            "audio" -> "Audio"
+                            "text" -> "Subtitles"
+                            else -> ""
+                        }
+                        DropdownMenuItem({ Text("← $subTitle") }, { sub = null })
+                        HorizontalDivider()
+                    }
                     when (sub) {
                         null -> {
+                            val activeAudio = selectedTrackLabel(player, C.TRACK_TYPE_AUDIO)
+                            val activeSub = selectedTrackLabel(player, C.TRACK_TYPE_TEXT)
                             DropdownMenuItem({ Text("Speed: ${speedLabel(player.playbackParameters.speed)}") }, { sub = "speed" })
-                            DropdownMenuItem({ Text("Audio") }, { sub = "audio" })
-                            DropdownMenuItem({ Text("Subtitles") }, { sub = "text" })
-                            DropdownMenuItem({ Text("Subtitle size: ${App.prefs.subtitleScale}%") }, { sub = "size" })
-                            DropdownMenuItem({ Text("Wireless audio delay: ${App.prefs.audioDelayMs} ms") }, { sub = "delay" })
+                            DropdownMenuItem({ Text(if (activeAudio != null) "Audio: $activeAudio" else "Audio", maxLines = 1, overflow = TextOverflow.Ellipsis) }, { sub = "audio" })
+                            DropdownMenuItem({ Text("Subtitles: ${activeSub ?: "Off"}", maxLines = 1, overflow = TextOverflow.Ellipsis) }, { sub = "text" })
+                            DropdownMenuItem({ Text("Subtitle size: $subtitleScale%") }, { sub = "size" })
+                            DropdownMenuItem({ Text("Wireless audio delay: $audioDelayMs ms") }, { sub = "delay" })
                             if (chapters.isNotEmpty()) DropdownMenuItem({ Text("Chapters") }, { sub = "chapters" })
                             if (!App.tv) {
                                 val rotationLabel = if (rotationLocked) "Unlock rotation" else "Lock rotation"
@@ -1125,49 +1206,60 @@ private fun Controls(
                                 sub = null
                             }
                         }
-                        "size" -> listOf(50, 75, 100, 125, 150, 200).forEach { s ->
-                            Choice("$s%", App.prefs.subtitleScale == s) {
-                                App.prefs.subtitleScale = s
-                                subtitleView.setFractionalTextSize(SubtitleView.DEFAULT_TEXT_SIZE_FRACTION * s / 100f)
-                                menu = false
-                                sub = null
+                        "size" -> {
+                            DropdownMenuItem({ Text("Text subtitles only (not ASS/PGS)", style = MaterialTheme.typography.bodySmall) }, {}, enabled = false)
+                            listOf(50, 75, 100, 125, 150, 200).forEach { s ->
+                                Choice("$s%", subtitleScale == s) {
+                                    subtitleScale = s
+                                    App.prefs.subtitleScale = s
+                                    subtitleView.setFractionalTextSize(SubtitleView.DEFAULT_TEXT_SIZE_FRACTION * s / 100f)
+                                }
                             }
                         }
-                        "delay" -> AUDIO_DELAYS_MS.forEach { d ->
-                            Choice("$d ms", App.prefs.audioDelayMs == d) {
-                                AudioDelay.set(d)
-                                // The audio clock never moves backwards on its own, so seek to apply a larger delay now.
-                                player.seekTo(player.currentPosition)
-                                menu = false
-                                sub = null
+                        "delay" -> {
+                            if (!AudioDelay.isWireless) {
+                                DropdownMenuItem({ Text("Applies to wireless audio (none connected)", style = MaterialTheme.typography.bodySmall) }, {}, enabled = false)
+                            }
+                            AUDIO_DELAYS_MS.forEach { d ->
+                                Choice("$d ms", audioDelayMs == d) {
+                                    audioDelayMs = d
+                                    AudioDelay.set(d)
+                                    // The audio clock never moves backwards on its own, so seek to apply a larger delay now.
+                                    player.seekTo(player.currentPosition)
+                                }
                             }
                         }
                         "audio", "text" -> {
                             val type = if (sub == "audio") C.TRACK_TYPE_AUDIO else C.TRACK_TYPE_TEXT
+                            val groups = player.currentTracks.groups.filter { it.type == type && it.length > 0 }
                             val textOff = C.TRACK_TYPE_TEXT in player.trackSelectionParameters.disabledTrackTypes ||
                                 player.currentTracks.groups.none { it.type == C.TRACK_TYPE_TEXT && it.isSelected }
-                            if (type == C.TRACK_TYPE_TEXT) Choice("Off", textOff) {
+                            if (type == C.TRACK_TYPE_TEXT && groups.isNotEmpty()) Choice("Off", textOff) {
                                 player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true).build()
                                 onTracksChosen(selectedLanguage(player, C.TRACK_TYPE_AUDIO), "")
                                 menu = false
                                 sub = null
                             }
-                            player.currentTracks.groups.filter { it.type == type }.forEach { group ->
-                                for (i in 0 until group.length) {
-                                    val f = group.getTrackFormat(i)
-                                    val label = trackLabel(f).ifEmpty { "Track ${i + 1}" }
-                                    Choice(label, group.isTrackSelected(i)) {
-                                        player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
-                                            .setTrackTypeDisabled(type, false)
-                                            .setOverrideForType(TrackSelectionOverride(group.mediaTrackGroup, i))
-                                            .build()
-                                        val audioLang = if (type == C.TRACK_TYPE_AUDIO) f.language else selectedLanguage(player, C.TRACK_TYPE_AUDIO)
-                                        val subLang = if (type == C.TRACK_TYPE_TEXT) f.language else selectedLanguage(player, C.TRACK_TYPE_TEXT)
-                                        onTracksChosen(audioLang, subLang)
-                                        // Seek in place so the current subtitle line shows now, not at the next cue.
-                                        if (type == C.TRACK_TYPE_TEXT) player.seekTo(player.currentPosition)
-                                        menu = false
-                                        sub = null
+                            if (groups.isEmpty()) {
+                                DropdownMenuItem({ Text("No tracks") }, {}, enabled = false)
+                            } else {
+                                groups.forEach { group ->
+                                    for (i in 0 until group.length) {
+                                        val f = group.getTrackFormat(i)
+                                        val label = trackLabel(f).ifEmpty { "Track ${i + 1}" }
+                                        Choice(label, group.isTrackSelected(i)) {
+                                            player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+                                                .setTrackTypeDisabled(type, false)
+                                                .setOverrideForType(TrackSelectionOverride(group.mediaTrackGroup, i))
+                                                .build()
+                                            val audioLang = if (type == C.TRACK_TYPE_AUDIO) f.language else selectedLanguage(player, C.TRACK_TYPE_AUDIO)
+                                            val subLang = if (type == C.TRACK_TYPE_TEXT) f.language else selectedLanguage(player, C.TRACK_TYPE_TEXT)
+                                            onTracksChosen(audioLang, subLang)
+                                            // Seek in place so the current subtitle line shows now, not at the next cue.
+                                            if (type == C.TRACK_TYPE_TEXT) player.seekTo(player.currentPosition)
+                                            menu = false
+                                            sub = null
+                                        }
                                     }
                                 }
                             }
@@ -1205,9 +1297,27 @@ private fun Controls(
 
         Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(horizontal = 12.dp)) {
             val shown = if (dragging >= 0) dragging.toLong() else position
-            Text("${formatMs(shown)} / ${formatMs(duration)}  (buffered ${formatMs(buffered)})", color = Color.White, style = MaterialTheme.typography.labelSmall)
+            val bufferText = if (duration > 0 && buffered >= duration - 2_000) "" else "  (buffered ${formatMs(buffered)})"
+            val chapterText = if (dragging >= 0 && chapters.isNotEmpty()) {
+                val i = chapterAt(chapters.map { it.startMs }, shown)
+                if (i >= 0) " · ${chapters[i].name.ifEmpty { "Chapter ${i + 1}" }}" else ""
+            } else ""
+            Text("${formatMs(shown)} / ${formatMs(duration)}$bufferText$chapterText", color = Color.White, style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(Modifier.weight(1f)) {
+                    Canvas(Modifier.matchParentSize()) {
+                        if (duration <= 0 || buffered <= 0) return@Canvas
+                        val left = 10.dp.toPx()
+                        val end = left + (size.width - 2 * left) * (buffered.toFloat() / duration).coerceIn(0f, 1f)
+                        drawLine(
+                            color = Color.White.copy(alpha = 0.35f),
+                            start = Offset(left, center.y),
+                            end = Offset(end, center.y),
+                            strokeWidth = 4.dp.toPx(),
+                            cap = StrokeCap.Round,
+                        )
+                    }
+                    ChapterMarks(chapters, duration, Modifier.matchParentSize())
                     Slider(
                         value = shown.toFloat().coerceIn(0f, duration.toFloat().coerceAtLeast(1f)),
                         valueRange = 0f..duration.toFloat().coerceAtLeast(1f),
@@ -1220,9 +1330,9 @@ private fun Controls(
                             if (dragging >= 0) player.seekToNearestKeyframe(dragging.toLong())
                             dragging = -1f
                         },
+                        colors = SliderDefaults.colors(inactiveTrackColor = Color.White.copy(alpha = 0.2f)),
                         modifier = Modifier.fillMaxWidth(),
                     )
-                    ChapterMarks(chapters, duration, Modifier.matchParentSize())
                 }
                 if (skip != null) SkipButton(skip, Modifier.padding(start = 8.dp))
             }
@@ -1326,6 +1436,14 @@ private fun trackLabel(f: Format): String {
     val repeatsLabel = language != null && label != null && label.contains(language, ignoreCase = true)
     val shownLanguage = if (repeatsLabel) null else language
     return listOfNotNull(label, shownLanguage, channels).joinToString(" · ")
+}
+
+/** Display label of the selected track, or null when none is selected. */
+private fun selectedTrackLabel(player: ExoPlayer, type: Int): String? {
+    if (type in player.trackSelectionParameters.disabledTrackTypes) return null
+    val group = player.currentTracks.groups.firstOrNull { it.type == type && it.isSelected } ?: return null
+    val index = (0 until group.length).firstOrNull { group.isTrackSelected(it) } ?: return null
+    return trackLabel(group.getTrackFormat(index)).ifEmpty { "Track ${index + 1}" }
 }
 
 /** Language of the selected track, "" when that type is off, null when unknown. */

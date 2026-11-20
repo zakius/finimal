@@ -163,6 +163,7 @@ class Server {
         api.update(baseUrl = base, accessToken = auth.accessToken)
         App.downloads?.accountChanged()
         App.sessionExpired = false
+        App.expiredUserName = null
     }
 
     /** Another saved account takes over; its lists, downloads and unsynced progress are its own. */
@@ -172,6 +173,7 @@ class Server {
         api.update(accessToken = a.token)
         App.downloads?.accountChanged()
         App.sessionExpired = false
+        App.expiredUserName = null
     }
 
     /** Removes the current account; [keepAccount] only ends its session, keeping its name and PIN for the next login. */
@@ -184,6 +186,10 @@ class Server {
     }
 
     fun expire() {
+        val name = synchronized(App) {
+            prefs.accounts().firstOrNull { it.userId == prefs.userId }?.name
+        }
+        App.expiredUserName = name?.ifBlank { null }
         logout(keepAccount = true)
         App.sessionExpired = true
     }

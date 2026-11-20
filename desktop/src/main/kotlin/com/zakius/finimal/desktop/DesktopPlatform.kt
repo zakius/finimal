@@ -67,4 +67,7 @@ object DesktopPlatform : Platform {
     override fun askNotifications() {}
     override fun decoderSummary(): String? = null
     override fun setAudioDelay(ms: Int) { App.prefs.audioDelayMs = ms }
+    override fun bufferBytes() = DesktopMedia.bufferBytes()
+    override fun evictBuffer() = DesktopMedia.evict()
+    override fun clearBuffer() = DesktopMedia.clearBuffer()
 }

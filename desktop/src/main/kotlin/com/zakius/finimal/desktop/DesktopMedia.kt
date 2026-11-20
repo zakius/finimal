@@ -78,6 +78,17 @@ object DesktopMedia {
         return dir.usableSpace
     }
 
+    /** Bytes currently stored in the scratch buffer. */
+    fun bufferBytes(): Long = scratch.keys().sumOf { scratch.entry(it).bytes() }
+
+    /** Deletes every non-playing scratch entry. */
+    fun clearBuffer() {
+        val active = playing
+        scratch.keys()
+            .filter { it != active }
+            .forEach { scratch.delete(it) }
+    }
+
     /** Deletes the oldest entries until within the buffer limit in Settings, keeping 2 GB or 5 % of the disk free, whichever is more. */
     fun evict() {
         val entries = scratch.keys().map { key ->

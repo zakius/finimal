@@ -8,8 +8,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.ripple.RippleAlpha
 import androidx.compose.material3.ColorScheme
@@ -34,7 +36,11 @@ import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.runtime.toMutableStateList
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.painter.Painter
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.vector.addPathNodes
 import androidx.compose.ui.graphics.vector.rememberVectorPainter
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalFocusManager
@@ -58,6 +64,8 @@ sealed interface Screen {
     @Serializable data object Login : Screen
     /** Logs another user of the same server in. */
     @Serializable data object AddAccount : Screen
+    /** Re-authenticates an account with its password to clear a forgotten PIN. */
+    @Serializable data class ResetPin(val username: String) : Screen
     /** Switching accounts; as the first screen, "Who's watching?". */
     @Serializable data object Accounts : Screen
     @Serializable data object Libraries : Screen
@@ -135,7 +143,12 @@ fun Root(openDownloads: Boolean, openedDownloads: () -> Unit, player: @Composabl
     val more = rememberVectorPainter(Icons.Default.MoreVert)
     val settings = rememberVectorPainter(Icons.Default.Settings)
     val play = rememberVectorPainter(Icons.Default.PlayArrow)
-    val icons = remember(back, more, settings, play) { ListIcons(back, more, settings, play) }
+    val search = rememberVectorPainter(Icons.Default.Search)
+    val download = rememberVectorPainter(DownloadIcon)
+    val close = rememberVectorPainter(Icons.Default.Close)
+    val icons = remember(back, more, settings, play, search, download, close) {
+        ListIcons(back, more, settings, play, search, download, close)
+    }
     // Covered screens stay composed so that going back only lays out and draws. Rebuilding the poster grid cost about
     // 13 ms of main-thread time on a phone. Screens read LocalShown to pause their own work while covered.
     // key() gives each entry its own state, so the next episode never inherits the previous player's state.
@@ -150,9 +163,31 @@ fun Root(openDownloads: Boolean, openedDownloads: () -> Unit, player: @Composabl
                         saved.SaveableStateProvider(keyOf(i)) {
                             FocusMemory {
                                 when (screen) {
-                                    Screen.Login -> LoginScreen(padded) { reset(Screen.Libraries) }
+                                    Screen.Login -> LoginScreen(
+                                        padded,
+                                        onSwitchAccount = {
+                                            App.sessionExpired = false
+                                            App.expiredUserName = null
+                                            reset(Screen.Accounts)
+                                        },
+                                    ) { reset(Screen.Libraries) }
                                     Screen.AddAccount -> LoginScreen(padded, onBack = ::pop) { reset(Screen.Libraries) }
-                                    Screen.Accounts -> AccountsScreen(padded, if (i == 0) null else ::pop, { reset(Screen.Libraries) }) { push(Screen.AddAccount) }
+                                    is Screen.ResetPin -> LoginScreen(
+                                        padded,
+                                        onBack = ::pop,
+                                        title = "Reset PIN",
+                                        subtitle = "Log in with your password to clear this account's PIN.",
+                                        initialUser = screen.username,
+                                    ) {
+                                        App.prefs.setPin(App.prefs.userId!!, null)
+                                        reset(Screen.Libraries)
+                                    }
+                                    Screen.Accounts -> AccountsScreen(
+                                        padded,
+                                        if (i == 0) null else ::pop,
+                                        { reset(Screen.Libraries) },
+                                        { push(Screen.AddAccount) },
+                                    ) { username -> push(Screen.ResetPin(username)) }
                                     Screen.Libraries -> LibrariesScreen(padded, ::push)
                                     Screen.Downloads -> DownloadsScreen(padded, ::push, ::pop)
                                     Screen.Settings -> SettingsScreen(padded, ::pop, { push(Screen.Accounts) }) { reset(startScreen()) }
@@ -184,12 +219,23 @@ private fun startScreen() = when {
     else -> Screen.Login
 }
 
+private val DownloadIcon = ImageVector.Builder("Download", 24.dp, 24.dp, 24f, 24f)
+    .addPath(addPathNodes("M5,20h14v-2H5v2zM19,9h-4V3H9v6H5l7,7 7,-7z"), fill = SolidColor(Color.Black)).build()
+
 /**
  * The list screens' icons, one painter each for the whole activity. Otherwise each Icon renders its own bitmap, and on
  * a phone's GPU driver the first bitmap a frame uploads stalled the main thread for 7 to 8 ms on every screen opened.
  * The player keeps its own icons: its play icon is bigger, and a shared painter would redraw at each size.
  */
-class ListIcons(val back: Painter, val more: Painter, val settings: Painter, val play: Painter)
+class ListIcons(
+    val back: Painter,
+    val more: Painter,
+    val settings: Painter,
+    val play: Painter,
+    val search: Painter,
+    val download: Painter,
+    val close: Painter,
+)
 val LocalIcons = staticCompositionLocalOf<ListIcons> { error("provided by Root") }
 
 /** False while another screen covers this one (see Root). Read it in effects through snapshotFlow, not in composition. */

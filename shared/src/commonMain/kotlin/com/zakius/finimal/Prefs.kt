@@ -124,6 +124,15 @@ class Prefs(private val p: KeyValueStore) {
         put(u("sub.$seriesId"), sub)
     }
 
+    /** Per-library sort and unplayed filter, kept per account. */
+    fun librarySort(id: String): Sort {
+        val name = p[u("librarySort.$id")] as String?
+        return Sort.entries.firstOrNull { it.name == name } ?: Sort.NAME
+    }
+    fun setLibrarySort(id: String, sort: Sort) = p.edit { put(u("librarySort.$id"), sort.name) }
+    fun libraryUnplayed(id: String): Boolean = p[u("libraryUnplayed.$id")] as Boolean? ?: false
+    fun setLibraryUnplayed(id: String, unplayed: Boolean) = p.edit { put(u("libraryUnplayed.$id"), unplayed) }
+
     val loggedIn get() = token != null
 
     /** Removes the current account; its unsynced progress and settings stay for when it logs in again. */
