@@ -150,6 +150,10 @@ jobs:
         with:
           name: desktop-image
       - run: mkdir -p desktop/build/compose/binaries/main-release && tar -C desktop/build/compose/binaries/main-release -xf desktop-image.tar
+      # The image's runtimes sit in a read-only image layer, where overlayfs can't rename them. Once Flathub has newer
+      # runtimes, flatpak-builder's update fails with "Invalid cross-device link". A copy lands in the writable layer.
+      - name: Make the image's Flatpak installation updatable
+        run: cp -a /var/lib/flatpak /var/lib/flatpak.copy && rm -rf /var/lib/flatpak && mv /var/lib/flatpak.copy /var/lib/flatpak
       - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
         with:
           bundle: finimal-x86_64.flatpak
