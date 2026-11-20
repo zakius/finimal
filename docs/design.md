@@ -81,7 +81,7 @@ Libraries → poster grid → series → seasons → episodes. A series with one
   - Double-tap skips ±N s. N is the "skip step" setting, shared with the on-screen rewind and forward buttons.
   - Pinch switches between fit and crop.
   - Press and hold plays at 2x until release; the chosen speed comes back after.
-- Audio and subtitle choices are remembered per series.
+- Audio and subtitle choices are remembered per series, as languages. With nothing remembered, subtitles start as the server's default, which follows the account's subtitle settings in Jellyfin. With a remembered language, they start as the server's default when it is in that language, else that language's first track that isn't forced (forced tracks carry only signs and songs).
 - Media segments show a button, never acting on their own: "Skip intro", "Skip recap", and during the credits "Play next" when there is a next episode.
 - "Play next" keeps forced fullscreen and the rotation lock, and leaving through "Play next" in the credits reports the episode watched to the end.
 - Chapters come from the server's list for the item (a single one counts as none), so a transcode has them too. The seek bar marks each start, and the menu lists them with the current one ticked. Desktop: Page Down and Page Up go to the next and previous chapter; more than 5 s into a chapter, Page Up goes back to its start, as in mpv.

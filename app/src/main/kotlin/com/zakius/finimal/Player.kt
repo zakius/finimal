@@ -329,6 +329,7 @@ private fun Playback(
         val fetch = ProcessLifecycleOwner.get().lifecycleScope.async { Media.fetchSubtitles(item, sideload) }
         val subs = withTimeoutOrNull(3_000) { fetch.await() } ?: emptyMap()
         val streams = sideloadedSubs(item, sideload).associateBy { it.index }
+        val startSub = startSubtitle(source, prefs.subLang(seriesKey))?.index
         val audioIndex = prefs.audioLang(seriesKey)?.let { audioIndex(source, it) }
         val url = if (transcoding) {
             val burnIn = burnInIndex(source, prefs.subLang(seriesKey))
@@ -351,6 +352,9 @@ private fun Playback(
                 .setLanguage(stream.language)
                 .setLabel(stream.displayTitle)
                 .setId("ext${stream.index}")
+                // A file has none of the stream's flags, and Media3 only picks a text track flagged default or in a
+                // preferred language. Without this, a transcode starts with subtitles off until a language is remembered.
+                .setSelectionFlags(if (stream.index == startSub) C.SELECTION_FLAG_DEFAULT else 0)
                 .build()
         }
         val mediaItem = MediaItem.Builder()

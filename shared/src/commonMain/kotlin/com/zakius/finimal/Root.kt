@@ -240,6 +240,23 @@ fun sideloadedSubs(item: BaseItemDto, transcode: Boolean): List<MediaStream> {
     return streams.filter { it.type == MediaStreamType.SUBTITLE && (it.isExternal || (transcode && it.isTextSubtitleStream)) }
 }
 
+/**
+ * The subtitle stream to start with. With nothing remembered for the series, the server's default, which follows the
+ * account's subtitle settings in Jellyfin. With a remembered language ([lang]), a stream in it: the server's default
+ * when it is one, else the first that isn't forced, since a forced track carries only signs and songs. "" means off.
+ */
+fun startSubtitle(source: MediaSourceInfo, lang: String?): MediaStream? {
+    if (lang == "") return null
+    val subs = source.mediaStreams.orEmpty().filter { it.type == MediaStreamType.SUBTITLE }
+    val serverDefault = subs.firstOrNull { it.index == source.defaultSubtitleStreamIndex }
+    if (lang == null) return serverDefault
+    val inLanguage = subs.filter { sameLanguage(it.language, lang) }
+    if (serverDefault != null && serverDefault in inLanguage) return serverDefault
+    val full = inLanguage.firstOrNull { !it.isForced }
+    if (full != null) return full
+    return inLanguage.firstOrNull()
+}
+
 /** For a transcode: a picture subtitle (PGS, VobSub) in [lang] to burn into the video, when no text one is in that language. */
 fun burnInIndex(source: MediaSourceInfo, lang: String?): Int? {
     // "" means subtitles off. Without this check it would match streams of undetermined language ("und").

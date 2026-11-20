@@ -328,15 +328,19 @@ class Mpv(options: Map<String, String>) {
         value
     }
 
-    class Track(val id: String, val type: String, val language: String?, val title: String?, val selected: Boolean, val channels: Int?)
+    /** [fileIndex] is the stream's index in the file, which the server uses too. It is null for a subtitle added from a file. */
+    class Track(val id: String, val type: String, val language: String?, val title: String?, val selected: Boolean, val channels: Int?,
+        val fileIndex: Int?)
 
     /** Reads the track list. It blocks on the core, so call it off the UI thread. */
     fun tracks(): List<Track> {
         val count = get("track-list/count")?.toIntOrNull() ?: 0
         return (0 until count).map { i ->
             val p = "track-list/$i/"
+            // An added file reports index 0, its place in that file.
+            val fileIndex = if (get("${p}external") == "yes") null else get("${p}ff-index")?.toIntOrNull()
             Track(get("${p}id").orEmpty(), get("${p}type").orEmpty(), get("${p}lang"), get("${p}title"), get("${p}selected") == "yes",
-                get("${p}demux-channel-count")?.toIntOrNull())
+                get("${p}demux-channel-count")?.toIntOrNull(), fileIndex)
         }
     }
 

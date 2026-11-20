@@ -2,6 +2,7 @@ package com.zakius.finimal.desktop
 
 import com.zakius.finimal.burnInIndex
 import com.zakius.finimal.sideloadedSubs
+import com.zakius.finimal.startSubtitle
 import org.jellyfin.sdk.model.api.BaseItemDto
 import org.jellyfin.sdk.model.api.BaseItemKind
 import org.jellyfin.sdk.model.api.MediaSourceInfo
@@ -14,9 +15,9 @@ import kotlin.test.assertNull
 
 /** A transcode drops embedded subtitles: text ones come as files, a picture one is burned in. */
 class SubtitlesTest {
-    private fun sub(index: Int, lang: String, text: Boolean, external: Boolean = false) = MediaStream(
+    private fun sub(index: Int, lang: String, text: Boolean, external: Boolean = false, forced: Boolean = false) = MediaStream(
         type = MediaStreamType.SUBTITLE, index = index, language = lang, isTextSubtitleStream = text, isExternal = external,
-        isInterlaced = false, isDefault = false, isForced = false, isHearingImpaired = false, isOriginal = false, supportsExternalStream = text,
+        isInterlaced = false, isDefault = false, isForced = forced, isHearingImpaired = false, isOriginal = false, supportsExternalStream = text,
     )
 
     private val source = MediaSourceInfo(
@@ -40,4 +41,21 @@ class SubtitlesTest {
         assertNull(burnInIndex(source.copy(mediaStreams = listOf(sub(5, "und", text = false))), ""), "off never burns in")
         assertNull(burnInIndex(source, null))
     }
+
+    // A forced (signs only) English track before the full one, as some releases have it.
+    private val signsFirst = source.copy(mediaStreams = listOf(sub(3, "eng", text = true, forced = true), sub(4, "eng", text = true),
+        sub(5, "jpn", text = true)))
+
+    @Test fun startsWithTheServerDefaultWhenNothingIsRemembered() {
+        assertEquals(4, startSubtitle(signsFirst.copy(defaultSubtitleStreamIndex = 4), null)?.index)
+        assertNull(startSubtitle(signsFirst, null), "the server chose none")
+    }
+
+    @Test fun aRememberedLanguageTakesTheServerDefaultInIt() =
+        assertEquals(4, startSubtitle(signsFirst.copy(defaultSubtitleStreamIndex = 4), "en")?.index)
+
+    @Test fun aRememberedLanguageSkipsForcedTracks() =
+        assertEquals(4, startSubtitle(signsFirst.copy(defaultSubtitleStreamIndex = 5), "en")?.index)
+
+    @Test fun offStartsWithNone() = assertNull(startSubtitle(signsFirst.copy(defaultSubtitleStreamIndex = 4), ""))
 }

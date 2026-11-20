@@ -82,6 +82,7 @@ import com.zakius.finimal.nextEpisode
 import com.zakius.finimal.playerTitle
 import com.zakius.finimal.sameLanguage
 import com.zakius.finimal.scratchKey
+import com.zakius.finimal.startSubtitle
 import finimal.core.ResumeGuard
 import finimal.core.TICKS_PER_MS
 import java.util.Locale
@@ -252,10 +253,15 @@ private fun Playback(item: BaseItemDto, siblings: List<BaseItemDto>, onBack: () 
     }
 
     mpv.onLoaded = {
-        sideloadedSubs(item, transcoding).forEach { stream ->
+        val sub = prefs.subLang(seriesKey)
+        val start = startSubtitle(source, sub)
+        val sideloaded = sideloadedSubs(item, transcoding)
+        sideloaded.forEach { stream ->
             val subtitleUrl = App.server.subtitleUrl(id, sourceId, stream)
             val title = stream.displayTitle ?: stream.language ?: ""
-            mpv.command("sub-add", subtitleUrl, "auto", title, stream.language ?: "")
+            // mpv has picked its tracks by now, so a file added with "auto" stays off.
+            val flag = if (stream.index == start?.index) "select" else "auto"
+            mpv.command("sub-add", subtitleUrl, flag, title, stream.language ?: "")
         }
         val tracks = mpv.tracks()
         val audioLang = prefs.audioLang(seriesKey)
@@ -263,13 +269,13 @@ private fun Playback(item: BaseItemDto, siblings: List<BaseItemDto>, onBack: () 
             val audio = tracks.firstOrNull { it.type == "audio" && sameLanguage(it.language, audioLang) }
             if (audio != null) mpv.set("aid", audio.id)
         }
-        when (val sub = prefs.subLang(seriesKey)) {
-            null -> {}
-            "" -> mpv.set("sid", "no")
-            else -> {
-                val track = mpv.tracks().firstOrNull { it.type == "sub" && sameLanguage(it.language, sub) }
-                if (track != null) mpv.set("sid", track.id)
-            }
+        if (sub == "") {
+            mpv.set("sid", "no")
+        } else if (start != null && start !in sideloaded) {
+            // An embedded track, found by its index in the file. Language and title can't tell a release's full and
+            // signs-only tracks apart: both are often "English".
+            val track = tracks.firstOrNull { it.type == "sub" && it.fileIndex == start.index }
+            if (track != null) mpv.set("sid", track.id)
         }
     }
 
