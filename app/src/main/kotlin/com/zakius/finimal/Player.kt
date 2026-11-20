@@ -143,6 +143,11 @@ import finimal.core.TICKS_PER_MS
 private const val REPORT_INTERVAL_MS = 10_000L
 private const val RESUME_REWIND_MS = 5_000L
 private const val SEEK_MS_PER_WIDTH = 100_000f
+/**
+ * How long the start waits for subtitle files. The server extracts all of a file's text tracks in one pass: about 1 s
+ * for a 2 GB file at home, longer over a slow link or while the server also starts a transcode.
+ */
+private const val SUBTITLE_WAIT_MS = 10_000L
 /** How far behind the playhead the disk buffer starts, so seeking back a little stays local. */
 private const val BUFFER_BEHIND_BYTES = 32L * 1000 * 1000
 
@@ -323,11 +328,12 @@ private fun Playback(
     LaunchedEffect(player) {
         // Set before anything else, so eviction and subtitle cleanup leave the playing item alone.
         Media.playing = cacheKey
-        // A slow server doesn't hold up the start; the fetch finishes on its own and the files are there next time.
+        // A slow server holds up the start for at most SUBTITLE_WAIT_MS; after that the episode plays without these
+        // subtitles, and the fetch finishes on its own so the files are there next time.
         // A transcode, live or downloaded, has no embedded subtitles: those come as files too.
         val sideload = transcoding || localPlaylist != null
         val fetch = ProcessLifecycleOwner.get().lifecycleScope.async { Media.fetchSubtitles(item, sideload) }
-        val subs = withTimeoutOrNull(3_000) { fetch.await() } ?: emptyMap()
+        val subs = withTimeoutOrNull(SUBTITLE_WAIT_MS) { fetch.await() } ?: emptyMap()
         val streams = sideloadedSubs(item, sideload).associateBy { it.index }
         val startSub = startSubtitle(source, prefs.subLang(seriesKey))?.index
         val audioIndex = prefs.audioLang(seriesKey)?.let { audioIndex(source, it) }
