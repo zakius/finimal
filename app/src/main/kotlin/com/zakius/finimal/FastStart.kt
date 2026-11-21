@@ -363,11 +363,24 @@ class LibrariesFastView(
         unregisterNetworkCallback()
         refreshJob = App.platform.scope.launch {
             val key = listOf(App.prefs.baseUrl, App.prefs.userId)
-            if (entries == null) {
+            val currentEntries = entries
+            if (currentEntries != null) {
+                // Seed Libraries into AppCache and speculatively warm every library's disk snapshot + top posters off-main.
+                val placeholders = currentEntries.map { e ->
+                    org.jellyfin.sdk.model.api.BaseItemDto(
+                        id = java.util.UUID.fromString(e.id),
+                        type = org.jellyfin.sdk.model.api.BaseItemKind.COLLECTION_FOLDER,
+                        name = e.name,
+                    )
+                }
+                seedLibrariesLastGood(placeholders, fromNetwork = false)
+                AppCache.prefetchLibrariesFromDisk(currentEntries.map { it.id })
+            } else {
                 val disk = withContext(Dispatchers.IO) { ListSnapshots.read(key) }
                 if (disk != null && !disposed) {
-                    seedLibrariesLastGood(disk)
+                    seedLibrariesLastGood(disk, fromNetwork = false)
                     renderEntries(disk.map { LibraryEntry(it.id.toString(), it.name.orEmpty()) })
+                    AppCache.prefetchLibrariesFromDisk(disk.map { it.id.toString() })
                 }
             }
             val uid = App.prefs.userId
@@ -394,9 +407,14 @@ class LibrariesFastView(
                 return@launch
             }
             result.onSuccess { list ->
-                seedLibrariesLastGood(list)
-                launch(Dispatchers.IO) { ListSnapshots.write(key, list) }
-                renderEntries(list.map { LibraryEntry(it.id.toString(), it.name.orEmpty()) })
+                val prev = AppCache.getList(key)?.items
+                seedLibrariesLastGood(list, fromNetwork = true)
+                launch(Dispatchers.IO) { ListSnapshots.writeIfChanged(key, list, prev) }
+                val mapped = list.map { LibraryEntry(it.id.toString(), it.name.orEmpty()) }
+                if (mapped != entries) renderEntries(mapped)
+                val ids = mapped.map { it.id }
+                AppCache.prefetchLibrariesFromDisk(ids)
+                AppCache.prefetchLibrariesNetwork(ids)
             }.onFailure { e ->
                 if (entries != null) showRefreshError(e) else showFullError(e)
             }

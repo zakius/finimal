@@ -1,5 +1,10 @@
 package com.zakius.finimal.desktop
 
+import coil3.PlatformContext
+import coil3.SingletonImageLoader
+import coil3.request.CachePolicy
+import coil3.request.ImageRequest
+import coil3.size.Size
 import com.zakius.finimal.App
 import com.zakius.finimal.JsonFileStore
 import com.zakius.finimal.Platform
@@ -70,4 +75,18 @@ object DesktopPlatform : Platform {
     override fun bufferBytes() = DesktopMedia.bufferBytes()
     override fun evictBuffer() = DesktopMedia.evict()
     override fun clearBuffer() = DesktopMedia.clearBuffer()
+    override fun prefetchImages(urls: List<String>, diskOnly: Boolean) {
+        val ctx = PlatformContext.INSTANCE
+        val loader = SingletonImageLoader.get(ctx)
+        val networkPolicy = if (diskOnly) CachePolicy.DISABLED else CachePolicy.ENABLED
+        for (url in urls) {
+            loader.enqueue(
+                ImageRequest.Builder(ctx)
+                    .data(url)
+                    .size(Size.ORIGINAL)
+                    .networkCachePolicy(networkPolicy)
+                    .build()
+            )
+        }
+    }
 }

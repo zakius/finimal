@@ -112,11 +112,16 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
+import coil3.compose.LocalPlatformContext
+import coil3.request.ImageRequest
+import coil3.size.Size
+import androidx.compose.runtime.State
 import androidx.compose.runtime.snapshotFlow
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -129,15 +134,9 @@ import finimal.core.PlayState
 import finimal.core.TICKS_PER_MS
 import kotlin.math.abs
 
-/** The last good list per server, user and list, so a list you come back to shows at once while it reloads. Main thread only. */
-private val lastGood = object : LinkedHashMap<List<Any?>, List<BaseItemDto>>(16, 0.75f, true) {
-    // Every search query and sort is its own entry, so keep only the most recent ones.
-    override fun removeEldestEntry(eldest: MutableMap.MutableEntry<List<Any?>, List<BaseItemDto>>) = size > 20
-}
-
 /** Seeds the in-memory libraries cache (called by Android's fast-start view before handing off to Compose). */
-fun seedLibrariesLastGood(list: List<BaseItemDto>) {
-    lastGood[listOf(App.prefs.baseUrl, App.prefs.userId)] = list
+fun seedLibrariesLastGood(list: List<BaseItemDto>, fromNetwork: Boolean = true) {
+    AppCache.putList(listOf(App.prefs.baseUrl, App.prefs.userId), list, fromNetwork = fromNetwork)
 }
 
 /** Lightweight id+name pair for the Libraries snapshot so cold start avoids loading BaseItemDto and kotlinx.serialization. */
@@ -170,8 +169,15 @@ object ListSnapshots {
         runCatching {
             dir.mkdirs()
             if (key.size == 2) writeFastLibraries(key, list)
-            file(key).writeAtomically(json.encodeToString(list))
+            // Disposable display cache in appCache: atomic rename without fsync avoids flash I/O stalls on navigation.
+            file(key).writeAtomically(json.encodeToString(list), sync = false)
         }
+    }
+
+    /** Writes only when the list actually changed, skipping multi-MB JSON serialization on identical refreshes. */
+    fun writeIfChanged(key: List<Any?>, list: List<BaseItemDto>, previous: List<BaseItemDto>?) {
+        if (previous != null && previous == list && file(key).exists()) return
+        write(key, list)
     }
 
     fun readFastLibraryEntries(key: List<Any?>): List<LibraryEntry>? = runCatching {
@@ -191,7 +197,7 @@ object ListSnapshots {
             val encoded = list.joinToString("\n") { lib ->
                 "${lib.id}\t${lib.name.orEmpty().replace('\t', ' ').replace('\n', ' ')}"
             }
-            fastLibrariesFile(key).writeAtomically(encoded)
+            fastLibrariesFile(key).writeAtomically(encoded, sync = false)
         }
     }
 
@@ -218,27 +224,62 @@ object ListSnapshots {
     }
 }
 
-/** The item last focused with the D-pad on this screen, by key, so coming back to the screen puts focus on it again. */
-private val LocalFocusedKey = compositionLocalOf<MutableState<String?>> { mutableStateOf(null) }
+/**
+ * Tracks the item last focused with the D-pad on a screen with one screen-level effect instead of one coroutine per
+ * item, so scrolling grids and covering/uncovering screens pay zero coroutine overhead (and touch/mouse pay nothing).
+ */
+private class FocusMemoryState(val focusedKey: MutableState<String?>) {
+    val requesters = HashMap<String, FocusRequester>()
+}
+
+private val LocalFocusMemory = compositionLocalOf<FocusMemoryState?> { null }
 
 @Composable
 fun FocusMemory(content: @Composable () -> Unit) {
     val focusedKey = rememberSaveable { mutableStateOf<String?>(null) }
-    CompositionLocalProvider(LocalFocusedKey provides focusedKey, content = content)
+    val state = remember(focusedKey) { FocusMemoryState(focusedKey) }
+    val shown = LocalShown.current
+    LaunchedEffect(state) {
+        snapshotFlow { shown.value }.collect { visible ->
+            if (visible) {
+                val key = state.focusedKey.value ?: return@collect
+                runCatching { state.requesters[key]?.requestFocus() }
+            }
+        }
+    }
+    CompositionLocalProvider(LocalFocusMemory provides state, content = content)
 }
 
 /** Put before the item's clickable. Records D-pad focus under [key] and takes it back when the item shows again. Touch never focuses. */
-private fun Modifier.focusMemory(key: Any): Modifier = composed {
-    val memory = LocalFocusedKey.current
+@Composable
+private fun Modifier.focusMemory(key: Any): Modifier {
+    val memory = LocalFocusMemory.current ?: return this
+    val k = remember(key) { key.toString() }
     val requester = remember { FocusRequester() }
-    val k = key.toString()
-    val shown = LocalShown.current // Root clears focus while another screen covers this one.
-    LaunchedEffect(Unit) {
-        snapshotFlow { shown.value }.collect { visible ->
-            if (visible && memory.value == k) requester.requestFocus()
+    DisposableEffect(memory, k, requester) {
+        memory.requesters[k] = requester
+        onDispose { if (memory.requesters[k] === requester) memory.requesters.remove(k) }
+    }
+    return this.focusRequester(requester).onFocusChanged { focusState ->
+        if (focusState.isFocused) memory.focusedKey.value = k
+    }
+}
+
+/**
+ * Builds a Coil [ImageRequest] at [Size.ORIGINAL] so Coil never waits for a layout pass before starting a fetch or
+ * checking RAM cache, and matches [Platform.prefetchImages]'s cache keys 1:1.
+ */
+@Composable
+private fun rememberImageRequest(url: String?): ImageRequest? {
+    val context = LocalPlatformContext.current
+    return remember(url, context) {
+        url?.let {
+            ImageRequest.Builder(context)
+                .data(it)
+                .size(Size.ORIGINAL)
+                .build()
         }
     }
-    focusRequester(requester).onFocusChanged { focusState -> if (focusState.isFocused) memory.value = k }
 }
 
 /** A list, plus the refresh error when the list shown is an older copy because the refresh failed. */
@@ -246,18 +287,33 @@ class Load(val result: Result<List<BaseItemDto>>?, val refreshError: Throwable?)
 
 /**
  * Loads [block] after pushing unsynced progress, so the list never shows state older than this device's.
- * Loads again each time the screen comes back on top. Until the load ends, the list from the last visit
- * shows (from memory, else from disk when [persist]), with unsynced local state drawn over it. A failed load
+ * Loads again each time the screen comes back on top (skipping only when a network copy was just fetched
+ * with no local changes since). Until the load ends, the list from the last visit shows synchronously
+ * (from memory, disk prefetch, or [fallback]), with unsynced local state drawn over it. A failed load
  * keeps that list and says why below it.
  */
 @Composable
-private fun loadFresh(vararg keys: Any?, refresh: Int, persist: Boolean = true, block: suspend () -> List<BaseItemDto>): Load {
+private fun loadFresh(
+    vararg keys: Any?,
+    refresh: Int,
+    persist: Boolean = true,
+    fallback: (() -> List<BaseItemDto>?)? = null,
+    block: suspend () -> List<BaseItemDto>,
+): Load {
     val k = keys.toList()
     val cacheKey = listOf(App.prefs.baseUrl, App.prefs.userId) + k
-    var last by remember {
-        val cached = lastGood[cacheKey] ?: ListSnapshots.takePrefetched(cacheKey)
-        val initial = if (cached != null) Pair(k, Result.success(cached)) else null
-        mutableStateOf(initial)
+    var last by remember { mutableStateOf<Pair<List<Any?>, Result<List<BaseItemDto>>>?>(null) }
+    // Resolve cached or derived data synchronously when keys change, avoiding a 1-frame spinner or stale list flash.
+    val syncResult = remember(cacheKey, last) {
+        val current = last
+        if (current != null && current.first == k) {
+            current.second
+        } else {
+            val cached = AppCache.getList(cacheKey)?.items
+                ?: ListSnapshots.takePrefetched(cacheKey)?.also { AppCache.putList(cacheKey, it, fromNetwork = false) }
+                ?: fallback?.invoke()
+            if (cached != null) Result.success(cached) else current?.second
+        }
     }
     var refreshError by remember { mutableStateOf<Throwable?>(null) }
     val shown = LocalShown.current
@@ -266,11 +322,30 @@ private fun loadFresh(vararg keys: Any?, refresh: Int, persist: Boolean = true, 
             if (visible) coroutineScope {
                 refreshError = null
                 if (last?.second?.isFailure == true) last = null // A retry shows "Loading…" again.
+                var existingEntry = AppCache.getList(cacheKey)
                 if (last?.first != k) {
-                    var cached = lastGood[cacheKey]
-                    if (cached == null && persist) cached = withContext(Dispatchers.IO) { ListSnapshots.read(cacheKey) }
-                    if (cached != null) last = Pair(k, Result.success(cached))
+                    var cached = existingEntry?.items
+                    if (cached == null && persist) {
+                        cached = withContext(Dispatchers.IO) { ListSnapshots.read(cacheKey) }
+                        if (cached != null) {
+                            AppCache.putList(cacheKey, cached, fromNetwork = false)
+                            existingEntry = AppCache.getList(cacheKey)
+                        }
+                    }
+                    if (cached != null) {
+                        last = Pair(k, Result.success(cached))
+                    } else {
+                        val derived = fallback?.invoke()
+                        if (derived != null) last = Pair(k, Result.success(derived))
+                    }
                 }
+                // Skip a redundant network refetch when we already have a network-fresh copy (e.g. Series -> Season
+                // sliced from the episodes we just fetched, or a speculatively preloaded Library).
+                if (refresh == 0 && existingEntry != null && AppCache.isListFresh(existingEntry)) {
+                    if (last?.first != k) last = Pair(k, Result.success(existingEntry.items))
+                    return@coroutineScope
+                }
+                val changesBefore = App.server.localChanges
                 val pushed = App.server.flush()
                 // If the flush found the server unreachable, the fetch would only time out a second time.
                 val result = if (pushed != null && unreachable(pushed)) {
@@ -285,8 +360,9 @@ private fun loadFresh(vararg keys: Any?, refresh: Int, persist: Boolean = true, 
                 when {
                     result.isSuccess -> {
                         val list = result.getOrThrow()
-                        lastGood[cacheKey] = list
-                        if (persist) launch(Dispatchers.IO) { ListSnapshots.write(cacheKey, list) }
+                        val prevList = existingEntry?.items
+                        AppCache.putList(cacheKey, list, fromNetwork = true, localChanges = changesBefore)
+                        if (persist) launch(Dispatchers.IO) { ListSnapshots.writeIfChanged(cacheKey, list, prevList) }
                         last = Pair(k, result)
                     }
                     prev != null && prev.first == k && prev.second.isSuccess -> refreshError = result.exceptionOrNull()
@@ -295,27 +371,34 @@ private fun loadFresh(vararg keys: Any?, refresh: Int, persist: Boolean = true, 
             }
         }
     }
-    return Load(last?.second, refreshError)
+    return Load(syncResult, refreshError)
 }
 
 /**
- * Download statuses while the screen is shown, null until first read. Re-read on every download
- * change, and polled every second while one runs, else every 5 s. Polling stops while another screen covers this one.
+ * Download statuses as a [State] so item rows read only their own entry via [derivedStateOf] instead of recomposing
+ * the entire screen every second. Polls every 1 s while running, every 5 s while queued/paused, and stops polling
+ * completely when every download is done (waking immediately on [Downloads.changes]).
  */
 @Composable
-fun rememberDownloadStatuses(): Map<String, DownloadStatus>? {
-    val downloads = App.downloads ?: return null
+fun rememberDownloadStatusesState(): State<Map<String, DownloadStatus>?> {
+    val downloads = App.downloads ?: return remember { mutableStateOf(null) }
     val shown = LocalShown.current
     return produceState<Map<String, DownloadStatus>?>(null, downloads.changes) {
         snapshotFlow { shown.value }.collectLatest { visible ->
             while (visible) {
-                value = withContext(Dispatchers.IO) { downloads.downloadStatuses() }
-                val running = value.orEmpty().values.any { status -> status.fill == Fill.RUNNING }
+                val map = withContext(Dispatchers.IO) { downloads.downloadStatuses() }
+                value = map
+                val running = map.values.any { status -> status.fill == Fill.RUNNING }
+                val unfinished = running || map.values.any { status -> status.fill != Fill.DONE }
+                if (!unfinished) break
                 delay(if (running) 1_000 else 5_000)
             }
         }
-    }.value
+    }
 }
+
+@Composable
+fun rememberDownloadStatuses(): Map<String, DownloadStatus>? = rememberDownloadStatusesState().value
 
 /** Queues downloads and says how many were queued. */
 private suspend fun downloadAll(episodes: List<BaseItemDto>) {
@@ -407,7 +490,7 @@ private fun BarMenu(content: @Composable (close: () -> Unit) -> Unit) {
     var open by remember { mutableStateOf(false) }
     Box {
         IconButton(onClick = { open = true }) { GlyphIcon(AppIcons.MORE_VERT, "More options") }
-        DropdownMenu(open, { open = false }) { content { open = false } }
+        if (open) DropdownMenu(true, { open = false }) { content { open = false } }
     }
 }
 
@@ -438,10 +521,23 @@ private fun markAllAction(onChanged: () -> Unit): (List<BaseItemDto>) -> Unit {
 
 /** Where to pick up a series: the unfinished episode last played, else the first unplayed one after it, else the first. Null once all is played. */
 fun upNext(episodes: List<BaseItemDto>): BaseItemDto? {
-    val playable = episodes.filter { it.parentIndexNumber != 0 && it.locationType != LocationType.VIRTUAL }
-    val refs = playable.map { ep -> EpisodeRef(ep.id.toString(), ep.localState().first) }
-    val window = keepNextWindow(refs, playable.size).toSet()
-    return playable.firstOrNull { ep -> ep.id.toString() in window && ep.localState().first?.played != true }
+    val playable = ArrayList<BaseItemDto>(episodes.size)
+    val refs = ArrayList<EpisodeRef>(episodes.size)
+    val playedById = HashMap<String, Boolean>(episodes.size)
+    for (ep in episodes) {
+        if (ep.parentIndexNumber == 0 || ep.locationType == LocationType.VIRTUAL) continue
+        val id = ep.id.toString()
+        val state = ep.localState().first
+        playable += ep
+        refs += EpisodeRef(id, state)
+        playedById[id] = state?.played == true
+    }
+    if (playable.isEmpty()) return null
+    val window = keepNextWindow(refs, playable.size).toHashSet()
+    return playable.firstOrNull { ep ->
+        val id = ep.id.toString()
+        id in window && playedById[id] != true
+    }
 }
 
 /** Plays [item] from the start: the position is saved as 0 first, so nothing can resume it later. */
@@ -698,6 +794,13 @@ fun LoginScreen(
 fun LibrariesScreen(modifier: Modifier, push: (Screen) -> Unit) {
     var refresh by remember { mutableIntStateOf(0) }
     val libs = loadFresh(refresh = refresh) { App.server.libraries() }
+    val libList = libs.result?.getOrNull()
+    LaunchedEffect(libList) {
+        val ids = libList?.map { it.id.toString() } ?: return@LaunchedEffect
+        AppCache.prefetchLibrariesFromDisk(ids)
+        val entry = AppCache.getList(AppCache.listKey())
+        if (entry?.fromNetwork == true) AppCache.prefetchLibrariesNetwork(ids)
+    }
     var userName by remember { mutableStateOf(App.prefs.currentUserName()) }
     // Accounts migrated from before names were stored have an empty name. Fetch it from the server once.
     LaunchedEffect(Unit) {
@@ -765,8 +868,13 @@ fun LibraryScreen(modifier: Modifier, screen: Screen.Library, push: (Screen) -> 
     var searchFocusTrigger by remember { mutableIntStateOf(0) }
     var refresh by remember { mutableIntStateOf(0) }
     LaunchedEffect(search) {
-        delay(400)
-        query = search
+        if (search == query) return@LaunchedEffect
+        if (search.isEmpty()) {
+            query = ""
+        } else {
+            delay(250)
+            query = search
+        }
     }
     val focus = remember { FocusRequester() }
     val keyboard = LocalSoftwareKeyboardController.current
@@ -788,10 +896,36 @@ fun LibraryScreen(modifier: Modifier, screen: Screen.Library, push: (Screen) -> 
         searchOpen = true
         searchFocusTrigger++
     }
+    val libraryId = screen.id
     val items = if (searchOnly && query.isBlank()) {
         Load(Result.success(emptyList()), null)
     } else {
-        loadFresh(screen.id, sort, unplayed, query, refresh = refresh, persist = query.isBlank()) { App.server.items(screen.id, sort, unplayed, query) }
+        loadFresh(
+            libraryId,
+            sort,
+            unplayed,
+            query,
+            refresh = refresh,
+            persist = query.isBlank(),
+            fallback = if (libraryId != null) {
+                { AppCache.deriveLibraryList(App.prefs.baseUrl, App.prefs.userId, libraryId, sort, unplayed, query) }
+            } else {
+                null
+            },
+        ) { App.server.items(libraryId, sort, unplayed, query) }
+    }
+    // Instant in-library search preview while the debounced server query is still catching up.
+    val livePreview = remember(libraryId, sort, unplayed, search, query) {
+        if (libraryId != null && search.isNotBlank() && search != query) {
+            AppCache.deriveLibraryList(App.prefs.baseUrl, App.prefs.userId, libraryId, sort, unplayed, search)
+        } else {
+            null
+        }
+    }
+    val shownLoad = if (livePreview != null && (livePreview.isNotEmpty() || items.result == null)) {
+        Load(Result.success(livePreview), items.refreshError)
+    } else {
+        items
     }
     Column(
         modifier
@@ -849,7 +983,6 @@ fun LibraryScreen(modifier: Modifier, screen: Screen.Library, push: (Screen) -> 
                 keyboard?.hide()
             }),
         )
-        val libraryId = screen.id
         if (libraryId != null) Row(
             Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -866,18 +999,47 @@ fun LibraryScreen(modifier: Modifier, screen: Screen.Library, push: (Screen) -> 
                 App.prefs.setLibraryUnplayed(libraryId, unplayed)
             }, { Text("Unplayed") })
         }
-        val statuses = rememberDownloadStatuses()
+        val statusesState = rememberDownloadStatusesState()
         val scope = rememberCoroutineScope()
         // Outside Loaded, so the scroll survives its "Loading…" pass; a new sort, filter or query starts at the top.
         val gridState = rememberSaveable(sort, unplayed, query, saver = LazyGridState.Saver) { LazyGridState() }
-        Loaded(items, { refresh++ }, { push(Screen.Downloads) }) { list ->
+        // Debounced hover/focus speculative prefetch for the single poster the user is about to open.
+        var hoveredItem by remember { mutableStateOf<BaseItemDto?>(null) }
+        LaunchedEffect(hoveredItem) {
+            val target = hoveredItem ?: return@LaunchedEffect
+            delay(150)
+            if (target.type == BaseItemKind.SERIES) {
+                AppCache.prefetchSeries(target.id.toString())
+            } else if (target.type == BaseItemKind.MOVIE) {
+                AppCache.prefetchPlayable(target.id.toString(), includeSubtitles = false)
+            }
+        }
+        Loaded(shownLoad, { refresh++ }, { push(Screen.Downloads) }) { list ->
             if (list.isEmpty()) Empty(when {
+                search.isNotBlank() && search != query -> "Searching…"
                 query.isNotBlank() -> "No results for “${query.trim()}”"
                 searchOnly -> "Type to search"
                 unplayed -> "Nothing unplayed here"
                 else -> "This library is empty"
             })
             else {
+                // Scroll-ahead image preloading: keep 2-3 rows of posters ahead of the viewport warm in Coil.
+                LaunchedEffect(list, gridState) {
+                    var prefetchedThrough = -1
+                    snapshotFlow { gridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0 }
+                        .distinctUntilChanged()
+                        .collect { lastVisible ->
+                            val end = (lastVisible + 18).coerceAtMost(list.lastIndex)
+                            if (end > prefetchedThrough) {
+                                val start = (prefetchedThrough + 1).coerceAtLeast(lastVisible + 1)
+                                prefetchedThrough = end
+                                if (start <= end) {
+                                    val urls = (start..end).mapNotNull { i -> App.server.imageUrl(list[i]) }
+                                    if (urls.isNotEmpty()) App.platform.prefetchImages(urls, diskOnly = App.platform.isMetered)
+                                }
+                            }
+                        }
+                }
                 val cellWidth = when {
                     App.tv -> 150.dp
                     smallestWidthDp() >= 600 -> 140.dp
@@ -891,11 +1053,23 @@ fun LibraryScreen(modifier: Modifier, screen: Screen.Library, push: (Screen) -> 
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     items(list, key = { it.id }) { item ->
-                        if (item.type == BaseItemKind.SERIES) Poster(item, null, onClick = { push(Screen.Series(item.id.toString(), item.name.orEmpty())) })
-                        else Poster(item, statuses?.get(item.id.toString()),
-                            onClick = { push(Screen.Play(item.id.toString())) },
-                            onStartOver = { scope.launch { startOver(item, push) } },
-                            onChanged = { refresh++ })
+                        if (item.type == BaseItemKind.SERIES) {
+                            Poster(
+                                item,
+                                statusesState = null,
+                                onClick = { push(Screen.Series(item.id.toString(), item.name.orEmpty())) },
+                                onFocusOrHover = { hoveredItem = item },
+                            )
+                        } else {
+                            Poster(
+                                item,
+                                statusesState = statusesState,
+                                onClick = { push(Screen.Play(item.id.toString())) },
+                                onStartOver = { scope.launch { startOver(item, push) } },
+                                onChanged = { refresh++ },
+                                onFocusOrHover = { hoveredItem = item },
+                            )
+                        }
                     }
                 }
             }
@@ -907,39 +1081,77 @@ fun LibraryScreen(modifier: Modifier, screen: Screen.Library, push: (Screen) -> 
 @Composable
 private fun Poster(
     item: BaseItemDto,
-    download: DownloadStatus?,
+    statusesState: State<Map<String, DownloadStatus>?>?,
     onClick: () -> Unit,
     onStartOver: (() -> Unit)? = null,
     onChanged: (() -> Unit)? = null,
+    onFocusOrHover: (() -> Unit)? = null,
 ) {
-    // Derived, so a local change recomposes only the row whose state it changed, not every row.
+    val itemId = remember(item.id) { item.id.toString() }
+    // Derived, so a local change or download tick recomposes only the poster whose state actually changed.
     val local by remember(item) { derivedStateOf { item.localState() } }
     val (state, unsynced) = local
+    val download by remember(itemId, statusesState) {
+        derivedStateOf { statusesState?.value?.get(itemId) }
+    }
     var menu by remember { mutableStateOf(false) }
+    var confirmDelete by remember { mutableStateOf(false) }
+    var showInfo by remember { mutableStateOf(false) }
     // The focus highlight doesn't show over artwork; a border does.
     var focused by remember { mutableStateOf(false) }
-    var openMenu: (() -> Unit)? = null
-    if (onChanged != null) openMenu = { menu = true }
+    val openMenu: (() -> Unit)? = if (onChanged != null) remember { { menu = true } } else null
+    val latestHover by rememberUpdatedState(onFocusOrHover)
+    val imageTag = item.imageTags?.get(ImageType.PRIMARY)
+    val imageUrl = remember(item.id, imageTag) { App.server.imageUrl(item) }
+    val imageRequest = rememberImageRequest(imageUrl)
+    val meta = remember(item.id, item.type, item.productionYear, item.runTimeTicks) {
+        if (item.type == BaseItemKind.MOVIE) {
+            listOfNotNull(
+                item.productionYear?.toString(),
+                item.runTimeTicks?.takeIf { it > 0 }?.let(::formatRuntime),
+            ).joinToString(" · ")
+        } else {
+            ""
+        }
+    }
     Column(
         Modifier
             .focusMemory(item.id)
-            .onFocusChanged { focusState -> focused = focusState.isFocused }
+            .onFocusChanged { focusState ->
+                focused = focusState.isFocused
+                if (focusState.isFocused) latestHover?.invoke()
+            }
+            .then(
+                if (!App.platform.android) {
+                    Modifier.pointerInput(Unit) {
+                        awaitPointerEventScope {
+                            while (true) {
+                                val e = awaitPointerEvent()
+                                if (e.type == PointerEventType.Enter) latestHover?.invoke()
+                            }
+                        }
+                    }
+                } else {
+                    Modifier
+                }
+            )
             .onSecondaryClick(openMenu)
             .combinedClickable(onClick = onClick, onLongClickLabel = "Actions", onLongClick = openMenu)
     ) {
         Box(if (focused) Modifier.border(3.dp, MaterialTheme.colorScheme.primary) else Modifier) {
-            AsyncImage(App.server.imageUrl(item), null, contentScale = ContentScale.Crop,
+            AsyncImage(imageRequest, null, contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxWidth().aspectRatio(2f / 3).background(Color.DarkGray))
-            if (download != null) {
+            val dl = download
+            if (dl != null) {
                 Text(
-                    if (download.fill == Fill.DONE) "↓" else "${download.percent}%",
+                    if (dl.fill == Fill.DONE) "↓" else "${dl.percent}%",
                     color = Color.White,
                     modifier = Modifier
                         .align(Alignment.TopStart)
                         .background(Color(0xAA000000))
                         .padding(horizontal = 6.dp)
                         .semantics {
-                            contentDescription = if (download.fill == Fill.DONE) "Downloaded" else "Downloaded ${download.percent}%"
+                            contentDescription = if (dl.fill == Fill.DONE) "Downloaded" else "Downloaded ${dl.percent}%"
                         },
                 )
             }
@@ -963,25 +1175,31 @@ private fun Poster(
             if (unsynced) Text("not synced", color = Color.White, style = MaterialTheme.typography.labelSmall,
                 modifier = Modifier.align(Alignment.BottomStart).padding(bottom = if (focused) 7.dp else 4.dp).background(Color(0xAA000000)))
             ProgressBar(item, state, Modifier.align(Alignment.BottomStart).padding(if (focused) 3.dp else 0.dp)) // Stays inside the focus border.
-            if (onChanged != null) {
-                ItemMenu(item, state?.played == true, unsynced, menu, { menu = false }, download != null, onStartOver, onChanged)
-            }
-        }
-        Text(item.name.orEmpty(), maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall)
-        if (item.type == BaseItemKind.MOVIE) {
-            val meta = listOfNotNull(
-                item.productionYear?.toString(),
-                item.runTimeTicks?.takeIf { it > 0 }?.let(::formatRuntime),
-            ).joinToString(" · ")
-            if (meta.isNotEmpty()) {
-                Text(
-                    meta,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+            if (onChanged != null && menu) {
+                ItemMenu(
+                    item,
+                    state?.played == true,
+                    unsynced,
+                    onDismiss = { menu = false },
+                    downloaded = dl != null,
+                    onStartOver = onStartOver,
+                    onRequestDelete = { confirmDelete = true },
+                    onRequestInfo = { showInfo = true },
+                    onChanged = onChanged,
                 )
             }
+        }
+        if (onChanged != null && confirmDelete) ConfirmDelete(item, { confirmDelete = false }, onChanged)
+        if (onChanged != null && showInfo) ItemInfoDialog(item) { showInfo = false }
+        Text(item.name.orEmpty(), maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall)
+        if (meta.isNotEmpty()) {
+            Text(
+                meta,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }
@@ -992,7 +1210,7 @@ fun SeriesScreen(modifier: Modifier, screen: Screen.Series, push: (Screen) -> Un
     val seasons = loadFresh(screen.id, refresh = refresh) { App.server.seasons(screen.id) }
     // Every episode, for Continue. A show with one season lists its episodes here instead of a one-row season list.
     val episodes = loadFresh(screen.id, "episodes", refresh = refresh) { App.server.episodes(screen.id) }
-    val statuses = rememberDownloadStatuses()
+    val statusesState = rememberDownloadStatusesState()
     var keepNext by remember { mutableIntStateOf(App.prefs.keepNext(screen.id)) }
     var showKeepNextDialog by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
@@ -1000,16 +1218,43 @@ fun SeriesScreen(modifier: Modifier, screen: Screen.Series, push: (Screen) -> Un
     val markAll = markAllAction { refresh++ }
     val all = episodes.result?.getOrNull()
     val onlySeason = seasons.result?.getOrNull()?.singleOrNull()
-    val shownEpisodes = if (onlySeason != null) {
-        all?.filter { ep -> ep.seasonId == onlySeason.id }
-    } else {
-        null
+    val shownEpisodes = remember(all, onlySeason) {
+        if (onlySeason != null) all?.filter { ep -> ep.seasonId == onlySeason.id } else null
     }
+    val next by remember(all) { derivedStateOf { if (all != null) upNext(all) else null } }
     // Only highlight up-next within a single season someone has started; an untouched season has nothing to point at.
-    val seasonNext = if (shownEpisodes != null && shownEpisodes.any { ep -> ep.localState().first?.lastPlayedMs != null }) {
-        upNext(shownEpisodes)
-    } else {
-        null
+    val seasonNext by remember(shownEpisodes) {
+        derivedStateOf {
+            if (shownEpisodes != null && shownEpisodes.any { ep -> ep.localState().first?.lastPlayedMs != null }) {
+                upNext(shownEpisodes)
+            } else {
+                null
+            }
+        }
+    }
+    // Precompute unplayed counts per season in O(episodes) once instead of O(seasons * episodes) on every row.
+    val unplayedBySeason by remember(all) {
+        derivedStateOf {
+            if (all == null) null
+            else {
+                val counts = HashMap<java.util.UUID, Int>()
+                for (ep in all) {
+                    val sid = ep.seasonId ?: continue
+                    if (ep.locationType != LocationType.VIRTUAL && ep.localState().first?.played != true) {
+                        counts[sid] = (counts[sid] ?: 0) + 1
+                    }
+                }
+                counts
+            }
+        }
+    }
+    // Speculatively prefetch the Continue/up-next episode (metadata, segments, subtitles) and warm thumbnails around it.
+    LaunchedEffect(next?.id) {
+        val target = next ?: return@LaunchedEffect
+        AppCache.prefetchPlayable(target.id.toString())
+        val seasonEps = all?.filter { it.seasonId == target.seasonId }.orEmpty()
+        val idx = seasonEps.indexOfFirst { it.id == target.id }.coerceAtLeast(0)
+        AppCache.prefetchEpisodeThumbnails(seasonEps, focusIndex = idx, count = 10)
     }
     val listState = rememberLazyListState() // Outside Loaded, so the scroll survives its "Loading…" pass.
     var scrolled by rememberSaveable { mutableStateOf(false) }
@@ -1047,8 +1292,10 @@ fun SeriesScreen(modifier: Modifier, screen: Screen.Series, push: (Screen) -> Un
         )
     }
     // With one season, "all" means its episodes as shown. With several, it means every episode outside the specials.
-    val markCandidates = shownEpisodes ?: all?.filter { ep -> ep.parentIndexNumber != 0 && ep.locationType != LocationType.VIRTUAL }
-    val markable = if (markCandidates.isNullOrEmpty()) null else markCandidates
+    val markable = remember(shownEpisodes, all) {
+        val candidates = shownEpisodes ?: all?.filter { ep -> ep.parentIndexNumber != 0 && ep.locationType != LocationType.VIRTUAL }
+        if (candidates.isNullOrEmpty()) null else candidates
+    }
     Column(modifier.fillMaxSize().screenShortcuts(onRefresh = { refresh++ })) {
         Bar(screen.name, pop) {
             BarMenu { close ->
@@ -1075,8 +1322,8 @@ fun SeriesScreen(modifier: Modifier, screen: Screen.Series, push: (Screen) -> Un
                 }
             }
         }
-        val next = if (all != null) upNext(all) else null
-        if (next != null) ContinueButton(next) { push(Screen.Play(next.id.toString())) }
+        val continueEp = next
+        if (continueEp != null) ContinueButton(continueEp) { push(Screen.Play(continueEp.id.toString())) }
         if (App.downloads != null && keepNext > 0) {
             val plural = if (keepNext == 1) "" else "s"
             Row(
@@ -1097,16 +1344,34 @@ fun SeriesScreen(modifier: Modifier, screen: Screen.Series, push: (Screen) -> Un
         }
         Loaded(seasons, { refresh++ }, { push(Screen.Downloads) }) { list ->
             if (list.isEmpty()) Empty("This series has no seasons")
-            else if (shownEpisodes != null) LazyColumn(state = listState) {
-                items(shownEpisodes, key = { it.id }) { ep ->
-                    EpisodeRow(
-                        ep,
-                        statuses?.get(ep.id.toString()),
-                        highlighted = ep.id == seasonNext?.id,
-                        onPlay = { push(Screen.Play(ep.id.toString())) },
-                        onStartOver = { scope.launch { startOver(ep, push) } },
-                        onChanged = { refresh++ },
-                    )
+            else if (shownEpisodes != null) {
+                LaunchedEffect(shownEpisodes, listState) {
+                    var prefetchedThrough = -1
+                    snapshotFlow { listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0 }
+                        .distinctUntilChanged()
+                        .collect { lastVisible ->
+                            val end = (lastVisible + 8).coerceAtMost(shownEpisodes.lastIndex)
+                            if (end > prefetchedThrough) {
+                                val start = (prefetchedThrough + 1).coerceAtLeast(lastVisible + 1)
+                                prefetchedThrough = end
+                                if (start <= end) {
+                                    val urls = (start..end).mapNotNull { i -> App.server.imageUrl(shownEpisodes[i], ImageType.PRIMARY, 320) }
+                                    if (urls.isNotEmpty()) App.platform.prefetchImages(urls, diskOnly = App.platform.isMetered)
+                                }
+                            }
+                        }
+                }
+                LazyColumn(state = listState) {
+                    items(shownEpisodes, key = { it.id }) { ep ->
+                        EpisodeRow(
+                            ep,
+                            statusesState = statusesState,
+                            highlighted = ep.id == seasonNext?.id,
+                            onPlay = { push(Screen.Play(ep.id.toString())) },
+                            onStartOver = { scope.launch { startOver(ep, push) } },
+                            onChanged = { refresh++ },
+                        )
+                    }
                 }
             }
             else LazyColumn(state = listState) {
@@ -1121,15 +1386,7 @@ fun SeriesScreen(modifier: Modifier, screen: Screen.Series, push: (Screen) -> Un
                             .padding(16.dp)
                     ) {
                         Text(season.name.orEmpty(), Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
-                        val left = if (all != null) {
-                            all.count { ep ->
-                                ep.seasonId == season.id &&
-                                    ep.locationType != LocationType.VIRTUAL &&
-                                    ep.localState().first?.played != true
-                            }
-                        } else {
-                            season.userData?.unplayedItemCount ?: 0
-                        }
+                        val left = unplayedBySeason?.let { it[season.id] ?: 0 } ?: (season.userData?.unplayedItemCount ?: 0)
                         Text(
                             if (left == 0) "✓" else "$left unplayed",
                             Modifier.semantics { if (left == 0) contentDescription = "Played" },
@@ -1147,14 +1404,22 @@ fun SeriesScreen(modifier: Modifier, screen: Screen.Series, push: (Screen) -> Un
 fun SeasonScreen(modifier: Modifier, screen: Screen.Season, push: (Screen) -> Unit, pop: () -> Unit) {
     var refresh by remember { mutableIntStateOf(0) }
     val episodes = loadFresh(screen.seasonId, refresh = refresh) { App.server.episodes(screen.seriesId, screen.seasonId) }
-    val statuses = rememberDownloadStatuses()
+    val statusesState = rememberDownloadStatusesState()
     val listState = rememberLazyListState() // Outside Loaded, so the scroll survives its "Loading…" pass when coming back.
     val scope = rememberCoroutineScope()
     val downloadAll = downloadAllAction { App.server.episodes(screen.seriesId, screen.seasonId, sources = true) }
     val markAll = markAllAction { refresh++ }
     val list = episodes.result?.getOrNull()
     // Only highlight up-next within a season someone has started; an untouched season has nothing to point at.
-    val next = if (list != null && list.any { ep -> ep.localState().first?.lastPlayedMs != null }) upNext(list) else null
+    val next by remember(list) {
+        derivedStateOf {
+            if (list != null && list.any { ep -> ep.localState().first?.lastPlayedMs != null }) upNext(list) else null
+        }
+    }
+    LaunchedEffect(next?.id, list) {
+        val target = next ?: list?.firstOrNull { it.locationType != LocationType.VIRTUAL } ?: return@LaunchedEffect
+        AppCache.prefetchPlayable(target.id.toString())
+    }
     var scrolled by rememberSaveable { mutableStateOf(false) } // Scroll to up-next only once; coming back keeps the user's scroll.
     LaunchedEffect(next != null) {
         val i = list.orEmpty().indexOf(next)
@@ -1185,18 +1450,36 @@ fun SeasonScreen(modifier: Modifier, screen: Screen.Season, push: (Screen) -> Un
                 }
             }
         }
-        Loaded(episodes, { refresh++ }, { push(Screen.Downloads) }) { list ->
-            if (list.isEmpty()) Empty("This season has no episodes")
-            else LazyColumn(state = listState) {
-                items(list, key = { it.id }) { ep ->
-                    EpisodeRow(
-                        ep,
-                        statuses?.get(ep.id.toString()),
-                        highlighted = ep.id == next?.id,
-                        onPlay = { push(Screen.Play(ep.id.toString())) },
-                        onStartOver = { scope.launch { startOver(ep, push) } },
-                        onChanged = { refresh++ },
-                    )
+        Loaded(episodes, { refresh++ }, { push(Screen.Downloads) }) { eps ->
+            if (eps.isEmpty()) Empty("This season has no episodes")
+            else {
+                LaunchedEffect(eps, listState) {
+                    var prefetchedThrough = -1
+                    snapshotFlow { listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0 }
+                        .distinctUntilChanged()
+                        .collect { lastVisible ->
+                            val end = (lastVisible + 8).coerceAtMost(eps.lastIndex)
+                            if (end > prefetchedThrough) {
+                                val start = (prefetchedThrough + 1).coerceAtLeast(lastVisible + 1)
+                                prefetchedThrough = end
+                                if (start <= end) {
+                                    val urls = (start..end).mapNotNull { i -> App.server.imageUrl(eps[i], ImageType.PRIMARY, 320) }
+                                    if (urls.isNotEmpty()) App.platform.prefetchImages(urls, diskOnly = App.platform.isMetered)
+                                }
+                            }
+                        }
+                }
+                LazyColumn(state = listState) {
+                    items(eps, key = { it.id }) { ep ->
+                        EpisodeRow(
+                            ep,
+                            statusesState = statusesState,
+                            highlighted = ep.id == next?.id,
+                            onPlay = { push(Screen.Play(ep.id.toString())) },
+                            onStartOver = { scope.launch { startOver(ep, push) } },
+                            onChanged = { refresh++ },
+                        )
+                    }
                 }
             }
         }
@@ -1206,7 +1489,8 @@ fun SeasonScreen(modifier: Modifier, screen: Screen.Season, push: (Screen) -> Un
 /** "Continue S2E5 · Title" with the time left, or "Play" for an episode not started. */
 @Composable
 private fun ContinueButton(ep: BaseItemDto, onClick: () -> Unit) {
-    val position = ep.localState().first?.positionTicks ?: 0
+    val local by remember(ep) { derivedStateOf { ep.localState() } }
+    val position = local.first?.positionTicks ?: 0
     val runtime = ep.runTimeTicks
     val minutesLeft = if (runtime != null && position > 0) (runtime - position) / TICKS_PER_MS / 60_000 else null
     Button(onClick, Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
@@ -1228,48 +1512,78 @@ private fun ContinueButton(ep: BaseItemDto, onClick: () -> Unit) {
 @Composable
 fun EpisodeRow(
     ep: BaseItemDto,
-    download: DownloadStatus?,
+    download: DownloadStatus? = null,
+    statusesState: State<Map<String, DownloadStatus>?>? = null,
     highlighted: Boolean = false,
     onPlay: () -> Unit,
     onStartOver: (() -> Unit)? = null,
     onChanged: () -> Unit = {},
 ) {
-    // Derived, so a local change recomposes only the row whose state it changed, not every row.
+    val epId = remember(ep.id) { ep.id.toString() }
+    // Derived, so a local change or download tick recomposes only the row whose state actually changed.
     val local by remember(ep) { derivedStateOf { ep.localState() } }
     val (state, unsynced) = local
+    val resolvedDownload by remember(epId, download, statusesState) {
+        derivedStateOf { download ?: statusesState?.value?.get(epId) }
+    }
     var menu by remember { mutableStateOf(false) }
+    var confirmDelete by remember { mutableStateOf(false) }
+    var showInfo by remember { mutableStateOf(false) }
+    val openMenu = remember { { menu = true } }
+    val imageTag = ep.imageTags?.get(ImageType.PRIMARY)
+    val imageUrl = remember(ep.id, imageTag) { App.server.imageUrl(ep, ImageType.PRIMARY, 320) }
+    val imageRequest = rememberImageRequest(imageUrl)
+    val title = remember(ep.id, ep.indexNumber, ep.name) {
+        val number = ep.indexNumber
+        listOfNotNull(if (number != null) "$number." else null, ep.name).joinToString(" ")
+    }
+    val runtimeText = remember(ep.runTimeTicks) {
+        ep.runTimeTicks?.let { formatMs(it / TICKS_PER_MS) }
+    }
     Row(
         Modifier.fillMaxWidth()
             .background(if (highlighted) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent)
             .focusMemory(ep.id)
-            .onSecondaryClick { menu = true }
-            .combinedClickable(onClick = onPlay, onLongClickLabel = "Actions", onLongClick = { menu = true })
+            .onSecondaryClick(openMenu)
+            .combinedClickable(onClick = onPlay, onLongClickLabel = "Actions", onLongClick = openMenu)
             .padding(8.dp),
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Box(Modifier.width(140.dp)) {
-            AsyncImage(App.server.imageUrl(ep, ImageType.PRIMARY, 320), null, contentScale = ContentScale.Crop,
+            AsyncImage(imageRequest, null, contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9).background(Color.DarkGray))
             ProgressBar(ep, state, Modifier.align(Alignment.BottomStart))
         }
         Column(Modifier.weight(1f)) {
-            val number = ep.indexNumber
-            val title = listOfNotNull(if (number != null) "$number." else null, ep.name).joinToString(" ")
             Text(title, style = MaterialTheme.typography.titleSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
-            val runtime = ep.runTimeTicks
+            val dl = resolvedDownload
             val bits = listOfNotNull(
-                if (runtime != null) formatMs(runtime / TICKS_PER_MS) else null,
+                runtimeText,
                 if (state?.played == true) "✓ played" else null,
-                download?.label,
+                dl?.label,
                 if (unsynced) "not synced" else null,
             )
             Text(bits.joinToString(" · "), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         Box {
-            IconButton(onClick = { menu = true }) { GlyphIcon(AppIcons.MORE_VERT, "More options") }
-            ItemMenu(ep, state?.played == true, unsynced, menu, { menu = false }, download != null, onStartOver, onChanged)
+            IconButton(onClick = openMenu) { GlyphIcon(AppIcons.MORE_VERT, "More options") }
+            if (menu) {
+                ItemMenu(
+                    ep,
+                    state?.played == true,
+                    unsynced,
+                    onDismiss = { menu = false },
+                    downloaded = resolvedDownload != null,
+                    onStartOver = onStartOver,
+                    onRequestDelete = { confirmDelete = true },
+                    onRequestInfo = { showInfo = true },
+                    onChanged = onChanged,
+                )
+            }
         }
     }
+    if (confirmDelete) ConfirmDelete(ep, { confirmDelete = false }, onChanged)
+    if (showInfo) ItemInfoDialog(ep) { showInfo = false }
 }
 
 @Composable
@@ -1293,11 +1607,15 @@ private fun formatRuntime(ticks: Long): String {
 
 @Composable
 private fun ItemInfoDialog(item: BaseItemDto, onDismiss: () -> Unit) {
-    var full by remember(item.id) { mutableStateOf(if (item.overview != null) item else null) }
-    var loading by remember(item.id) { mutableStateOf(item.overview == null) }
+    val itemId = remember(item.id) { item.id.toString() }
+    val cachedFull = remember(itemId) {
+        if (item.overview != null) item else AppCache.getCachedItem(itemId)?.takeIf { it.overview != null }
+    }
+    var full by remember(item.id) { mutableStateOf(cachedFull) }
+    var loading by remember(item.id) { mutableStateOf(cachedFull == null) }
     LaunchedEffect(item.id) {
-        if (item.overview == null) {
-            full = runCatching { App.server.item(item.id.toString()) }.getOrNull() ?: item
+        if (full == null) {
+            full = runCatching { AppCache.fetchOrJoinItem(itemId, flushFirst = false) }.getOrNull() ?: item
             loading = false
         }
     }
@@ -1341,16 +1659,22 @@ private fun ItemInfoDialog(item: BaseItemDto, onDismiss: () -> Unit) {
     )
 }
 
-/** Actions of an episode or movie. */
+/** Actions of an episode or movie. Mounted only while the menu is open so scrolling lists compose zero menus. */
 @Composable
-private fun ItemMenu(item: BaseItemDto, played: Boolean, unsynced: Boolean, expanded: Boolean, onDismiss: () -> Unit, downloaded: Boolean, onStartOver: (() -> Unit)?, onChanged: () -> Unit) {
-    val id = item.id.toString()
+private fun ItemMenu(
+    item: BaseItemDto,
+    played: Boolean,
+    unsynced: Boolean,
+    onDismiss: () -> Unit,
+    downloaded: Boolean,
+    onStartOver: (() -> Unit)?,
+    onRequestDelete: () -> Unit,
+    onRequestInfo: () -> Unit,
+    onChanged: () -> Unit,
+) {
+    val id = remember(item.id) { item.id.toString() }
     val scope = rememberCoroutineScope()
-    var confirm by remember { mutableStateOf(false) }
-    var showInfo by remember { mutableStateOf(false) }
-    ConfirmDelete(if (confirm) item else null, { confirm = false }, onChanged)
-    if (showInfo) ItemInfoDialog(item) { showInfo = false }
-    DropdownMenu(expanded, onDismiss) {
+    DropdownMenu(true, onDismiss) {
         if (onStartOver != null) {
             DropdownMenuItem({ Text("Start over") }, {
                 onDismiss()
@@ -1366,12 +1690,12 @@ private fun ItemMenu(item: BaseItemDto, played: Boolean, unsynced: Boolean, expa
         })
         DropdownMenuItem({ Text("Info") }, {
             onDismiss()
-            showInfo = true
+            onRequestInfo()
         })
         if (App.downloads != null && downloaded) {
             DropdownMenuItem({ Text("Delete download") }, {
                 onDismiss()
-                confirm = true
+                onRequestDelete()
             })
         } else if (App.downloads != null) DropdownMenuItem({ Text("Download") }, {
             onDismiss()
@@ -1390,6 +1714,93 @@ private fun ItemMenu(item: BaseItemDto, played: Boolean, unsynced: Boolean, expa
             })
         }
     }
+}
+
+@Composable
+private fun DownloadRow(
+    group: String,
+    status: DownloadStatus,
+    media: Downloads,
+    push: (Screen) -> Unit,
+) {
+    val d = status.download
+    val id = remember(d.item.id) { d.item.id.toString() }
+    val local by remember(d.item) { derivedStateOf { d.item.localState() } }
+    val (state, unsynced) = local
+    val scope = rememberCoroutineScope()
+    var menu by remember { mutableStateOf(false) }
+    var confirmDelete by remember { mutableStateOf(false) }
+    var showInfo by remember { mutableStateOf(false) }
+    val openMenu = remember { { menu = true } }
+    val rowTitle = remember(group, d.item) {
+        if (group == "h-queue" && d.item.type == BaseItemKind.EPISODE && !d.item.seriesName.isNullOrBlank()) {
+            "${d.item.seriesName} · ${episodeLabel(d.item)}"
+        } else {
+            itemLabel(d.item)
+        }
+    }
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .focusMemory(id)
+            .onSecondaryClick(openMenu)
+            .combinedClickable(onClick = { push(Screen.Play(id)) }, onLongClickLabel = "Actions", onLongClick = openMenu)
+            .padding(start = 16.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(rowTitle)
+            val size = when {
+                status.fill != Fill.DONE -> if (status.totalBytes > 0) {
+                    " · ${formatBytes(status.bytes)} / ${formatBytes(status.totalBytes)}"
+                } else {
+                    " · ${formatBytes(status.bytes)}"
+                }
+                status.bytes > 0 -> " · ${formatBytes(status.bytes)}"
+                else -> ""
+            }
+            val bits = listOfNotNull(
+                status.label + size,
+                if (d.auto) "kept by keep-next" else null,
+                if (state?.played == true) "✓ played" else null,
+                if (unsynced) "not synced" else null,
+            )
+            Text(bits.joinToString(" · "), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (status.fill != Fill.DONE) LinearProgressIndicator({ status.percent / 100f }, Modifier.fillMaxWidth().padding(top = 4.dp))
+            else ProgressBar(d.item, state)
+        }
+        when (status.fill) {
+            Fill.RUNNING, Fill.QUEUED -> TextButton(onClick = {
+                scope.launch(Dispatchers.IO) { media.pauseDownload(id) }
+            }) { Text("Pause") }
+            Fill.PAUSED -> TextButton(onClick = {
+                scope.launch(Dispatchers.IO) {
+                    // A fresh copy of the item when the server answers, else the one saved with the download.
+                    val fresh = runCatching { AppCache.fetchOrJoinItem(id, flushFirst = false) }.getOrDefault(d.item)
+                    media.startDownload(fresh, d.auto)
+                }
+            }) { Text(if (d.failed) "Retry" else "Resume") }
+            Fill.DONE -> {}
+        }
+        Box {
+            IconButton(onClick = openMenu) { GlyphIcon(AppIcons.MORE_VERT, "More options") }
+            if (menu) {
+                ItemMenu(
+                    d.item,
+                    state?.played == true,
+                    unsynced,
+                    onDismiss = { menu = false },
+                    downloaded = true,
+                    onStartOver = { scope.launch { startOver(d.item, push) } },
+                    onRequestDelete = { confirmDelete = true },
+                    onRequestInfo = { showInfo = true },
+                    onChanged = {},
+                )
+            }
+        }
+    }
+    if (confirmDelete) ConfirmDelete(d.item, { confirmDelete = false })
+    if (showInfo) ItemInfoDialog(d.item) { showInfo = false }
 }
 
 @Composable
@@ -1436,75 +1847,6 @@ fun DownloadsScreen(modifier: Modifier, push: (Screen) -> Unit, pop: () -> Unit)
             onDismiss = { deletingSeries = null },
         )
     }
-    @Composable
-    fun DownloadRow(group: String, status: DownloadStatus) {
-        val d = status.download
-        val id = d.item.id.toString()
-        val (state, unsynced) = d.item.localState()
-        var menu by remember { mutableStateOf(false) }
-        val rowTitle = if (group == "h-queue" && d.item.type == BaseItemKind.EPISODE && !d.item.seriesName.isNullOrBlank()) {
-            "${d.item.seriesName} · ${episodeLabel(d.item)}"
-        } else {
-            itemLabel(d.item)
-        }
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .focusMemory(id)
-                .onSecondaryClick { menu = true }
-                .combinedClickable(onClick = { push(Screen.Play(id)) }, onLongClickLabel = "Actions", onLongClick = { menu = true })
-                .padding(start = 16.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Column(Modifier.weight(1f)) {
-                Text(rowTitle)
-                val size = when {
-                    status.fill != Fill.DONE -> if (status.totalBytes > 0) {
-                        " · ${formatBytes(status.bytes)} / ${formatBytes(status.totalBytes)}"
-                    } else {
-                        " · ${formatBytes(status.bytes)}"
-                    }
-                    status.bytes > 0 -> " · ${formatBytes(status.bytes)}"
-                    else -> ""
-                }
-                val bits = listOfNotNull(
-                    status.label + size,
-                    if (d.auto) "kept by keep-next" else null,
-                    if (state?.played == true) "✓ played" else null,
-                    if (unsynced) "not synced" else null,
-                )
-                Text(bits.joinToString(" · "), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                if (status.fill != Fill.DONE) LinearProgressIndicator({ status.percent / 100f }, Modifier.fillMaxWidth().padding(top = 4.dp))
-                else ProgressBar(d.item, state)
-            }
-            when (status.fill) {
-                Fill.RUNNING, Fill.QUEUED -> TextButton(onClick = {
-                    scope.launch(Dispatchers.IO) { media.pauseDownload(id) }
-                }) { Text("Pause") }
-                Fill.PAUSED -> TextButton(onClick = {
-                    scope.launch(Dispatchers.IO) {
-                        // A fresh copy of the item when the server answers, else the one saved with the download.
-                        val fresh = runCatching { App.server.item(id) }.getOrDefault(d.item)
-                        media.startDownload(fresh, d.auto)
-                    }
-                }) { Text(if (d.failed) "Retry" else "Resume") }
-                Fill.DONE -> {}
-            }
-            Box {
-                IconButton(onClick = { menu = true }) { GlyphIcon(AppIcons.MORE_VERT, "More options") }
-                ItemMenu(
-                    d.item,
-                    state?.played == true,
-                    unsynced,
-                    menu,
-                    { menu = false },
-                    downloaded = true,
-                    onStartOver = { scope.launch { startOver(d.item, push) } },
-                    onChanged = {},
-                )
-            }
-        }
-    }
     Column(modifier.fillMaxSize()) {
         Bar("Downloads", pop)
         Text(storage, Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -1541,7 +1883,7 @@ fun DownloadsScreen(modifier: Modifier, push: (Screen) -> Unit, pop: () -> Unit)
                         }
                     }
                 }
-                items(queueItems, key = { it.download.item.id }) { status -> DownloadRow("h-queue", status) }
+                items(queueItems, key = { it.download.item.id }) { status -> DownloadRow("h-queue", status, media, push) }
             }
             for ((group, groupItems) in doneGroups) {
                 val first = groupItems.first().download.item
@@ -1568,7 +1910,7 @@ fun DownloadsScreen(modifier: Modifier, push: (Screen) -> Unit, pop: () -> Unit)
                         }
                     }
                 }
-                items(groupItems, key = { it.download.item.id }) { status -> DownloadRow(group, status) }
+                items(groupItems, key = { it.download.item.id }) { status -> DownloadRow(group, status, media, push) }
             }
         }
     }
@@ -1604,10 +1946,13 @@ fun SettingsScreen(modifier: Modifier, pop: () -> Unit, onAccounts: () -> Unit, 
     var moving by remember { mutableStateOf(false) }
     val target = moveTo
     if (target != null) {
-        val count = remember { App.downloads?.downloads()?.size ?: 0 }
+        val count by produceState<Int?>(null, target) {
+            value = withContext(Dispatchers.IO) { App.downloads?.downloads()?.size ?: 0 }
+        }
+        val n = count ?: 0
         val where = if (target > 0) "the SD card" else "internal storage"
-        val plural = if (count == 1) "" else "s"
-        val deletes = if (count == 0) "" else "deletes your $count download$plural and "
+        val plural = if (n == 1) "" else "s"
+        val deletes = if (n == 0) "" else "deletes your $n download$plural and "
         Confirm("Store on $where? This " + deletes + "clears the buffer cache; nothing is moved.", "Switch", {
             moving = true
             scope.launch {
@@ -1619,7 +1964,9 @@ fun SettingsScreen(modifier: Modifier, pop: () -> Unit, onAccounts: () -> Unit, 
     }
     var confirmLogout by remember { mutableStateOf(false) }
     if (confirmLogout) {
-        val unsynced = App.pending.all().size
+        val unsynced by produceState(0) {
+            value = withContext(Dispatchers.IO) { App.pending.all().size }
+        }
         val itemsHave = if (unsynced == 1) "item has" else "items have"
         val note = if (unsynced == 0) "" else " $unsynced $itemsHave progress not synced yet. It is sent after you log back in to the same server."
         Confirm("Log out?$note", "Log out", {
@@ -1627,6 +1974,17 @@ fun SettingsScreen(modifier: Modifier, pop: () -> Unit, onAccounts: () -> Unit, 
             onLoggedOut()
         }, { confirmLogout = false })
     }
+    // Load decoder summary and removable-storage check off the main thread once, rather than per switch toggle.
+    val decoders by produceState<String?>(null) {
+        value = withContext(Dispatchers.IO) { App.platform.decoderSummary() }
+    }
+    val hasRemovableStorage by produceState(false) {
+        val d = App.downloads
+        value = if (d != null) withContext(Dispatchers.IO) { d.storageRoots().size > 1 } else false
+    }
+    // Reading [refresh] here recomposes in place without destroying the tree (so switches animate and remember stays intact).
+    @Suppress("UNUSED_VARIABLE")
+    val tick = refresh
     Column(modifier.fillMaxSize()) {
         Bar("Settings", pop)
         // A readable width on tablets and desktop windows, where a label and its control would sit a screen apart.
@@ -1637,161 +1995,159 @@ fun SettingsScreen(modifier: Modifier, pop: () -> Unit, onAccounts: () -> Unit, 
                 .wrapContentWidth(Alignment.Start)
                 .widthIn(max = 720.dp)
         ) {
-            key(refresh) {
-                val android = App.platform.android
-                val downloads = App.downloads
-                val storageHeader = when {
-                    android -> "Network and storage"
-                    downloads == null -> "Cache"
-                    else -> "Network"
+            val android = App.platform.android
+            val downloads = App.downloads
+            val storageHeader = when {
+                android -> "Network and storage"
+                downloads == null -> "Cache"
+                else -> "Network"
+            }
+            Text(storageHeader, style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(16.dp))
+            if (android) toggle("Buffer to end on metered networks", p.bufferOnMetered) { p.bufferOnMetered = it }
+            if (android && downloads != null) toggle("Download on metered networks", p.downloadOnMetered) { on ->
+                p.downloadOnMetered = on
+                downloads.kickDownloads(restart = true)
+            }
+            Stepper("Buffer cache limit (GB)", p.cacheLimitGb, listOf(1, 2, 5, 10, 20, 50, 100)) { gb ->
+                p.cacheLimitGb = gb
+                refresh++
+                scope.launch {
+                    withContext(Dispatchers.IO) { App.platform.evictBuffer() }
+                    bufferRefresh++
                 }
-                Text(storageHeader, style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(16.dp))
-                if (android) toggle("Buffer to end on metered networks", p.bufferOnMetered) { p.bufferOnMetered = it }
-                if (android && downloads != null) toggle("Download on metered networks", p.downloadOnMetered) { on ->
-                    p.downloadOnMetered = on
-                    downloads.kickDownloads(restart = true)
-                }
-                Stepper("Buffer cache limit (GB)", p.cacheLimitGb, listOf(1, 2, 5, 10, 20, 50, 100)) { gb ->
-                    p.cacheLimitGb = gb
-                    refresh++
-                    scope.launch {
-                        withContext(Dispatchers.IO) { App.platform.evictBuffer() }
-                        bufferRefresh++
-                    }
-                }
-                if (!android && downloads == null) {
-                    val used = bufferUsed
-                    Row(
-                        Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text(
-                            if (used != null) "Buffer used: ${formatBytes(used)}" else "Buffer used: …",
-                            Modifier.weight(1f),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                        TextButton(
-                            enabled = !clearingBuffer && (used == null || used > 0),
-                            onClick = {
-                                clearingBuffer = true
-                                scope.launch {
-                                    withContext(Dispatchers.IO) { App.platform.clearBuffer() }
-                                    clearingBuffer = false
-                                    bufferRefresh++
-                                }
-                            },
-                        ) { Text("Clear buffer") }
-                    }
-                }
-                if (downloads != null && (downloads.storageRoots().size > 1 || downloads.storageMissing)) { // When the card is missing, switching back to internal storage is the way out.
-                    toggle("Store on SD card (switching deletes downloads and the buffer)", p.storageIndex > 0, enabled = !moving) { on ->
-                        moveTo = if (on) 1 else 0
-                    }
-                }
-
-                Text("Playback", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(16.dp))
-                // Android applies the delay only while a wireless output is connected. The desktop can't tell, so it always applies it.
-                val audioDelayLabel = if (android) "Wireless audio delay (ms), for Bluetooth headphones and speakers" else "Audio delay (ms)"
-                Stepper(audioDelayLabel, p.audioDelayMs, AUDIO_DELAYS_MS) { ms ->
-                    App.platform.setAudioDelay(ms)
-                    refresh++
-                }
-                Stepper("Skip step (s)", p.doubleTapSeconds, (5..60 step 5).toList()) { seconds ->
-                    p.doubleTapSeconds = seconds
-                    refresh++
-                }
-                // Files past these limits start as a transcode. Auto asks the hardware decoders per file.
-                val decoders = remember { App.platform.decoderSummary() }
-                if (decoders != null) {
+            }
+            if (!android && downloads == null) {
+                val used = bufferUsed
+                Row(
+                    Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
                     Text(
-                        "Hardware decoders: $decoders",
-                        Modifier.padding(horizontal = 16.dp),
-                        style = MaterialTheme.typography.labelSmall,
+                        if (used != null) "Buffer used: ${formatBytes(used)}" else "Buffer used: …",
+                        Modifier.weight(1f),
+                        style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    TextButton(
+                        enabled = !clearingBuffer && (used == null || used > 0),
+                        onClick = {
+                            clearingBuffer = true
+                            scope.launch {
+                                withContext(Dispatchers.IO) { App.platform.clearBuffer() }
+                                clearingBuffer = false
+                                bufferRefresh++
+                            }
+                        },
+                    ) { Text("Clear buffer") }
                 }
-                Text("Direct play up to", Modifier.padding(16.dp, 8.dp, 16.dp, 0.dp))
-                if (!android) {
-                    Text(
-                        "Transcodes taller videos to save bandwidth",
-                        Modifier.padding(horizontal = 16.dp),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+            }
+            if (downloads != null && (hasRemovableStorage || downloads.storageMissing)) { // When the card is missing, switching back to internal storage is the way out.
+                toggle("Store on SD card (switching deletes downloads and the buffer)", p.storageIndex > 0, enabled = !moving) { on ->
+                    moveTo = if (on) 1 else 0
                 }
-                Row(Modifier.padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    val autoLabel = if (android) "Auto" else "No limit"
-                    listOf(Pair(0, autoLabel), Pair(2160, "4K"), Pair(1080, "1080p"), Pair(720, "720p")).forEach { (h, label) ->
-                        FilterChip(p.maxHeight == h, {
-                            p.maxHeight = h
-                            refresh++
-                        }, { Text(label) })
-                    }
-                }
-                // The desktop player decodes every codec, so there the height limit above only serves bandwidth.
-                if (android) Text("Direct play codecs", Modifier.padding(16.dp, 8.dp, 16.dp, 0.dp))
-                if (android) Row(Modifier.padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf("Auto", "H.264 only", "All").forEachIndexed { i, label ->
-                        FilterChip(p.codecs == i, {
-                            p.codecs = i
-                            refresh++
-                        }, { Text(label) })
-                    }
-                }
-                if (android && p.learnedCodecs().isNotEmpty()) {
-                    val codecs = p.learnedCodecs().joinToString { codec -> codec.uppercase() }
-                    Text(
-                        "Transcoding sooner for $codecs after choppy playback",
-                        Modifier.padding(16.dp, 8.dp, 16.dp, 0.dp),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    TextButton(onClick = {
-                        p.forgetLearned()
-                        refresh++
-                    }, Modifier.padding(horizontal = 8.dp)) { Text("Forget") }
-                }
+            }
 
-                if (android) Text("Interface", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(16.dp))
-                if (android) Row(Modifier.padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    val autoLabel = if (App.autoTv) "Auto (TV)" else "Auto (touch)"
-                    listOf(autoLabel, "Touch", "TV").forEachIndexed { i, label ->
-                        FilterChip(p.interfaceMode == i, {
-                            p.interfaceMode = i
-                            refresh++
-                        }, { Text(label) })
-                    }
-                }
-
-                if (android && !App.tv) {
-                    Text("Gestures", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(16.dp))
-                    toggle("Brightness / volume swipes", p.gestureLevels) { p.gestureLevels = it }
-                    toggle("Brightness on the left (volume on the right)", p.brightnessOnLeft, enabled = p.gestureLevels) { p.brightnessOnLeft = it }
-                    toggle("Horizontal swipe seeks", p.gestureSeek) { p.gestureSeek = it }
-                    toggle("Double-tap skips", p.gestureDoubleTap) { p.gestureDoubleTap = it }
-                    toggle("Hold for 2× speed", p.gestureHold) { p.gestureHold = it }
-                    toggle("Pinch to crop / fit", p.gesturePinch) { p.gesturePinch = it }
-                    toggle("Swipe up / down for fullscreen", p.gestureFullscreen) { p.gestureFullscreen = it }
-                }
-
-                Text("Account", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(16.dp))
-                val me = p.accounts().firstOrNull { account -> account.userId == p.userId }
-                val myName = me?.name
-                val shownName = if (myName.isNullOrEmpty()) null else myName
-                Text(listOfNotNull(shownName, p.baseUrl).joinToString(" · "), Modifier.padding(horizontal = 16.dp))
-                Row(Modifier.padding(horizontal = 8.dp)) {
-                    TextButton(onClick = onAccounts) { Text("Accounts and PIN") }
-                    TextButton(onClick = { confirmLogout = true }) { Text("Log out") }
-                }
+            Text("Playback", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(16.dp))
+            // Android applies the delay only while a wireless output is connected. The desktop can't tell, so it always applies it.
+            val audioDelayLabel = if (android) "Wireless audio delay (ms), for Bluetooth headphones and speakers" else "Audio delay (ms)"
+            Stepper(audioDelayLabel, p.audioDelayMs, AUDIO_DELAYS_MS) { ms ->
+                App.platform.setAudioDelay(ms)
+                refresh++
+            }
+            Stepper("Skip step (s)", p.doubleTapSeconds, (5..60 step 5).toList()) { seconds ->
+                p.doubleTapSeconds = seconds
+                refresh++
+            }
+            // Files past these limits start as a transcode. Auto asks the hardware decoders per file.
+            if (decoders != null) {
                 Text(
-                    "finimal ${App.platform.versionName}",
-                    Modifier.padding(16.dp),
+                    "Hardware decoders: $decoders",
+                    Modifier.padding(horizontal = 16.dp),
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                Spacer(Modifier.padding(24.dp))
             }
+            Text("Direct play up to", Modifier.padding(16.dp, 8.dp, 16.dp, 0.dp))
+            if (!android) {
+                Text(
+                    "Transcodes taller videos to save bandwidth",
+                    Modifier.padding(horizontal = 16.dp),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Row(Modifier.padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                val autoLabel = if (android) "Auto" else "No limit"
+                listOf(Pair(0, autoLabel), Pair(2160, "4K"), Pair(1080, "1080p"), Pair(720, "720p")).forEach { (h, label) ->
+                    FilterChip(p.maxHeight == h, {
+                        p.maxHeight = h
+                        refresh++
+                    }, { Text(label) })
+                }
+            }
+            // The desktop player decodes every codec, so there the height limit above only serves bandwidth.
+            if (android) Text("Direct play codecs", Modifier.padding(16.dp, 8.dp, 16.dp, 0.dp))
+            if (android) Row(Modifier.padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf("Auto", "H.264 only", "All").forEachIndexed { i, label ->
+                    FilterChip(p.codecs == i, {
+                        p.codecs = i
+                        refresh++
+                    }, { Text(label) })
+                }
+            }
+            val learned = if (android) p.learnedCodecs() else emptyList()
+            if (learned.isNotEmpty()) {
+                val codecs = learned.joinToString { codec -> codec.uppercase() }
+                Text(
+                    "Transcoding sooner for $codecs after choppy playback",
+                    Modifier.padding(16.dp, 8.dp, 16.dp, 0.dp),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                TextButton(onClick = {
+                    p.forgetLearned()
+                    refresh++
+                }, Modifier.padding(horizontal = 8.dp)) { Text("Forget") }
+            }
+
+            if (android) Text("Interface", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(16.dp))
+            if (android) Row(Modifier.padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                val autoLabel = if (App.autoTv) "Auto (TV)" else "Auto (touch)"
+                listOf(autoLabel, "Touch", "TV").forEachIndexed { i, label ->
+                    FilterChip(p.interfaceMode == i, {
+                        p.interfaceMode = i
+                        refresh++
+                    }, { Text(label) })
+                }
+            }
+
+            if (android && !App.tv) {
+                Text("Gestures", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(16.dp))
+                toggle("Brightness / volume swipes", p.gestureLevels) { p.gestureLevels = it }
+                toggle("Brightness on the left (volume on the right)", p.brightnessOnLeft, enabled = p.gestureLevels) { p.brightnessOnLeft = it }
+                toggle("Horizontal swipe seeks", p.gestureSeek) { p.gestureSeek = it }
+                toggle("Double-tap skips", p.gestureDoubleTap) { p.gestureDoubleTap = it }
+                toggle("Hold for 2× speed", p.gestureHold) { p.gestureHold = it }
+                toggle("Pinch to crop / fit", p.gesturePinch) { p.gesturePinch = it }
+                toggle("Swipe up / down for fullscreen", p.gestureFullscreen) { p.gestureFullscreen = it }
+            }
+
+            Text("Account", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(16.dp))
+            val me = p.accounts().firstOrNull { account -> account.userId == p.userId }
+            val myName = me?.name
+            val shownName = if (myName.isNullOrEmpty()) null else myName
+            Text(listOfNotNull(shownName, p.baseUrl).joinToString(" · "), Modifier.padding(horizontal = 16.dp))
+            Row(Modifier.padding(horizontal = 8.dp)) {
+                TextButton(onClick = onAccounts) { Text("Accounts and PIN") }
+                TextButton(onClick = { confirmLogout = true }) { Text("Log out") }
+            }
+            Text(
+                "finimal ${App.platform.versionName}",
+                Modifier.padding(16.dp),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.padding(24.dp))
         }
     }
 }

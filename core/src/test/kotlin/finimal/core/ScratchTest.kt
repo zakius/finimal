@@ -350,4 +350,21 @@ class ScratchTest {
         assertEquals(2L * chunk - 10, e.contiguous(2L * chunk + 10))
         assertEquals(2L * chunk, e.bytes())
     }
+
+    @Test fun readerReusesChannelAcrossCompletedChunks() {
+        entry().download()
+        val e = scratch.entry("k")
+        val out = java.io.ByteArrayOutputStream()
+        val buf = ByteArray(16 * 1024)
+        e.reader().use { reader ->
+            var pos = 0L
+            while (pos < content.size) {
+                val n = reader.read(pos, buf, 0, buf.size, 5_000)
+                assertTrue(n > 0)
+                out.write(buf, 0, n)
+                pos += n
+            }
+        }
+        assertContentEquals(content, out.toByteArray())
+    }
 }

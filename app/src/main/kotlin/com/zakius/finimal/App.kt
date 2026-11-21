@@ -5,11 +5,18 @@ import android.content.Context
 import android.app.UiModeManager
 import android.content.res.Configuration.UI_MODE_TYPE_TELEVISION
 import android.content.pm.PackageManager
+import android.net.ConnectivityManager
 import android.os.Build
 import coil3.ImageLoader
 import coil3.PlatformContext
 import coil3.SingletonImageLoader
+import coil3.disk.DiskCache
+import coil3.memory.MemoryCache
+import coil3.request.CachePolicy
+import coil3.request.ImageRequest
+import coil3.request.allowRgb565
 import coil3.serviceLoaderEnabled
+import coil3.size.Size
 import androidx.profileinstaller.ProfileInstaller
 import androidx.work.Configuration
 import coil3.network.okhttp.OkHttpNetworkFetcherFactory
@@ -21,8 +28,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import okhttp3.Dispatcher
 import okhttp3.OkHttp
+import okio.Path.Companion.toOkioPath
 import kotlin.concurrent.thread
 import org.jellyfin.sdk.JellyfinOptions
+import org.jellyfin.sdk.model.api.BaseItemDto
 
 /** The Android app as the shared code's [Platform]; the shared singletons are in [App]. */
 class AndroidApp : Application(), Platform, SingletonImageLoader.Factory, Configuration.Provider {
@@ -60,8 +69,11 @@ class AndroidApp : Application(), Platform, SingletonImageLoader.Factory, Config
         startedUp = true
         thread(name = "after-first-frame") {
             App.server // Warm the API client now that Frame 1 is on screen.
+            SingletonImageLoader.get(this) // Warm Coil's memory/disk caches and image dispatcher before first tap.
             Media.afterFirstFrame(this)
             warmDecoders()
+            HardwareDecoders.summary() // Pre-cache decoder summary & h264 height off the main thread.
+            HardwareDecoders.h264Height
             // Android 15+ compiles assets/art-profile/baseline.prof at install time; older versions use ProfileInstaller.
             if (Build.VERSION.SDK_INT < 35) runCatching { ProfileInstaller.writeProfile(this) }
         }
@@ -71,14 +83,29 @@ class AndroidApp : Application(), Platform, SingletonImageLoader.Factory, Config
     // WorkManager initializes on first use instead of from its start-up provider before onCreate; see AndroidManifest.xml.
     override val workManagerConfiguration get() = Configuration.Builder().build()
 
-    // Images share the API client's connections but get their own dispatcher, so a screen of thumbnails and the API
-    // calls don't queue behind each other (OkHttp allows 5 requests per host per dispatcher).
+    // Images share the API client's connections but get their own higher-concurrency dispatcher so a grid of
+    // posters loads in parallel without queuing behind API calls. RGB_565 halves poster RAM & GPU upload cost.
     // The only fetcher is added by hand, which skips a ServiceLoader scan of the APK on the first image.
     override fun newImageLoader(context: PlatformContext) = ImageLoader.Builder(context)
         .serviceLoaderEnabled(false)
+        .allowRgb565(true)
+        .memoryCache {
+            MemoryCache.Builder()
+                .maxSizePercent(context, 0.25)
+                .build()
+        }
+        .diskCache {
+            DiskCache.Builder()
+                .directory(File(cacheDir, "images").toOkioPath())
+                .maxSizeBytes(200L * 1024 * 1024)
+                .build()
+        }
         .components {
             add(OkHttpNetworkFetcherFactory(callFactory = {
-                App.http.newBuilder().dispatcher(Dispatcher()).build()
+                App.http.newBuilder().dispatcher(Dispatcher().apply {
+                    maxRequests = 64
+                    maxRequestsPerHost = 16
+                }).build()
             }))
         }
         .build()
@@ -117,6 +144,24 @@ class AndroidApp : Application(), Platform, SingletonImageLoader.Factory, Config
     override fun bufferBytes() = Media.bufferedBytes()
     override fun evictBuffer() = Media.evict()
     override fun clearBuffer() = Media.clearBuffer()
+    override val isMetered: Boolean
+        get() = runCatching { getSystemService(ConnectivityManager::class.java)?.isActiveNetworkMetered == true }.getOrDefault(false)
+    override fun prefetchImages(urls: List<String>, diskOnly: Boolean) {
+        val loader = SingletonImageLoader.get(this)
+        val networkPolicy = if (diskOnly) CachePolicy.DISABLED else CachePolicy.ENABLED
+        for (url in urls) {
+            loader.enqueue(
+                ImageRequest.Builder(this)
+                    .data(url)
+                    .size(Size.ORIGINAL)
+                    .networkCachePolicy(networkPolicy)
+                    .build()
+            )
+        }
+    }
+    override suspend fun prefetchSubtitles(item: BaseItemDto) {
+        Media.fetchSubtitles(item, transcode = !playsDirectly(item))
+    }
 
     /** The activity on screen, for the notification permission prompt. */
     var activity: MainActivity? = null

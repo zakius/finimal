@@ -120,20 +120,26 @@ class Mpv(options: Map<String, String>) {
     var onLoaded: () -> Unit = {}
 
     private var render: Pointer? = null
-    private lateinit var renderThread: Thread
-    private lateinit var eventThread: Thread
+    private val renderThread: Thread
+    private val eventThread: Thread
     /** Calls into the handle hold this lock shared, and destroying the handle takes it exclusively, so no call ever runs on a freed handle. */
     private val handle = ReentrantReadWriteLock()
-    private val renderSignal = Object()
+    private val renderSignal = Any()
     @Volatile private var dirty = false
     @Volatile private var closed = false
     @Volatile private var targetW = 0
     @Volatile private var targetH = 0
+    @Suppress("PLATFORM_CLASS_MAPPED_TO_KOTLIN")
+    private fun signalRender() = (renderSignal as Object).notifyAll()
+
+    @Suppress("PLATFORM_CLASS_MAPPED_TO_KOTLIN")
+    private fun awaitRender() = (renderSignal as Object).wait()
+
     // Held in a field because mpv's native reference doesn't keep it alive: JNA would garbage-collect a callback nothing in the JVM references.
     private val updateCallback = LibMpv.UpdateCallback {
         synchronized(renderSignal) {
             dirty = true
-            renderSignal.notifyAll()
+            signalRender()
         }
     }
 
@@ -225,7 +231,7 @@ class Mpv(options: Map<String, String>) {
         targetH = height
         synchronized(renderSignal) {
             dirty = true
-            renderSignal.notifyAll()
+            signalRender()
         }
     }
 
@@ -234,9 +240,23 @@ class Mpv(options: Map<String, String>) {
 
     private fun renderLoop() {
         var current: Bitmap? = null
+        // Pre-allocate native render parameter buffers once instead of 5 JNA malloc/Cleaner cycles on every video frame.
+        val sizeMem = Memory(8)
+        val formatMem = Memory(5).apply { setString(0, "bgr0") }
+        val strideMem = Memory(8)
+        val params = Memory(16L * 5).apply {
+            clear()
+            setInt(0L, RENDER_PARAM_SW_SIZE)
+            setPointer(8L, sizeMem)
+            setInt(16L, RENDER_PARAM_SW_FORMAT)
+            setPointer(24L, formatMem)
+            setInt(32L, RENDER_PARAM_SW_STRIDE)
+            setPointer(40L, strideMem)
+            setInt(48L, RENDER_PARAM_SW_POINTER)
+        }
         while (true) {
             synchronized(renderSignal) {
-                while (!dirty && !closed) renderSignal.wait()
+                while (!dirty && !closed) awaitRender()
                 dirty = false
             }
             if (closed) return
@@ -256,20 +276,16 @@ class Mpv(options: Map<String, String>) {
                 Bitmap().apply { allocPixels(ImageInfo(w, h, ColorType.BGRA_8888, ColorAlphaType.OPAQUE), roundUp(w * 4, 64)) }
             }
             val pixels = bitmap.peekPixels() ?: continue
-            val fields = listOf(
-                RENDER_PARAM_SW_SIZE to Memory(8).apply {
-                    setInt(0, w)
-                    setInt(4, h)
-                },
-                RENDER_PARAM_SW_FORMAT to Memory(5).apply { setString(0, "bgr0") },
-                RENDER_PARAM_SW_STRIDE to Memory(8).apply { setLong(0, bitmap.rowBytes.toLong()) },
-                RENDER_PARAM_SW_POINTER to Pointer(pixels.addr),
-            )
-            val params = renderParams(fields)
+            sizeMem.setInt(0, w)
+            sizeMem.setInt(4, h)
+            strideMem.setLong(0, bitmap.rowBytes.toLong())
+            params.setPointer(56L, Pointer(pixels.addr))
             if (closed) return
             lib.mpv_render_context_render(r, params)
-            // mpv reads these during the native call and nothing else references them, so the GC must not free them before here.
-            Reference.reachabilityFence(fields)
+            // mpv reads these during the native call, so keep the backing allocations reachable until it returns.
+            Reference.reachabilityFence(sizeMem)
+            Reference.reachabilityFence(formatMem)
+            Reference.reachabilityFence(strideMem)
             Reference.reachabilityFence(pixels)
             bitmap.notifyPixelsChanged()
             if (current != null) bitmaps.addLast(current)
@@ -348,7 +364,7 @@ class Mpv(options: Map<String, String>) {
     fun close() {
         if (closed) return
         closed = true
-        synchronized(renderSignal) { renderSignal.notifyAll() }
+        synchronized(renderSignal) { signalRender() }
         closer.execute {
             renderThread.join() // it may be inside a render call
             lib.mpv_wakeup(ctx)
@@ -365,7 +381,11 @@ class Mpv(options: Map<String, String>) {
         }
     }
 
-    private companion object {
-        val closer = Executors.newSingleThreadExecutor { task -> Thread(task, "mpv-close").apply { isDaemon = true } }
+    companion object {
+        private val closer = Executors.newSingleThreadExecutor { task -> Thread(task, "mpv-close").apply { isDaemon = true } }
+        /** Preloads the native libmpv library off the UI thread so the first Play doesn't stall on JNA loading. */
+        fun warmLibrary() {
+            runCatching { Lib.mpv }
+        }
     }
 }

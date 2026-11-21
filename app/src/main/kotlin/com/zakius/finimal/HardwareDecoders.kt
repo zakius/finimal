@@ -28,16 +28,18 @@ object HardwareDecoders : Decoders {
     )
 
     private val all by lazy { MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.filter { !it.isEncoder && it.hardware() } }
+    private val capabilitiesCache = java.util.concurrent.ConcurrentHashMap<String, List<MediaCodecInfo.CodecCapabilities>>()
 
     private fun MediaCodecInfo.hardware() =
         if (Build.VERSION.SDK_INT >= 29) isHardwareAccelerated
         else !name.startsWith("OMX.google.") && !name.startsWith("c2.android.")
 
-    private fun capabilities(codec: String): List<MediaCodecInfo.CodecCapabilities> {
-        val mime = codecs[codec]?.first ?: return emptyList()
-        val decoders = all.filter { decoder -> mime in decoder.supportedTypes }
-        return decoders.map { decoder -> decoder.getCapabilitiesForType(mime) }
-    }
+    private fun capabilities(codec: String): List<MediaCodecInfo.CodecCapabilities> =
+        capabilitiesCache.computeIfAbsent(codec) { key ->
+            val mime = codecs[key]?.first ?: return@computeIfAbsent emptyList()
+            all.filter { decoder -> mime in decoder.supportedTypes }
+                .map { decoder -> decoder.getCapabilitiesForType(mime) }
+        }
 
     override fun hasCodec(codec: String, tenBit: Boolean): Boolean {
         val tenBitProfiles = codecs[codec]?.second ?: return false
@@ -68,8 +70,7 @@ object HardwareDecoders : Decoders {
     /** The transcode height used when the quality setting is Auto. */
     val h264Height by lazy { tallest("h264") ?: 480 }
 
-    /** The decoder summary shown in Settings, such as "H.264 1080p, HEVC 10-bit 4K". */
-    fun summary(): String {
+    private val cachedSummary by lazy {
         val names = listOf("h264" to "H.264", "hevc" to "HEVC", "vp9" to "VP9", "av1" to "AV1")
         val found = names.filter { (codec, _) -> hasCodec(codec, false) }
         val text = found.joinToString { (codec, name) ->
@@ -82,8 +83,11 @@ object HardwareDecoders : Decoders {
             }
             name + tenBit + size
         }
-        return if (text.isEmpty()) "none found" else text
+        if (text.isEmpty()) "none found" else text
     }
+
+    /** The decoder summary shown in Settings, such as "H.264 1080p, HEVC 10-bit 4K". Cached per process. */
+    fun summary(): String = cachedSummary
 }
 
 fun videoInfo(source: MediaSourceInfo): VideoInfo? {

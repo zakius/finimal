@@ -34,6 +34,7 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -77,6 +78,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.zakius.finimal.App
+import com.zakius.finimal.AppCache
 import com.zakius.finimal.AUDIO_DELAYS_MS
 import com.zakius.finimal.ErrorText
 import com.zakius.finimal.episodeLabel
@@ -99,6 +101,7 @@ import finimal.core.TICKS_PER_MS
 import java.util.Locale
 import java.util.UUID
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -132,20 +135,75 @@ private val ForwardIcon = icon("FastForward", "M4,18l8.5,-6L4,6v12zm9,-12v12l8.5
 private val VolumeUpIcon = icon("VolumeUp", "M3,9v6h4l5,5V4L7,9H3zm13.5,3c0,-1.77 -1.02,-3.29 -2.5,-4.03v8.05c1.48,-0.73 2.5,-2.25 2.5,-4.02zM14,3.23v2.06c2.89,0.86 5,3.54 5,6.71s-2.11,5.85 -5,6.71v2.06c4.01,-0.91 7,-4.49 7,-8.77s-2.99,-7.86 -7,-8.77z")
 private val VolumeOffIcon = icon("VolumeOff", "M16.5,12c0,-1.77 -1.02,-3.29 -2.5,-4.03v2.21l2.45,2.45c0.03,-0.2 0.05,-0.41 0.05,-0.63zm2.5,0c0,0.94 -0.2,1.82 -0.54,2.64l1.51,1.51C20.63,14.91 21,13.5 21,12c0,-4.28 -2.99,-7.86 -7,-8.77v2.06c2.89,0.86 5,3.54 5,6.71zM4.27,3L3,4.27 7.73,9H3v6h4l5,5v-6.73l4.25,4.25c-0.67,0.52 -1.42,0.93 -2.25,1.18v2.06c1.38,-0.31 2.63,-0.95 3.69,-1.81L19.73,21 21,19.73l-9,-9L4.27,3zM12,4L9.91,6.09 12,8.18V4z")
 
-/** Loads the item and the episodes that can follow it, then plays. */
+/** Blank 1x1 cursor created once per process instead of allocating a native cursor on every recomposition. */
+private val BlankCursor: PointerIcon by lazy {
+    val blank = java.awt.image.BufferedImage(1, 1, java.awt.image.BufferedImage.TYPE_INT_ARGB)
+    PointerIcon(java.awt.Toolkit.getDefaultToolkit().createCustomCursor(blank, java.awt.Point(), "none"))
+}
+
+/** Loads the item and constructs libmpv in parallel off the UI thread, then plays. */
 @Composable
 fun PlayerScreen(itemId: String, onBack: () -> Unit, onPlay: (String) -> Unit) {
-    var item by remember { mutableStateOf<BaseItemDto?>(null) }
-    var siblings by remember { mutableStateOf<List<BaseItemDto>>(emptyList()) }
+    val prefs = App.prefs
+    val instantItem = remember(itemId) {
+        AppCache.getFreshItem(itemId)?.takeIf { !it.mediaSources.isNullOrEmpty() }
+    }
+    var item by remember { mutableStateOf<BaseItemDto?>(instantItem) }
+    var mpv by remember { mutableStateOf<Mpv?>(null) }
+    var mpvError by remember { mutableStateOf<Throwable?>(null) }
+    val mpvHandedOff = remember { booleanArrayOf(false) }
+    val disposed = remember { java.util.concurrent.atomic.AtomicBoolean(false) }
+    var siblings by remember {
+        val initialSeriesId = instantItem?.seriesId?.toString()
+        val cachedSiblings = if (initialSeriesId != null) {
+            AppCache.getList(AppCache.listKey(initialSeriesId, "episodes"))?.items.orEmpty()
+        } else {
+            emptyList()
+        }
+        mutableStateOf(cachedSiblings)
+    }
     var error by remember { mutableStateOf<Throwable?>(null) }
     var retry by remember { mutableIntStateOf(0) }
+    // Construct libmpv on Dispatchers.IO so opening a video never freezes the UI thread and overlaps the API fetch.
+    LaunchedEffect(Unit) {
+        val created = withContext(Dispatchers.IO) {
+            runCatching {
+                Mpv(mapOf(
+                    // When the server drops and the scratch proxy cuts the connection, mpv resumes at the same byte.
+                    "stream-lavf-o" to "reconnect=1,reconnect_streamed=1,reconnect_on_network_error=1,reconnect_delay_max=10",
+                    "sub-scale" to "${prefs.subtitleScale / 100.0}",
+                    "speed" to "$sessionSpeed",
+                    "volume" to "$sessionVolume",
+                    // Holding the video back compensates for late wireless audio. The desktop can't tell which output is wireless,
+                    // so the user sets the delay.
+                    "audio-delay" to "${-prefs.audioDelayMs / 1000.0}",
+                ))
+            }.also { result ->
+                // If the user already left while mpv was initializing, close it right here so threads never leak.
+                if (disposed.get()) result.getOrNull()?.close()
+            }
+        }
+        created.onSuccess { instance ->
+            if (disposed.get()) instance.close() else mpv = instance
+        }.onFailure { if (!disposed.get()) mpvError = it }
+    }
+    DisposableEffect(Unit) {
+        onDispose {
+            disposed.set(true)
+            if (!mpvHandedOff[0]) mpv?.close()
+        }
+    }
     LaunchedEffect(itemId, retry) {
         error = null
         val server = App.server
+        if (retry == 0 && instantItem != null) {
+            App.platform.scope.launch { server.flush() }
+            return@LaunchedEffect
+        }
         // Only this item's unsynced state must reach the server before the item is fetched. Other items sync in the background.
         val pending = withContext(App.disk) { App.pending.get(itemId) != null }
         if (!pending) App.platform.scope.launch { server.flush() }
-        runCatching { server.item(itemId, flushFirst = pending) }
+        runCatching { AppCache.fetchOrJoinItem(itemId, flushFirst = pending) }
             .onSuccess { loaded ->
                 if (loaded.mediaSources.isNullOrEmpty()) error = java.io.FileNotFoundException("This item has no file on the server")
                 else item = loaded
@@ -159,10 +217,20 @@ fun PlayerScreen(itemId: String, onBack: () -> Unit, onPlay: (String) -> Unit) {
         val loaded = item ?: return@LaunchedEffect
         val seriesId = loaded.seriesId?.toString()
         if (loaded.type == BaseItemKind.EPISODE && seriesId != null) {
-            siblings = runCatching { App.server.episodes(seriesId) }.getOrDefault(emptyList())
+            val cacheKey = AppCache.listKey(seriesId, "episodes")
+            val cachedEntry = AppCache.getList(cacheKey)
+            if (cachedEntry != null && siblings.isEmpty()) siblings = cachedEntry.items
+            if (cachedEntry != null && AppCache.isListFresh(cachedEntry, maxAgeMs = 15_000L)) return@LaunchedEffect
+            val fromServer = runCatching { App.server.episodes(seriesId) }.getOrNull()
+            if (fromServer != null) {
+                AppCache.putList(cacheKey, fromServer, fromNetwork = true)
+                siblings = fromServer
+            }
         }
     }
     val current = item
+    val player = mpv
+    val initError = mpvError
     when {
         error != null -> Column(Modifier.fillMaxSize().padding(24.dp), Arrangement.Center, Alignment.CenterHorizontally) {
             val e = error!!
@@ -172,48 +240,36 @@ fun PlayerScreen(itemId: String, onBack: () -> Unit, onPlay: (String) -> Unit) {
                 TextButton(onClick = onBack) { Text("Back") }
             }
         }
-        current == null -> Box(Modifier.fillMaxSize().background(Color.Black), contentAlignment = Alignment.Center) {
+        initError != null -> Column(Modifier.fillMaxSize().padding(24.dp), Arrangement.Center, Alignment.CenterHorizontally) {
+            ErrorText("The player can't start.", initError.message ?: initError.javaClass.simpleName)
+            TextButton(onClick = onBack) { Text("Back") }
+        }
+        current == null || player == null -> Box(Modifier.fillMaxSize().background(Color.Black), contentAlignment = Alignment.Center) {
             CircularProgressIndicator(color = Color.White)
         }
-        else -> Playback(current, siblings, onBack, onPlay)
+        else -> {
+            mpvHandedOff[0] = true
+            Playback(current, player, siblings, onBack, onPlay)
+        }
     }
 }
 
 @Composable
-private fun Playback(item: BaseItemDto, siblings: List<BaseItemDto>, onBack: () -> Unit, onPlay: (String) -> Unit) {
+private fun Playback(item: BaseItemDto, mpv: Mpv, siblings: List<BaseItemDto>, onBack: () -> Unit, onPlay: (String) -> Unit) {
     val prefs = App.prefs
     val id = item.id.toString()
     val source = item.mediaSources!!.first()
     val sourceId = source.id!!
     val seriesKey = item.seriesId?.toString() ?: id
     val serverPlayed = item.userData?.played ?: false
-    val next = nextEpisode(item, siblings)
+    val next = remember(item.id, siblings) { nextEpisode(item, siblings) }
     // mpv decodes everything, so the only reason to transcode is the "Direct play up to" setting, which saves bandwidth.
-    val videoStream = source.mediaStreams?.firstOrNull { it.type == org.jellyfin.sdk.model.api.MediaStreamType.VIDEO }
+    val videoStream = remember(source) { source.mediaStreams?.firstOrNull { it.type == org.jellyfin.sdk.model.api.MediaStreamType.VIDEO } }
     val videoHeight = videoStream?.height ?: 0
     val transcoding = prefs.maxHeight in 1 until videoHeight
     val playSession = remember { UUID.randomUUID().toString() }
     val scope = rememberCoroutineScope()
-    val started = remember {
-        runCatching { Mpv(mapOf(
-            // When the server drops and the scratch proxy cuts the connection, mpv resumes at the same byte.
-            "stream-lavf-o" to "reconnect=1,reconnect_streamed=1,reconnect_on_network_error=1,reconnect_delay_max=10",
-            "sub-scale" to "${prefs.subtitleScale / 100.0}",
-            "speed" to "$sessionSpeed",
-            "volume" to "$sessionVolume",
-            // Holding the video back compensates for late wireless audio. The desktop can't tell which output is wireless,
-            // so the user sets the delay.
-            "audio-delay" to "${-prefs.audioDelayMs / 1000.0}",
-        )) }
-    }
-    val mpv = started.getOrElse { e ->
-        Column(Modifier.fillMaxSize().padding(24.dp), Arrangement.Center, Alignment.CenterHorizontally) {
-            ErrorText("The player can't start.", e.message ?: e.javaClass.simpleName)
-            TextButton(onClick = onBack) { Text("Back") }
-        }
-        return
-    }
-    var segments by remember { mutableStateOf<List<MediaSegmentDto>>(emptyList()) }
+    var segments by remember { mutableStateOf(AppCache.getCachedSegments(id).orEmpty()) }
     var startTicks by remember { mutableLongStateOf(0L) }
     var startedAt by remember { mutableLongStateOf(0L) }
     var seeked by remember { mutableStateOf(false) }
@@ -294,17 +350,28 @@ private fun Playback(item: BaseItemDto, siblings: List<BaseItemDto>, onBack: () 
         }
     }
 
+    // Speculatively prefetch the next episode's metadata and segments once current playback is underway.
+    LaunchedEffect(next?.id) {
+        val upcoming = next ?: return@LaunchedEffect
+        delay(2_000)
+        AppCache.prefetchPlayable(upcoming.id.toString(), includeSubtitles = false)
+    }
+
     LaunchedEffect(mpv) {
         DesktopMedia.playing = scratchKey(item)
+        if (segments.isEmpty()) {
+            launch { segments = runCatching { AppCache.fetchOrJoinSegments(id) }.getOrDefault(emptyList()) }
+        }
         val resumeMs = (item.localState().first?.positionTicks ?: 0) / TICKS_PER_MS
         val startMs = (resumeMs - RESUME_REWIND_MS).coerceAtLeast(0)
         startTicks = startMs * TICKS_PER_MS
         startedAt = System.currentTimeMillis()
         lastPositionMs = startMs
         if (startMs > 0) resumedAt = startMs
-        mpv.load(url(), startMs / 1000.0)
+        val loadUrl = withContext(Dispatchers.IO) { url() }
+        mpv.load(loadUrl, startMs / 1000.0)
         if (!transcoding) {
-            withContext(Dispatchers.IO) {
+            launch(Dispatchers.IO) {
                 // Meanwhile, buffer the rest of the file to disk, starting a little before the resume position.
                 var len = DesktopMedia.lengthOf(item)
                 if (len <= 0) len = source.size ?: 0
@@ -315,7 +382,6 @@ private fun Playback(item: BaseItemDto, siblings: List<BaseItemDto>, onBack: () 
             }
         }
         launch { App.server.reportStart(id, sourceId, startTicks, transcoding, playSession) }
-        segments = runCatching { App.server.segments(id) }.getOrDefault(emptyList())
     }
 
     DisposableEffect(mpv) {
@@ -510,13 +576,17 @@ private fun VideoSurface(
     var menu by remember { mutableStateOf(false) }
     var lastInteraction by remember { mutableLongStateOf(System.currentTimeMillis()) }
     var overlay by remember { mutableStateOf<String?>(null) }
-    val positionMs = (mpv.position * 1000).toLong()
-    val durationMs = (mpv.duration * 1000).toLong()
     val step = prefs.doubleTapSeconds * 1000L
     val chapters = remember(item) { chapters(item) }
-    fun clamp(ms: Long) = if (durationMs > 0) ms.coerceIn(0, durationMs) else ms.coerceAtLeast(0)
+    val chapterStarts = remember(chapters) { chapters.map { it.startMs } }
+    fun currentPositionMs() = (mpv.position * 1000).toLong()
+    fun currentDurationMs() = (mpv.duration * 1000).toLong()
+    fun clamp(ms: Long): Long {
+        val d = currentDurationMs()
+        return if (d > 0) ms.coerceIn(0, d) else ms.coerceAtLeast(0)
+    }
     fun seekBy(ms: Long) {
-        onSeek(clamp(positionMs + ms), true)
+        onSeek(clamp(currentPositionMs() + ms), true)
         val sign = if (ms > 0) "+" else "−"
         overlay = sign + "${kotlin.math.abs(ms) / 1000}s"
     }
@@ -558,9 +628,15 @@ private fun VideoSurface(
             segment.type to (startMs until endMs - 1_000)
         }
     }
-    val segmentNow = ranges.firstOrNull { positionMs in it.second }
+    // Derived state so the 4 Hz position tick never recomposes VideoSurface while controls are hidden (or even shown).
+    val segmentNow by remember(ranges, mpv) {
+        derivedStateOf {
+            val pos = (mpv.position * 1000).toLong()
+            ranges.firstOrNull { pos in it.second }
+        }
+    }
     val skip = if (segmentNow != null && !ended) {
-        val (type, range) = segmentNow
+        val (type, range) = segmentNow!!
         when (type) {
             MediaSegmentType.INTRO -> Skip("Skip intro") { onSeek(range.last + 1_000, true) }
             MediaSegmentType.RECAP -> Skip("Skip recap") { onSeek(range.last + 1_000, true) }
@@ -593,8 +669,7 @@ private fun VideoSurface(
                     true
                 }
                 Key.PageUp, Key.PageDown -> {
-                    val starts = chapters.map { it.startMs }
-                    val ms = chapterSeek(starts, positionMs, forward = e.key == Key.PageDown)
+                    val ms = chapterSeek(chapterStarts, currentPositionMs(), forward = e.key == Key.PageDown)
                     if (ms != null) {
                         onSeek(ms, true)
                         val chapter = chapters.first { it.startMs == ms }
@@ -615,13 +690,8 @@ private fun VideoSurface(
         window?.keys = handler
         onDispose { if (window?.keys === handler) window.keys = null }
     }
-    // Hide the cursor with the controls by switching to a blank 1x1 cursor.
-    val cursor = if (controls) {
-        PointerIcon.Default
-    } else {
-        val blank = java.awt.image.BufferedImage(1, 1, java.awt.image.BufferedImage.TYPE_INT_ARGB)
-        PointerIcon(java.awt.Toolkit.getDefaultToolkit().createCustomCursor(blank, java.awt.Point(), "none"))
-    }
+    // Hide the cursor with the controls using the process-wide cached blank cursor.
+    val cursor = if (controls) PointerIcon.Default else BlankCursor
     MaterialTheme(colorScheme = darkColorScheme()) {
         Box(
             Modifier.fillMaxSize()
@@ -731,7 +801,7 @@ private fun VideoSurface(
                     FilledTonalButton(onClick = onBack) { Text("Back") }
                 }
             } else if (controls) {
-                Controls(mpv, item, positionMs, durationMs, title, transcoding, fullscreen, skip, next, menu, { menu = it },
+                Controls(mpv, item, title, transcoding, fullscreen, skip, next, menu, { menu = it },
                     stepSeconds = prefs.doubleTapSeconds,
                     onBack = onBack,
                     onToggleFullscreen = ::toggleFullscreen,
@@ -766,8 +836,6 @@ private fun VideoSurface(
 private fun Controls(
     mpv: Mpv,
     item: BaseItemDto,
-    positionMs: Long,
-    durationMs: Long,
     title: String,
     transcoding: Boolean,
     fullscreen: Boolean,
@@ -788,9 +856,8 @@ private fun Controls(
     var tracks by remember { mutableStateOf<List<Mpv.Track>?>(null) }
     var subtitleScale by remember { mutableIntStateOf(App.prefs.subtitleScale) }
     var audioDelayMs by remember { mutableIntStateOf(App.prefs.audioDelayMs) }
-    var dragging by remember { mutableFloatStateOf(-1f) }
-    var volumeDragging by remember { mutableFloatStateOf(-1f) }
     val chapters = remember(item) { chapters(item) }
+    val chapterStarts = remember(chapters) { chapters.map { it.startMs } }
     val stepMs = stepSeconds * 1000L
     LaunchedEffect(menu) {
         while (menu) {
@@ -849,7 +916,7 @@ private fun Controls(
                         }
                         "chapters" -> {
                             SubmenuBack("Chapters") { sub = null }
-                            val current = chapterAt(chapters.map { it.startMs }, positionMs)
+                            val current = chapterAt(chapterStarts, (mpv.position * 1000).toLong())
                             chapters.forEachIndexed { i, c ->
                                 val name = c.name.ifEmpty { "Chapter ${i + 1}" }
                                 Choice("${formatMs(c.startMs)}  $name", i == current) {
@@ -933,117 +1000,172 @@ private fun Controls(
             }
         }
 
-        Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
-            val shown = if (dragging >= 0) dragging.toLong() else positionMs
-            val cached = if (transcoding) {
-                (mpv.cachedUntil * 1000).toLong()
-            } else {
-                val onDiskMs = (DesktopMedia.cachedUntil(item, shown / 1000.0, durationMs / 1000.0) * 1000).toLong()
-                onDiskMs.coerceAtLeast((mpv.cachedUntil * 1000).toLong())
+        DesktopSeekBarSection(
+            mpv = mpv,
+            item = item,
+            transcoding = transcoding,
+            chapters = chapters,
+            chapterStarts = chapterStarts,
+            skip = skip,
+            next = next,
+            stepSeconds = stepSeconds,
+            stepMs = stepMs,
+            onSeek = onSeek,
+            onSeekBy = onSeekBy,
+            onPlay = onPlay,
+            onInteraction = onInteraction,
+            modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+        )
+    }
+}
+
+/**
+ * Bottom transport & seek bar isolated from [Controls] and [VideoSurface], so 4 Hz position updates only recompose
+ * this bar and on-disk buffer lookups run off the UI thread.
+ */
+@Composable
+private fun DesktopSeekBarSection(
+    mpv: Mpv,
+    item: BaseItemDto,
+    transcoding: Boolean,
+    chapters: List<com.zakius.finimal.Chapter>,
+    chapterStarts: List<Long>,
+    skip: Skip?,
+    next: BaseItemDto?,
+    stepSeconds: Int,
+    stepMs: Long,
+    onSeek: (Long, Boolean) -> Unit,
+    onSeekBy: (Long) -> Unit,
+    onPlay: (String) -> Unit,
+    onInteraction: () -> Unit,
+    modifier: Modifier,
+) {
+    var dragging by remember { mutableFloatStateOf(-1f) }
+    var volumeDragging by remember { mutableFloatStateOf(-1f) }
+    var diskCachedMs by remember(item.id) { mutableLongStateOf(0L) }
+    val positionMs = (mpv.position * 1000).toLong()
+    val durationMs = (mpv.duration * 1000).toLong()
+    val shown = if (dragging >= 0) dragging.toLong() else positionMs
+    // Read on-disk contiguous buffer off the UI thread so Scratch's commit lock never stalls composition or scrubbing.
+    LaunchedEffect(item, transcoding) {
+        if (transcoding) {
+            diskCachedMs = 0L
+            return@LaunchedEffect
+        }
+        while (true) {
+            val posSec = if (dragging >= 0) dragging.toDouble() / 1000.0 else mpv.position
+            val durSec = mpv.duration
+            diskCachedMs = withContext(Dispatchers.IO) {
+                (DesktopMedia.cachedUntil(item, posSec, durSec) * 1000).toLong()
             }
-            val bufferedNote = if (durationMs > 0 && cached >= durationMs - 2_000) "" else "  (buffered ${formatMs(cached)})"
-            val chapterNote = if (dragging >= 0 && chapters.isNotEmpty()) {
-                val i = chapterAt(chapters.map { it.startMs }, shown)
-                if (i >= 0) " · ${chapters[i].name.ifEmpty { "Chapter ${i + 1}" }}" else ""
-            } else {
-                ""
+            delay(500)
+        }
+    }
+    Column(modifier) {
+        val mpvCachedMs = (mpv.cachedUntil * 1000).toLong()
+        val cached = if (transcoding) mpvCachedMs else maxOf(diskCachedMs, mpvCachedMs)
+        val bufferedNote = if (durationMs > 0 && cached >= durationMs - 2_000) "" else "  (buffered ${formatMs(cached)})"
+        val chapterNote = if (dragging >= 0 && chapters.isNotEmpty()) {
+            val i = chapterAt(chapterStarts, shown)
+            if (i >= 0) " · ${chapters[i].name.ifEmpty { "Chapter ${i + 1}" }}" else ""
+        } else {
+            ""
+        }
+        val shownVolume = if (volumeDragging >= 0f) volumeDragging else if (mpv.muted) 0f else mpv.volume.toFloat().coerceIn(0f, 130f)
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Tip("Back ${stepSeconds}s (←)") {
+                IconButton(onClick = { onSeekBy(-stepMs); onInteraction() }) {
+                    Icon(RewindIcon, "Back ${stepSeconds}s", tint = Color.White)
+                }
             }
-            val shownVolume = if (volumeDragging >= 0f) volumeDragging else if (mpv.muted) 0f else mpv.volume.toFloat().coerceIn(0f, 130f)
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Tip("Back ${stepSeconds}s (←)") {
-                    IconButton(onClick = { onSeekBy(-stepMs); onInteraction() }) {
-                        Icon(RewindIcon, "Back ${stepSeconds}s", tint = Color.White)
-                    }
-                }
-                Tip("Play / Pause (Space)") {
-                    IconButton(
-                        onClick = {
-                            if (mpv.paused) mpv.play() else mpv.pause()
-                            onInteraction()
-                        },
-                    ) {
-                        if (mpv.paused) com.zakius.finimal.GlyphIcon(com.zakius.finimal.AppIcons.PLAY, "Play", size = 32.dp, tint = Color.White)
-                        else Icon(PauseIcon, "Pause", Modifier.size(32.dp), tint = Color.White)
-                    }
-                }
-                Tip("Forward ${stepSeconds}s (→)") {
-                    IconButton(onClick = { onSeekBy(stepMs); onInteraction() }) {
-                        Icon(ForwardIcon, "Forward ${stepSeconds}s", tint = Color.White)
-                    }
-                }
-                if (next != null) {
-                    Tip("Next episode (N)") {
-                        IconButton(onClick = { onPlay(next.id.toString()) }) { Icon(NextIcon, "Next episode", tint = Color.White) }
-                    }
-                }
-                Text(
-                    "${formatMs(shown)} / ${formatMs(durationMs)}$bufferedNote$chapterNote",
-                    color = Color.White,
-                    style = MaterialTheme.typography.labelMedium,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
-                )
-                Tip("Mute (M)") {
-                    IconButton(onClick = { mpv.command("cycle", "mute"); onInteraction() }) {
-                        Icon(if (mpv.muted || shownVolume <= 0f) VolumeOffIcon else VolumeUpIcon, if (mpv.muted) "Unmute" else "Mute", tint = Color.White)
-                    }
-                }
-                Slider(
-                    value = shownVolume.coerceIn(0f, 130f),
-                    valueRange = 0f..130f,
-                    onValueChange = { v ->
-                        volumeDragging = v
-                        if (v > 0f && mpv.muted) mpv.set("mute", "no")
-                        mpv.set("volume", "$v")
+            Tip("Play / Pause (Space)") {
+                IconButton(
+                    onClick = {
+                        if (mpv.paused) mpv.play() else mpv.pause()
                         onInteraction()
                     },
-                    onValueChangeFinished = { volumeDragging = -1f },
-                    modifier = Modifier.width(100.dp),
-                )
-                Text(
-                    "${shownVolume.toInt()}%",
-                    color = Color.White,
-                    style = MaterialTheme.typography.labelMedium,
-                    textAlign = TextAlign.End,
-                    maxLines = 1,
-                    modifier = Modifier.widthIn(min = 40.dp),
-                )
+                ) {
+                    if (mpv.paused) com.zakius.finimal.GlyphIcon(com.zakius.finimal.AppIcons.PLAY, "Play", size = 32.dp, tint = Color.White)
+                    else Icon(PauseIcon, "Pause", Modifier.size(32.dp), tint = Color.White)
+                }
             }
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.weight(1f)) {
-                    Canvas(Modifier.matchParentSize()) {
-                        if (durationMs <= 0 || cached <= 0) return@Canvas
-                        val left = 10.dp.toPx()
-                        val trackWidth = size.width - 2 * left
-                        if (trackWidth <= 0f) return@Canvas
-                        val endX = left + trackWidth * (cached.toFloat() / durationMs).coerceIn(0f, 1f)
-                        drawLine(
-                            color = Color.White.copy(alpha = 0.35f),
-                            start = Offset(left, center.y),
-                            end = Offset(endX, center.y),
-                            strokeWidth = 4.dp.toPx(),
-                            cap = StrokeCap.Round,
-                        )
-                    }
-                    ChapterMarks(chapters, durationMs, Modifier.matchParentSize())
-                    Slider(
-                        value = shown.toFloat().coerceIn(0f, durationMs.toFloat().coerceAtLeast(1f)),
-                        valueRange = 0f..durationMs.toFloat().coerceAtLeast(1f),
-                        onValueChange = { value ->
-                            dragging = value
-                            onInteraction()
-                        },
-                        onValueChangeFinished = {
-                            if (dragging >= 0) onSeek(dragging.toLong(), false)
-                            dragging = -1f
-                        },
-                        colors = SliderDefaults.colors(inactiveTrackColor = Color.White.copy(alpha = 0.2f)),
-                        modifier = Modifier.fillMaxWidth(),
+            Tip("Forward ${stepSeconds}s (→)") {
+                IconButton(onClick = { onSeekBy(stepMs); onInteraction() }) {
+                    Icon(ForwardIcon, "Forward ${stepSeconds}s", tint = Color.White)
+                }
+            }
+            if (next != null) {
+                Tip("Next episode (N)") {
+                    IconButton(onClick = { onPlay(next.id.toString()) }) { Icon(NextIcon, "Next episode", tint = Color.White) }
+                }
+            }
+            Text(
+                "${formatMs(shown)} / ${formatMs(durationMs)}$bufferedNote$chapterNote",
+                color = Color.White,
+                style = MaterialTheme.typography.labelMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
+            )
+            Tip("Mute (M)") {
+                IconButton(onClick = { mpv.command("cycle", "mute"); onInteraction() }) {
+                    Icon(if (mpv.muted || shownVolume <= 0f) VolumeOffIcon else VolumeUpIcon, if (mpv.muted) "Unmute" else "Mute", tint = Color.White)
+                }
+            }
+            Slider(
+                value = shownVolume.coerceIn(0f, 130f),
+                valueRange = 0f..130f,
+                onValueChange = { v ->
+                    volumeDragging = v
+                    if (v > 0f && mpv.muted) mpv.set("mute", "no")
+                    mpv.set("volume", "$v")
+                    onInteraction()
+                },
+                onValueChangeFinished = { volumeDragging = -1f },
+                modifier = Modifier.width(100.dp),
+            )
+            Text(
+                "${shownVolume.toInt()}%",
+                color = Color.White,
+                style = MaterialTheme.typography.labelMedium,
+                textAlign = TextAlign.End,
+                maxLines = 1,
+                modifier = Modifier.widthIn(min = 40.dp),
+            )
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.weight(1f)) {
+                Canvas(Modifier.matchParentSize()) {
+                    if (durationMs <= 0 || cached <= 0) return@Canvas
+                    val left = 10.dp.toPx()
+                    val trackWidth = size.width - 2 * left
+                    if (trackWidth <= 0f) return@Canvas
+                    val endX = left + trackWidth * (cached.toFloat() / durationMs).coerceIn(0f, 1f)
+                    drawLine(
+                        color = Color.White.copy(alpha = 0.35f),
+                        start = Offset(left, center.y),
+                        end = Offset(endX, center.y),
+                        strokeWidth = 4.dp.toPx(),
+                        cap = StrokeCap.Round,
                     )
                 }
-                if (skip != null) FilledTonalButton(skip.onClick, Modifier.padding(start = 8.dp)) { Text(skip.label) }
+                ChapterMarks(chapters, durationMs, Modifier.matchParentSize())
+                Slider(
+                    value = shown.toFloat().coerceIn(0f, durationMs.toFloat().coerceAtLeast(1f)),
+                    valueRange = 0f..durationMs.toFloat().coerceAtLeast(1f),
+                    onValueChange = { value ->
+                        dragging = value
+                        onInteraction()
+                    },
+                    onValueChangeFinished = {
+                        if (dragging >= 0) onSeek(dragging.toLong(), false)
+                        dragging = -1f
+                    },
+                    colors = SliderDefaults.colors(inactiveTrackColor = Color.White.copy(alpha = 0.2f)),
+                    modifier = Modifier.fillMaxWidth(),
+                )
             }
+            if (skip != null) FilledTonalButton(skip.onClick, Modifier.padding(start = 8.dp)) { Text(skip.label) }
         }
     }
 }

@@ -17,6 +17,7 @@ import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
@@ -32,10 +33,12 @@ internal actual fun iconFontFamily(): FontFamily = androidIconFontFamily
 @Composable
 internal actual fun platformColors(dark: Boolean): ColorScheme {
     val ctx = LocalContext.current
-    return when {
-        Build.VERSION.SDK_INT >= 31 -> if (dark) dynamicDarkColorScheme(ctx) else dynamicLightColorScheme(ctx)
-        dark -> darkColorScheme()
-        else -> lightColorScheme()
+    return remember(dark, ctx) {
+        when {
+            Build.VERSION.SDK_INT >= 31 -> if (dark) dynamicDarkColorScheme(ctx) else dynamicLightColorScheme(ctx)
+            dark -> darkColorScheme()
+            else -> lightColorScheme()
+        }
     }
 }
 

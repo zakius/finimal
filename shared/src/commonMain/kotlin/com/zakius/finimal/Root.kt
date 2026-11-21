@@ -79,13 +79,16 @@ sealed interface Screen {
     @Serializable data class Play(val itemId: String) : Screen
 }
 
+private val FocusRipple = RippleConfiguration(
+    rippleAlpha = RippleAlpha(draggedAlpha = 0.16f, focusedAlpha = 0.35f, hoveredAlpha = 0.08f, pressedAlpha = 0.1f)
+)
+
 @Composable
 fun Theme(content: @Composable () -> Unit) {
     val colors = platformColors(isSystemInDarkTheme())
     // Material's default 10% focus highlight can't be seen from a sofa, and it is the only sign of where D-pad focus is.
-    val ripple = RippleConfiguration(rippleAlpha = RippleAlpha(draggedAlpha = 0.16f, focusedAlpha = 0.35f, hoveredAlpha = 0.08f, pressedAlpha = 0.1f))
     MaterialTheme(colorScheme = colors) {
-        CompositionLocalProvider(LocalRippleConfiguration provides ripple) {
+        CompositionLocalProvider(LocalRippleConfiguration provides FocusRipple) {
             Surface(Modifier.fillMaxSize(), content = content)
         }
     }
@@ -113,22 +116,56 @@ fun Root(
     val saved = rememberSaveableStateHolder()
     // Bumped by reset, so a fresh Libraries screen after switching accounts doesn't reuse the old account's composition.
     var epoch by rememberSaveable { mutableIntStateOf(0) }
+    // Entries that have been shown at least once stay composed when covered; entries below the initial top
+    // (such as Libraries on an Android FastStart handoff) defer composition until the user actually pops back to them.
+    val everShown = remember { HashSet<String>() }
     fun keyOf(i: Int) = "$epoch:$i:${stack[i]}"
-    fun push(s: Screen) = stack.add(s)
-    fun pop() {
-        if (stack.size > 1) {
-            saved.removeState(keyOf(stack.lastIndex))
-            stack.removeAt(stack.lastIndex)
+    val push: (Screen) -> Unit = remember(stack) { { s -> stack.add(s) } }
+    val pop: () -> Unit = remember(stack, saved) {
+        {
+            if (stack.size > 1) {
+                val removed = keyOf(stack.lastIndex)
+                saved.removeState(removed)
+                everShown.remove(removed)
+                stack.removeAt(stack.lastIndex)
+            }
         }
     }
-    fun reset(s: Screen) {
-        for (i in stack.indices) saved.removeState(keyOf(i))
-        epoch++
-        stack.clear()
-        stack.add(s)
+    val reset: (Screen) -> Unit = remember(stack, saved) {
+        { s ->
+            for (i in stack.indices) saved.removeState(keyOf(i))
+            everShown.clear()
+            epoch++
+            stack.clear()
+            stack.add(s)
+        }
+    }
+    val onSwitchFromLogin: () -> Unit = remember(reset) {
+        {
+            App.sessionExpired = false
+            App.expiredUserName = null
+            reset(Screen.Accounts)
+        }
+    }
+    val onResetToLibraries: () -> Unit = remember(reset) { { reset(Screen.Libraries) } }
+    val onResetPinDone: () -> Unit = remember(reset) {
+        {
+            App.prefs.setPin(App.prefs.userId!!, null)
+            reset(Screen.Libraries)
+        }
+    }
+    val onAddAccount: () -> Unit = remember(push) { { push(Screen.AddAccount) } }
+    val onForgotPin: (String) -> Unit = remember(push) { { username -> push(Screen.ResetPin(username)) } }
+    val onOpenAccounts: () -> Unit = remember(push) { { push(Screen.Accounts) } }
+    val onLoggedOut: () -> Unit = remember(reset) { { reset(startScreen()) } }
+    val onPlayNext: (String) -> Unit = remember(pop, push) {
+        { next ->
+            pop()
+            push(Screen.Play(next))
+        }
     }
 
-    NavigationBackHandler(rememberNavigationEventState(NavigationEventInfo.None), isBackEnabled = stack.size > 1, onBackCompleted = ::pop)
+    NavigationBackHandler(rememberNavigationEventState(NavigationEventInfo.None), isBackEnabled = stack.size > 1, onBackCompleted = pop)
     LaunchedEffect(openDownloads) {
         // Never open over "Who's watching?", because the account still loaded there may be protected by a PIN.
         if (openDownloads && App.prefs.loggedIn && stack.first() != Screen.Accounts && stack.last() != Screen.Downloads) {
@@ -140,61 +177,60 @@ fun Root(
     }
     LaunchedEffect(App.sessionExpired) { if (App.sessionExpired) reset(Screen.Login) }
     val topKey = keyOf(stack.lastIndex)
+    everShown.add(topKey)
     // Otherwise D-pad focus would stay on an item of the covered screen. A screen coming back on top restores its own focus.
     val focus = LocalFocusManager.current
     LaunchedEffect(topKey) { focus.clearFocus(force = true) }
     // TVs may crop the picture's edges (overscan). These are Android TV's recommended margins, which keep the UI inside.
-    val overscan = if (App.tv) Modifier.padding(horizontal = 48.dp, vertical = 27.dp) else Modifier
-    val padded = Modifier.safeDrawingPadding().then(overscan)
+    val tv = App.tv
+    val padded = remember(tv) {
+        val overscan = if (tv) Modifier.padding(horizontal = 48.dp, vertical = 27.dp) else Modifier
+        Modifier.safeDrawingPadding().then(overscan)
+    }
     // Covered screens stay composed so that going back only lays out and draws. Rebuilding the poster grid cost about
     // 13 ms of main-thread time on a phone. Screens read LocalShown to pause their own work while covered.
     // key() gives each entry its own state, so the next episode never inherits the previous player's state.
     stack.forEachIndexed { i, screen ->
-        key(keyOf(i)) {
-            val shown = i == stack.lastIndex
+        val entryKey = keyOf(i)
+        val shown = i == stack.lastIndex
+        if (!shown && entryKey !in everShown) return@forEachIndexed
+        key(entryKey) {
             // Passed as a State rather than a value: screens watch it from their effects, so covering or uncovering a screen recomposes nothing.
             val shownState = rememberUpdatedState(shown)
-            Box(if (shown) Modifier.fillMaxSize() else Modifier.hidden(), propagateMinConstraints = true) {
+            Box(if (shown) Modifier.fillMaxSize() else HiddenModifier, propagateMinConstraints = true) {
                 CompositionLocalProvider(LocalShown provides shownState) {
-                    saved.SaveableStateProvider(keyOf(i)) {
+                    saved.SaveableStateProvider(entryKey) {
                         FocusMemory {
                             when (screen) {
                                 Screen.Login -> LoginScreen(
                                     padded,
-                                    onSwitchAccount = {
-                                        App.sessionExpired = false
-                                        App.expiredUserName = null
-                                        reset(Screen.Accounts)
-                                    },
-                                ) { reset(Screen.Libraries) }
-                                Screen.AddAccount -> LoginScreen(padded, onBack = ::pop) { reset(Screen.Libraries) }
+                                    onSwitchAccount = onSwitchFromLogin,
+                                    onDone = onResetToLibraries,
+                                )
+                                Screen.AddAccount -> LoginScreen(padded, onBack = pop, onDone = onResetToLibraries)
                                 is Screen.ResetPin -> LoginScreen(
                                     padded,
-                                    onBack = ::pop,
+                                    onBack = pop,
                                     title = "Reset PIN",
                                     subtitle = "Log in with your password to clear this account's PIN.",
                                     initialUser = screen.username,
-                                ) {
-                                    App.prefs.setPin(App.prefs.userId!!, null)
-                                    reset(Screen.Libraries)
-                                }
+                                    onDone = onResetPinDone,
+                                )
                                 Screen.Accounts -> AccountsScreen(
                                     padded,
-                                    if (i == 0) null else ::pop,
-                                    { reset(Screen.Libraries) },
-                                    { push(Screen.AddAccount) },
-                                ) { username -> push(Screen.ResetPin(username)) }
-                                Screen.Libraries -> LibrariesScreen(padded, ::push)
-                                Screen.Downloads -> DownloadsScreen(padded, ::push, ::pop)
-                                Screen.Settings -> SettingsScreen(padded, ::pop, { push(Screen.Accounts) }) { reset(startScreen()) }
-                                is Screen.Library -> LibraryScreen(padded, screen, ::push, ::pop)
-                                is Screen.Series -> SeriesScreen(padded, screen, ::push, ::pop)
-                                is Screen.Season -> SeasonScreen(padded, screen, ::push, ::pop)
+                                    if (i == 0) null else pop,
+                                    onResetToLibraries,
+                                    onAddAccount,
+                                    onForgotPin,
+                                )
+                                Screen.Libraries -> LibrariesScreen(padded, push)
+                                Screen.Downloads -> DownloadsScreen(padded, push, pop)
+                                Screen.Settings -> SettingsScreen(padded, pop, onOpenAccounts, onLoggedOut)
+                                is Screen.Library -> LibraryScreen(padded, screen, push, pop)
+                                is Screen.Series -> SeriesScreen(padded, screen, push, pop)
+                                is Screen.Season -> SeasonScreen(padded, screen, push, pop)
                                 // "Play next" replaces the player instead of stacking players.
-                                is Screen.Play -> player(screen.itemId, ::pop) { next ->
-                                    pop()
-                                    push(Screen.Play(next))
-                                }
+                                is Screen.Play -> player(screen.itemId, pop, onPlayNext)
                             }
                         }
                     }
@@ -285,7 +321,7 @@ internal expect fun iconFontFamily(): FontFamily
 val LocalShown = staticCompositionLocalOf<State<Boolean>> { mutableStateOf(true) }
 
 // Composed but laid out at zero size and never placed, so it is not drawn, gets no touches, and exposes no semantics to accessibility services.
-private fun Modifier.hidden() = clearAndSetSemantics {}.layout { _, constraints ->
+private val HiddenModifier: Modifier = Modifier.clearAndSetSemantics {}.layout { _, constraints ->
     layout(constraints.minWidth, constraints.minHeight) {}
 }
 

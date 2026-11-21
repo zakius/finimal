@@ -57,12 +57,24 @@ actual fun toast(text: String) = Toasts.show(text)
 @Composable
 internal actual fun RetryOnNewNetwork(onRetry: () -> Unit) {}
 
-/** [KeyValueStore] in one JSON file. Rewriting the whole file on each edit is fine for a few dozen settings. */
+/**
+ * [KeyValueStore] in one JSON file. Reads and updates happen in memory immediately; disk writes are coalesced onto a
+ * single background thread so UI clicks (sort, unplayed, audio delay, window save) never block on fsync.
+ */
 class JsonFileStore(private val file: File) : KeyValueStore {
     private val values: MutableMap<String, Any?> = runCatching { Json.parseToJsonElement(file.readText()) as JsonObject }
         .getOrDefault(JsonObject(emptyMap()))
         .mapValues { (_, v) -> decode(v) }
         .toMutableMap()
+
+    @Volatile private var pendingJson: String? = null
+    private val writer = java.util.concurrent.Executors.newSingleThreadExecutor { task ->
+        Thread(task, "prefs-writer").apply { isDaemon = true }
+    }
+
+    init {
+        Runtime.getRuntime().addShutdownHook(Thread { flushSync() })
+    }
 
     @Synchronized override fun get(key: String): Any? = values[key]
     @Synchronized override fun keys(): Set<String> = values.keys.toSet()
@@ -73,8 +85,26 @@ class JsonFileStore(private val file: File) : KeyValueStore {
         for ((k, v) in changes) {
             if (v == null) values.remove(k) else values[k] = v
         }
-        file.parentFile?.mkdirs()
-        file.writeAtomically(JsonObject(values.mapValues { (_, v) -> encode(v) }).toString())
+        val encoded = JsonObject(values.mapValues { (_, v) -> encode(v) }).toString()
+        val needsSchedule = pendingJson == null
+        pendingJson = encoded
+        if (needsSchedule) {
+            writer.execute { flushSync() }
+        }
+    }
+
+    private fun flushSync() {
+        while (true) {
+            val toWrite = synchronized(this) {
+                val p = pendingJson ?: return
+                pendingJson = null
+                p
+            }
+            runCatching {
+                file.parentFile?.mkdirs()
+                file.writeAtomically(toWrite)
+            }
+        }
     }
 
     private fun encode(v: Any?): JsonElement = when (v) {

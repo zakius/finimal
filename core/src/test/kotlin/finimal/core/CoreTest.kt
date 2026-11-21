@@ -133,4 +133,35 @@ class CoreTest {
             dir.setWritable(true)
         }
     }
+
+    @Test fun pendingStoreBatchesPutAllAndConfirmAll() {
+        val f = File.createTempFile("pending-batch", ".json")
+        f.delete()
+        f.deleteOnExit()
+        val store = PendingStore(f)
+        assertTrue(store.isEmpty())
+        val a = PlayState(0, true, 10)
+        val b = PlayState(0, true, 20)
+        val bNewer = PlayState(500, true, 30)
+        store.putAll(mapOf("a" to a, "b" to b))
+        assertFalse(store.isEmpty())
+        store.put("b", bNewer)
+        // Confirming stale b must leave bNewer intact while removing a.
+        store.confirmAll(mapOf("a" to a, "b" to b))
+        assertNull(store.get("a"))
+        assertEquals(bNewer, store.get("b"))
+        assertFalse(store.isEmpty())
+        store.confirmAll(mapOf("b" to bNewer))
+        assertTrue(store.isEmpty())
+        assertTrue(PendingStore(f).isEmpty())
+    }
+
+    @Test fun writeAtomicallyWithoutSyncReplacesContent() {
+        val f = File.createTempFile("cache-snap", ".json")
+        f.deleteOnExit()
+        f.writeAtomically("first", sync = false)
+        assertEquals("first", f.readText())
+        f.writeAtomically("second", sync = false)
+        assertEquals("second", f.readText())
+    }
 }

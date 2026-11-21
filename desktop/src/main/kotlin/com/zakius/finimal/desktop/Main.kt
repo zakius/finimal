@@ -31,6 +31,8 @@ import kotlinx.coroutines.flow.collectLatest
 import coil3.ImageLoader
 import coil3.PlatformContext
 import coil3.SingletonImageLoader
+import coil3.disk.DiskCache
+import coil3.memory.MemoryCache
 import coil3.request.ErrorResult
 import coil3.request.ImageRequest
 import coil3.request.SuccessResult
@@ -43,11 +45,14 @@ import com.sun.jna.Library
 import com.sun.jna.Native
 import com.sun.jna.Pointer
 import com.zakius.finimal.App
+import com.zakius.finimal.ListSnapshots
 import com.zakius.finimal.Root
 import com.zakius.finimal.Theme
 import com.zakius.finimal.Toasts
 import kotlinx.coroutines.delay
 import okhttp3.Dispatcher
+import okio.Path.Companion.toOkioPath
+import kotlin.concurrent.thread
 import kotlin.system.exitProcess
 
 @OptIn(ExperimentalComposeUiApi::class)
@@ -56,6 +61,11 @@ fun main(args: Array<String>) {
     scaleFromXftDpi()
     App.platform = DesktopPlatform
     SingletonImageLoader.setSafe(::imageLoader)
+    // Warm libmpv (JNA native load) and the saved Libraries snapshot off the UI thread so the first play and first frame are fast.
+    thread(name = "desktop-warm-up", isDaemon = true) {
+        if (App.prefs.loggedIn) ListSnapshots.prefetchFastLibraries()
+        Mpv.warmLibrary()
+    }
     application {
         val control = remember { WindowControl.restore() }
         LaunchedEffect(control) {
@@ -118,13 +128,33 @@ private interface X11 : Library {
 }
 
 /**
- * Images get their own dispatcher, so a screen of thumbnails doesn't queue behind or ahead of API calls (OkHttp
- * allows 5 per host per dispatcher). The ServiceLoader scan is off, as on Android, and the one fetcher is added here:
- * in the ProGuard build the scan found a registration whose class had been stripped, and no image loaded.
+ * Images get their own higher-concurrency dispatcher, so a screen of posters loads in parallel without queuing behind
+ * or ahead of API calls. Disk cache lives in [App.platform.appCache] so posters survive restarts. The ServiceLoader
+ * scan is off, as on Android, and the one fetcher is added here: in the ProGuard build the scan found a registration
+ * whose class had been stripped, and no image loaded.
  */
-private fun imageLoader(ctx: PlatformContext) = ImageLoader.Builder(ctx).serviceLoaderEnabled(false).components {
-    add(OkHttpNetworkFetcherFactory(callFactory = { App.http.newBuilder().dispatcher(Dispatcher()).build() }))
-}.build()
+private fun imageLoader(ctx: PlatformContext) = ImageLoader.Builder(ctx)
+    .serviceLoaderEnabled(false)
+    .memoryCache {
+        MemoryCache.Builder()
+            .maxSizeBytes(128L * 1024 * 1024)
+            .build()
+    }
+    .diskCache {
+        DiskCache.Builder()
+            .directory(File(App.platform.appCache, "images").toOkioPath())
+            .maxSizeBytes(200L * 1024 * 1024)
+            .build()
+    }
+    .components {
+        add(OkHttpNetworkFetcherFactory(callFactory = {
+            App.http.newBuilder().dispatcher(Dispatcher().apply {
+                maxRequests = 64
+                maxRequestsPerHost = 16
+            }).build()
+        }))
+    }
+    .build()
 
 /** On the desktop, Esc acts as Back. The player handles it first (leaving fullscreen, then the player), then the screens. */
 private fun pressEscape() {

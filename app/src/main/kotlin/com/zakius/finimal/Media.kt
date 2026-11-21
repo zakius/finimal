@@ -117,6 +117,15 @@ object Media : Downloads {
         return proxy.url(key(item))
     }
 
+    /**
+     * Starts fetching chunk 0 (container header / cues) in the background while subtitles are being fetched,
+     * overlapping media probing with subtitle extraction. Caller must close the returned demand.
+     */
+    fun prewarmRead(item: BaseItemDto): Scratch.Demand? = runCatching {
+        val e = entry(item)
+        if (e.complete) null else e.demand(0L, scratch.chunkSize.toLong(), Scratch.Priority.READ)
+    }.getOrNull()
+
     /** Cache key of what the player has open; eviction never touches it. */
     @Volatile var playing: String? = null
 
@@ -198,6 +207,8 @@ object Media : Downloads {
         recordsRoot.deleteRecursively()
         File(storageRoot(), "transcodes").deleteRecursively()
         memo = null
+        memoById = null
+        transcodeDoneBytes.clear()
         changes++
         val old = scratch
         App.prefs.storageIndex = index
@@ -268,11 +279,16 @@ object Media : Downloads {
         }
     }
     private fun write(d: Download) {
-        metaFile(d.item.id.toString()).writeAtomically(json.encodeToString(d))
+        val id = d.item.id.toString()
+        metaFile(id).writeAtomically(json.encodeToString(d))
         // Update the memo in place rather than clearing it. Progress reports write every 10 seconds, and clearing
         // would make the next read decode every file.
         val old = memo
-        memo = if (old == null) null else old.filterNot { it.item.id == d.item.id } + d
+        if (old != null) {
+            val updated = old.filterNot { it.item.id == d.item.id } + d
+            memo = updated
+            memoById = (memoById ?: emptyMap()) + (id to d)
+        }
         changes++
     }
 
@@ -293,6 +309,9 @@ object Media : Downloads {
 
     /** Decoded files, kept until the next change; the status poll would otherwise re-read every file each second. */
     private var memo: List<Download>? = null
+    private var memoById: Map<String, Download>? = null
+    /** Cached total byte size for completed transcoded downloads so polling never walks hundreds of .ts files. */
+    private val transcodeDoneBytes = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
     /** Every change goes through [write], [deleteDownload], [switchStorage] or [accountChanged], which keep [memo] current. */
     @Synchronized
@@ -308,6 +327,7 @@ object Media : Downloads {
                 .getOrNull()
         }
         memo = decoded
+        memoById = decoded.associateBy { it.item.id.toString() }
         return decoded
     }
 
@@ -326,13 +346,16 @@ object Media : Downloads {
     override fun accountChanged() {
         adoptLooseRecords()
         memo = null
+        memoById = null
         changes++
         kickDownloads(restart = true)
     }
 
     override fun otherAccountsBytes(): Long {
+        if (otherRecordDirs().isEmpty()) return 0L
         val own = downloads().map { it.item.id.toString() }.toSet()
         val others = pinnedIds() - own
+        if (others.isEmpty()) return 0L
         val otherKeys = scratch.keys().filter { key -> others.any { id -> key.startsWith("$id-") } }
         val scratchBytes = otherKeys.sumOf { key -> scratch.entry(key).bytes() }
         val transcodeBytes = others.sumOf { id -> transcodeDir(id).walk().filter(File::isFile).sumOf(File::length) }
@@ -340,7 +363,16 @@ object Media : Downloads {
     }
     private fun isPinned(key: String, ids: Set<String>) = ids.any { key.startsWith("$it-") }
 
-    override fun download(id: String): Download? = downloads().firstOrNull { it.item.id.toString() == id }
+    @Synchronized
+    override fun download(id: String): Download? {
+        if (memo == null) downloads()
+        return memoById?.get(id)
+    }
+
+    /** Returns (known=true, download) without disk I/O when download records are already in memory. */
+    @Synchronized
+    fun cachedDownload(id: String): Pair<Boolean, Download?> =
+        if (memo != null) true to memoById?.get(id) else false to null
 
     /** The ID the queue worker is writing now. */
     @Volatile var downloading: String? = null
@@ -388,7 +420,7 @@ object Media : Downloads {
         if (existing != null && !same && !ownedElsewhere(existing)) removeDownloadBytes(existing)
         val isAuto = existing?.auto ?: auto
         val queuedAt = existing?.queuedAt ?: System.currentTimeMillis()
-        val transcoded = if (same) existing!!.transcoded else !playsDirectly(item)
+        val transcoded = if (same) existing.transcoded else !playsDirectly(item)
         write(Download(item, isAuto, queuedAt, paused = false, transcoded = transcoded))
         kickDownloads(restart = false)
     }
@@ -413,6 +445,8 @@ object Media : Downloads {
             val d = download(id)
             metaFile(id).delete()
             memo = memo?.filterNot { it.item.id.toString() == id }
+            memoById = memoById?.minus(id)
+            transcodeDoneBytes.remove(id)
             changes++
             if (downloading == id) kickDownloads(restart = true)
             d
@@ -480,14 +514,23 @@ object Media : Downloads {
             val percent = if (len > 0) (bytes * 100 / len).toInt() else 0
             return Progress(bytes, len, percent, e.complete)
         }
-        val dir = transcodeDir(d.item.id.toString())
+        val id = d.item.id.toString()
+        val dir = transcodeDir(id)
+        val playlistFile = File(dir, PLAYLIST)
+        val isDone = playlistFile.exists()
+        if (isDone) {
+            val cachedBytes = transcodeDoneBytes.computeIfAbsent(id) {
+                dir.listFiles().orEmpty().sumOf { it.length() }
+            }
+            return Progress(cachedBytes, 0L, 100, true)
+        }
         val files = dir.listFiles().orEmpty()
         val remote = File(dir, "remote.m3u8")
         val total = if (remote.exists()) remote.readLines().count(::isSegment) else 0
         val done = files.count { it.name.endsWith(".ts") }
         val bytes = files.sumOf { it.length() }
         val percent = if (total > 0) done * 100 / total else 0
-        return Progress(bytes, 0L, percent, File(dir, PLAYLIST).exists())
+        return Progress(bytes, 0L, percent, false)
     }
 
     /**
@@ -522,8 +565,7 @@ object Media : Downloads {
                 if (!r.isSuccessful) throw HttpStatus(r.code)
                 val tmp = File(dir, "$n.tmp")
                 tmp.outputStream().use { out ->
-                    val body = r.body ?: throw IOException("empty body")
-                    body.byteStream().copyTo(out)
+                    r.body.byteStream().copyTo(out)
                 }
                 if (!tmp.renameTo(file)) throw IOException("rename failed")
             }
@@ -544,7 +586,7 @@ object Media : Downloads {
 
     private suspend fun fetchText(url: String) = transcodeHttp.newCall(Request.Builder().url(url).build()).cancellable { r ->
         if (!r.isSuccessful) throw HttpStatus(r.code)
-        r.body?.string() ?: throw IOException("empty body")
+        r.body.string()
     }
 
     /**
@@ -589,6 +631,9 @@ object Media : Downloads {
             .filter { d -> !d.paused && d.item.id.toString() != current && !progress[d]!!.done }
             .sortedWith(queueOrder)
             .map { d -> d.item.id.toString() }
+        val queuePos = HashMap<String, Int>(queue.size).apply {
+            queue.forEachIndexed { idx, id -> put(id, idx + 1) }
+        }
         return all.associate { d ->
             val id = d.item.id.toString()
             val p = progress[d]!!
@@ -598,7 +643,7 @@ object Media : Downloads {
                 current == id -> Fill.RUNNING
                 else -> Fill.QUEUED
             }
-            id to DownloadStatus(d, p.percent, fill, p.bytes, queue.indexOf(id) + 1, waitingFor, p.totalBytes)
+            id to DownloadStatus(d, p.percent, fill, p.bytes, queuePos[id] ?: 0, waitingFor, p.totalBytes)
         }
     }
 
@@ -685,36 +730,39 @@ object Media : Downloads {
     }
 
     /** [sideloadedSubs] as files, fetched once so playback works offline too. */
-    suspend fun fetchSubtitles(item: BaseItemDto, transcode: Boolean): Map<Int, File> = coroutineScope {
+    suspend fun fetchSubtitles(item: BaseItemDto, transcode: Boolean): Map<Int, File> {
+        val subs = sideloadedSubs(item, transcode)
+        if (subs.isEmpty()) return emptyMap()
         val id = item.id.toString()
-        val source = item.mediaSources?.firstOrNull() ?: return@coroutineScope emptyMap()
-        val dir = subsDir(id).apply { mkdirs() }
-        val fetches = sideloadedSubs(item, transcode).map { stream ->
-            async(Dispatchers.IO) {
-                val file = File(dir, "${stream.index}.${subtitleExt(stream)}")
-                if (!file.exists()) {
-                    runCatching {
-                        val url = App.server.subtitleUrl(id, source.id!!, stream)
-                        http.newCall(Request.Builder().url(url).build()).execute().use { r ->
-                            if (!r.isSuccessful) throw IOException("HTTP ${r.code}")
-                            // Unique, so two fetchers of the same item never write one temp file.
-                            val tmp = File.createTempFile(file.name, ".tmp", dir)
-                            try {
-                                tmp.outputStream().use { out ->
-                                    val body = r.body ?: throw IOException("empty body")
-                                    body.byteStream().copyTo(out)
+        val source = item.mediaSources?.firstOrNull() ?: return emptyMap()
+        return coroutineScope {
+            val dir = withContext(Dispatchers.IO) { subsDir(id).apply { mkdirs() } }
+            val fetches = subs.map { stream ->
+                async(Dispatchers.IO) {
+                    val file = File(dir, "${stream.index}.${subtitleExt(stream)}")
+                    if (!file.exists()) {
+                        runCatching {
+                            val url = App.server.subtitleUrl(id, source.id!!, stream)
+                            http.newCall(Request.Builder().url(url).build()).execute().use { r ->
+                                if (!r.isSuccessful) throw IOException("HTTP ${r.code}")
+                                // Unique, so two fetchers of the same item never write one temp file.
+                                val tmp = File.createTempFile(file.name, ".tmp", dir)
+                                try {
+                                    tmp.outputStream().use { out ->
+                                        r.body.byteStream().copyTo(out)
+                                    }
+                                    tmp.renameTo(file)
+                                } finally {
+                                    tmp.delete()
                                 }
-                                tmp.renameTo(file)
-                            } finally {
-                                tmp.delete()
                             }
                         }
                     }
+                    if (file.exists()) Pair(stream.index, file) else null
                 }
-                if (file.exists()) Pair(stream.index, file) else null
             }
+            fetches.awaitAll().filterNotNull().toMap()
         }
-        fetches.awaitAll().filterNotNull().toMap()
     }
 }
 

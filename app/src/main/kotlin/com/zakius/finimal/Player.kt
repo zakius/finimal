@@ -66,6 +66,7 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.LongState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -170,12 +171,26 @@ private val FullscreenExitIcon = icon("FullscreenExit", "M5,16h3v3h2v-5H5v2zm3,-
 /** Loads the item (server first, download metadata when offline) and the episodes that can follow it. */
 @Composable
 fun PlayerScreen(itemId: String, onBack: () -> Unit, onPlay: (String) -> Unit) {
+    val context = LocalContext.current
     val activity = LocalActivity.current!!
     val carry = remember { carried }
+    // Pre-build the VideoView and initial ExoPlayer immediately so player/OpenGL/libass setup overlaps the item fetch.
+    val prewarmView = remember {
+        VideoView(context).apply {
+            subtitleView.setFractionalTextSize(SubtitleView.DEFAULT_TEXT_SIZE_FRACTION * App.prefs.subtitleScale / 100f)
+            subtitleView.setStyle(CaptionStyleCompat(
+                android.graphics.Color.WHITE, android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT,
+                CaptionStyleCompat.EDGE_TYPE_OUTLINE, android.graphics.Color.BLACK, null,
+            ))
+        }
+    }
+    val prewarmPlayer = remember { buildPlayer(context, prewarmView) }
+    val playerHandedOff = remember { booleanArrayOf(false) }
     DisposableEffect(Unit) {
         // Cleared only once this screen is composed, which is after the previous player's onDispose below has read it.
         carried = null
         onDispose {
+            if (!playerHandedOff[0]) prewarmPlayer.release()
             if (carried == null) {
                 systemBars(activity, hidden = false)
                 activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
@@ -183,8 +198,23 @@ fun PlayerScreen(itemId: String, onBack: () -> Unit, onPlay: (String) -> Unit) {
             }
         }
     }
-    var item by remember { mutableStateOf<BaseItemDto?>(null) }
-    var siblings by remember { mutableStateOf<List<BaseItemDto>>(emptyList()) }
+    // Instant Frame 1 start when a fresh prefetch is already in memory and the item is not a local download.
+    val instantItem = remember(itemId) {
+        val (known, dl) = Media.cachedDownload(itemId)
+        if (known && dl == null) AppCache.getFreshItem(itemId)?.takeIf { !it.mediaSources.isNullOrEmpty() } else null
+    }
+    var item by remember { mutableStateOf<BaseItemDto?>(instantItem) }
+    var download by remember { mutableStateOf<Download?>(null) }
+    var localPlaylist by remember { mutableStateOf<java.io.File?>(null) }
+    var siblings by remember {
+        val initialSeriesId = instantItem?.seriesId?.toString()
+        val cachedSiblings = if (initialSeriesId != null) {
+            AppCache.getList(AppCache.listKey(initialSeriesId, "episodes"))?.items.orEmpty()
+        } else {
+            emptyList()
+        }
+        mutableStateOf(cachedSiblings)
+    }
     var online by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<Throwable?>(null) }
     var refresh by remember { mutableIntStateOf(0) }
@@ -192,9 +222,17 @@ fun PlayerScreen(itemId: String, onBack: () -> Unit, onPlay: (String) -> Unit) {
     LaunchedEffect(itemId, retry) {
         error = null
         val server = App.server
-        val download = withContext(Dispatchers.IO) { Media.download(itemId) }
-        val downloaded = download?.item
-        val complete = download != null && withContext(Dispatchers.IO) { Media.isDone(download) }
+        if (retry == 0 && instantItem != null) {
+            // Item is already fresh from prefetch; flush any unrelated pending states in the background.
+            App.platform.scope.launch { server.flush() }
+            return@LaunchedEffect
+        }
+        val dl = withContext(Dispatchers.IO) { Media.download(itemId) }
+        val playlist = withContext(Dispatchers.IO) { if (dl != null) Media.playlist(dl) else null }
+        val downloaded = dl?.item
+        val complete = dl != null && withContext(Dispatchers.IO) { Media.isDone(dl) }
+        download = dl
+        localPlaylist = playlist
         // Outside this screen's scope, so giving up on a slow server below doesn't cut a flush short.
         val process = App.platform.scope
         val fetch = process.async {
@@ -203,7 +241,7 @@ fun PlayerScreen(itemId: String, onBack: () -> Unit, onPlay: (String) -> Unit) {
                 // parallel. The check runs on App.disk so it sees a stop that the previous player recorded on exit.
                 val pending = withContext(App.disk) { App.pending.get(itemId) != null }
                 if (!pending) process.launch { server.flush() }
-                server.item(itemId, flushFirst = pending)
+                AppCache.fetchOrJoinItem(itemId, flushFirst = pending)
             }
         }
         // A finished download doesn't wait out network timeouts; it plays offline if the server is slow to answer.
@@ -230,16 +268,23 @@ fun PlayerScreen(itemId: String, onBack: () -> Unit, onPlay: (String) -> Unit) {
             if (shown == null) error = result.exceptionOrNull()
         }
     }
-    // The episode list; [refresh] re-fetches it after "Mark played".
+    // The episode list; starts immediately from AppCache when coming from Series/Season, and [refresh] re-fetches after "Mark played".
     LaunchedEffect(item, refresh) {
         val episode = item ?: return@LaunchedEffect
         val server = App.server
         val seriesId = episode.seriesId?.toString()
         if (episode.type == BaseItemKind.EPISODE && seriesId != null) {
+            val cacheKey = AppCache.listKey(seriesId, "episodes")
+            val cachedEntry = AppCache.getList(cacheKey)
+            if (cachedEntry != null && siblings.isEmpty()) siblings = cachedEntry.items
+            if (refresh == 0 && cachedEntry != null && AppCache.isListFresh(cachedEntry, maxAgeMs = 15_000L)) {
+                return@LaunchedEffect
+            }
             val fromServer = if (online) runCatching { server.episodes(seriesId) }.getOrNull() else null
             if (fromServer != null) {
+                AppCache.putList(cacheKey, fromServer, fromNetwork = true)
                 siblings = fromServer
-            } else {
+            } else if (siblings.isEmpty()) {
                 val downloads = withContext(Dispatchers.IO) { Media.downloads() }
                 siblings = downloads
                     .map { d -> d.item }
@@ -261,7 +306,20 @@ fun PlayerScreen(itemId: String, onBack: () -> Unit, onPlay: (String) -> Unit) {
         current == null -> Box(Modifier.fillMaxSize().background(Color.Black), contentAlignment = Alignment.Center) {
             CircularProgressIndicator(color = Color.White)
         }
-        else -> Playback(current, siblings, carry, online, onBack, onPlay, onChanged = { refresh++ })
+        else -> Playback(
+            current,
+            siblings,
+            download,
+            localPlaylist,
+            prewarmView,
+            prewarmPlayer,
+            onTakeInitialPlayer = { playerHandedOff[0] = true },
+            carry,
+            online,
+            onBack,
+            onPlay,
+            onChanged = { refresh++ },
+        )
     }
 }
 
@@ -269,6 +327,11 @@ fun PlayerScreen(itemId: String, onBack: () -> Unit, onPlay: (String) -> Unit) {
 private fun Playback(
     item: BaseItemDto,
     siblings: List<BaseItemDto>,
+    download: Download?,
+    localPlaylist: java.io.File?,
+    playerView: VideoView,
+    initialPlayer: ExoPlayer,
+    onTakeInitialPlayer: () -> Unit,
     carry: Pair<Boolean, Boolean>?,
     online: Boolean,
     onBack: () -> Unit,
@@ -283,23 +346,21 @@ private fun Playback(
     val sourceId = source.id!!
     val seriesKey = item.seriesId?.toString() ?: id
     val serverPlayed = item.userData?.played ?: false
-    val next = nextEpisode(item, siblings)
+    val next = remember(item.id, siblings) { nextEpisode(item, siblings) }
     val chapters = remember(item) { chapters(item) }
 
     val videoStream = remember(source) { videoInfo(source) }
-    val download = remember(id) { Media.download(id) }
-    // A finished transcoded download plays from its local playlist; one still under way is no use yet.
-    val localPlaylist = remember(download) { if (download != null) Media.playlist(download) else null }
-    val cacheKey = Media.key(item)
+    val cacheKey = remember(item) { Media.key(item) }
     // A file the device can't decode starts as a transcode. A direct download plays as it is; if it then fails to
     // decode, playback still switches to a transcode.
-    var transcoding by remember { mutableStateOf(online && localPlaylist == null && download?.transcoded != false && !playsDirectly(item)) }
+    val initialTranscoding = remember { online && localPlaylist == null && download?.transcoded != false && !playsDirectly(item) }
+    var transcoding by remember { mutableStateOf(initialTranscoding) }
     // Where a direct play switched to a transcode; null for a play that started as one, which resumes like any other.
     var transcodeFromMs by remember { mutableStateOf<Long?>(null) }
     var playerError by remember { mutableStateOf<PlaybackException?>(null) }
     var reconnect by remember { mutableStateOf<Reconnect>(Reconnect.Idle) }
     var ended by remember { mutableStateOf(false) }
-    var segments by remember { mutableStateOf<List<MediaSegmentDto>>(emptyList()) }
+    var segments by remember { mutableStateOf(AppCache.getCachedSegments(id).orEmpty()) }
     var startTicks by remember { mutableLongStateOf(0L) }
     var startedAt by remember { mutableLongStateOf(0L) }
     var seeked by remember { mutableStateOf(false) }
@@ -309,88 +370,108 @@ private fun Playback(
     var choppy by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
-    val playerView = remember {
-        VideoView(context).apply {
-            subtitleView.setFractionalTextSize(SubtitleView.DEFAULT_TEXT_SIZE_FRACTION * prefs.subtitleScale / 100f)
-            // Text subtitles: white with a black outline, no box. Embedded styles (italics, cue colours) stay on.
-            subtitleView.setStyle(CaptionStyleCompat(
-                android.graphics.Color.WHITE, android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT,
-                CaptionStyleCompat.EDGE_TYPE_OUTLINE, android.graphics.Color.BLACK, null,
-            ))
+    val player = remember(transcoding) {
+        if (transcoding == initialTranscoding) {
+            onTakeInitialPlayer()
+            initialPlayer
+        } else {
+            buildPlayer(context, playerView)
         }
     }
-    val player = remember(transcoding) { buildPlayer(context, playerView) }
     // A new session ID per player. Reports carry it so the server ties them to the transcode job: a stop ends that job,
     // and the stop from an earlier direct-play player can't end the transcode that replaced it.
     val playSession = remember(player) { UUID.randomUUID().toString() }
 
-    // Fetch external subtitles first (cached on disk), then load the media item at the resume point.
+    // Speculatively prefetch the next episode (metadata, segments, subtitles) once current playback is underway.
+    LaunchedEffect(next?.id) {
+        val upcoming = next ?: return@LaunchedEffect
+        delay(2_000)
+        AppCache.prefetchPlayable(upcoming.id.toString())
+    }
+
+    // Fetch external subtitles (overlapped with Scratch header pre-warming and segments), then load the media item.
     LaunchedEffect(player) {
         // Set before anything else, so eviction and subtitle cleanup leave the playing item alone.
         Media.playing = cacheKey
-        // A slow server holds up the start for at most SUBTITLE_WAIT_MS; after that the episode plays without these
-        // subtitles, and the fetch finishes on its own so the files are there next time.
+        if (online && segments.isEmpty()) {
+            launch { segments = runCatching { AppCache.fetchOrJoinSegments(id) }.getOrDefault(emptyList()) }
+        }
         // A transcode, live or downloaded, has no embedded subtitles: those come as files too.
         val sideload = transcoding || localPlaylist != null
-        val fetch = App.platform.scope.async { Media.fetchSubtitles(item, sideload) }
-        val subs = withTimeoutOrNull(SUBTITLE_WAIT_MS) { fetch.await() } ?: emptyMap()
-        val streams = sideloadedSubs(item, sideload).associateBy { it.index }
-        val startSub = startSubtitle(source, prefs.subLang(seriesKey))?.index
-        val audioIndex = prefs.audioLang(seriesKey)?.let { audioIndex(source, it) }
-        val url = if (transcoding) {
-            val burnIn = burnInIndex(source, prefs.subLang(seriesKey))
-            App.server.transcodeUrl(id, sourceId, audioIndex, burnIn, playSession)
-        } else if (localPlaylist != null) {
-            Uri.fromFile(localPlaylist).toString()
+        val sideloadStreams = sideloadedSubs(item, sideload)
+        val prewarm = if (!transcoding && localPlaylist == null && sideloadStreams.isNotEmpty()) {
+            withContext(Dispatchers.IO) { Media.prewarmRead(item) }
         } else {
-            Media.streamUrl(item)
+            null
         }
-        val subtitleConfigurations = subs.mapNotNull { (index, file) ->
-            val stream = streams[index] ?: return@mapNotNull null
-            val mime = when (file.extension) {
-                "ass", "ssa" -> MimeTypes.TEXT_SSA
-                "srt" -> MimeTypes.APPLICATION_SUBRIP
-                "vtt" -> MimeTypes.TEXT_VTT
-                else -> return@mapNotNull null
+        try {
+            val subs = if (sideloadStreams.isEmpty()) {
+                emptyMap()
+            } else {
+                // A slow server holds up the start for at most SUBTITLE_WAIT_MS; after that the episode plays without these
+                // subtitles, and the fetch finishes on its own so the files are there next time.
+                val fetch = App.platform.scope.async { Media.fetchSubtitles(item, sideload) }
+                withTimeoutOrNull(SUBTITLE_WAIT_MS) { fetch.await() } ?: emptyMap()
             }
-            MediaItem.SubtitleConfiguration.Builder(Uri.fromFile(file))
-                .setMimeType(mime)
-                .setLanguage(stream.language)
-                .setLabel(stream.displayTitle)
-                .setId("ext${stream.index}")
-                // A file has none of the stream's flags, and Media3 only picks a text track flagged default or in a
-                // preferred language. Without this, a transcode starts with subtitles off until a language is remembered.
-                .setSelectionFlags(if (stream.index == startSub) C.SELECTION_FLAG_DEFAULT else 0)
+            val streams = sideloadStreams.associateBy { it.index }
+            val startSub = startSubtitle(source, prefs.subLang(seriesKey))?.index
+            val audioIndex = prefs.audioLang(seriesKey)?.let { audioIndex(source, it) }
+            val url = if (transcoding) {
+                val burnIn = burnInIndex(source, prefs.subLang(seriesKey))
+                App.server.transcodeUrl(id, sourceId, audioIndex, burnIn, playSession)
+            } else if (localPlaylist != null) {
+                Uri.fromFile(localPlaylist).toString()
+            } else {
+                withContext(Dispatchers.IO) { Media.streamUrl(item) }
+            }
+            val subtitleConfigurations = subs.mapNotNull { (index, file) ->
+                val stream = streams[index] ?: return@mapNotNull null
+                val mime = when (file.extension) {
+                    "ass", "ssa" -> MimeTypes.TEXT_SSA
+                    "srt" -> MimeTypes.APPLICATION_SUBRIP
+                    "vtt" -> MimeTypes.TEXT_VTT
+                    else -> return@mapNotNull null
+                }
+                MediaItem.SubtitleConfiguration.Builder(Uri.fromFile(file))
+                    .setMimeType(mime)
+                    .setLanguage(stream.language)
+                    .setLabel(stream.displayTitle)
+                    .setId("ext${stream.index}")
+                    // A file has none of the stream's flags, and Media3 only picks a text track flagged default or in a
+                    // preferred language. Without this, a transcode starts with subtitles off until a language is remembered.
+                    .setSelectionFlags(if (stream.index == startSub) C.SELECTION_FLAG_DEFAULT else 0)
+                    .build()
+            }
+            val mediaItem = MediaItem.Builder()
+                .setUri(url)
+                .setSubtitleConfigurations(subtitleConfigurations)
                 .build()
-        }
-        val mediaItem = MediaItem.Builder()
-            .setUri(url)
-            .setSubtitleConfigurations(subtitleConfigurations)
-            .build()
-        val savedTicks = item.localState().first?.positionTicks ?: 0L
-        val resumeMs = savedTicks / TICKS_PER_MS
-        val startMs = transcodeFromMs ?: (resumeMs - RESUME_REWIND_MS).coerceAtLeast(0)
-        startTicks = startMs * TICKS_PER_MS
-        startedAt = SystemClock.elapsedRealtime()
-        if (transcodeFromMs == null && startMs > 0) resumedAt = startMs
-        val trackParams = player.trackSelectionParameters.buildUpon()
-        val audioLang = prefs.audioLang(seriesKey)
-        if (audioLang != null) trackParams.setPreferredAudioLanguage(audioLang)
-        when (val sub = prefs.subLang(seriesKey)) {
-            null -> {}
-            "" -> trackParams.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
-            else -> {
-                trackParams.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
-                trackParams.setPreferredTextLanguage(sub)
+            val savedTicks = item.localState().first?.positionTicks ?: 0L
+            val resumeMs = savedTicks / TICKS_PER_MS
+            val startMs = transcodeFromMs ?: (resumeMs - RESUME_REWIND_MS).coerceAtLeast(0)
+            startTicks = startMs * TICKS_PER_MS
+            startedAt = SystemClock.elapsedRealtime()
+            if (transcodeFromMs == null && startMs > 0) resumedAt = startMs
+            val trackParams = player.trackSelectionParameters.buildUpon()
+            val audioLang = prefs.audioLang(seriesKey)
+            if (audioLang != null) trackParams.setPreferredAudioLanguage(audioLang)
+            when (val sub = prefs.subLang(seriesKey)) {
+                null -> {}
+                "" -> trackParams.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
+                else -> {
+                    trackParams.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                    trackParams.setPreferredTextLanguage(sub)
+                }
             }
+            player.trackSelectionParameters = trackParams.build()
+            player.setPlaybackSpeed(sessionSpeed)
+            player.setMediaItem(mediaItem, startMs)
+            player.prepare()
+            player.play()
+            launch { App.server.reportStart(id, sourceId, startMs * TICKS_PER_MS, transcoding, playSession) }
+        } finally {
+            prewarm?.close()
         }
-        player.trackSelectionParameters = trackParams.build()
-        player.setPlaybackSpeed(sessionSpeed)
-        player.setMediaItem(mediaItem, startMs)
-        player.prepare()
-        player.play()
-        launch { App.server.reportStart(id, sourceId, startMs * TICKS_PER_MS, transcoding, playSession) }
-        if (online) segments = runCatching { App.server.segments(id) }.getOrDefault(emptyList())
     }
 
     fun runtimeTicks(): Long? {
@@ -653,8 +734,8 @@ private fun Playback(
                     FilledTonalButton(onTranscode) { Text("Choppy? Transcode") }
                 }
             }
-            val downloads = rememberDownloadStatuses()
-            val season = siblings.filter { it.seasonId == item.seasonId }
+            val downloadsState = rememberDownloadStatusesState()
+            val season = remember(siblings, item.seasonId) { siblings.filter { it.seasonId == item.seasonId } }
             val listState = rememberLazyListState()
             // Scroll the playing episode into view once the list arrives. List item 0 is the title.
             LaunchedEffect(season.isNotEmpty()) {
@@ -672,7 +753,7 @@ private fun Playback(
                     if (overview != null) Text(overview, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(vertical = 8.dp))
                 }
                 items(season, key = { it.id }) { ep ->
-                    EpisodeRow(ep, downloads?.get(ep.id.toString()), highlighted = ep.id == item.id, onPlay = { onPlay(ep.id.toString()) },
+                    EpisodeRow(ep, statusesState = downloadsState, highlighted = ep.id == item.id, onPlay = { onPlay(ep.id.toString()) },
                         onStartOver = {
                             if (ep.id == item.id) player.seekTo(0)
                             else scope.launch {
@@ -754,9 +835,9 @@ private fun VideoSurface(
     val activity = LocalActivity.current!!
     val audio = remember { activity.getSystemService(AudioManager::class.java) }
     var controls by remember { mutableStateOf(true) }
-    var position by remember { mutableLongStateOf(0L) }
-    var duration by remember { mutableLongStateOf(0L) }
-    var buffered by remember { mutableLongStateOf(0L) }
+    val positionState = remember { mutableLongStateOf(0L) }
+    val durationState = remember { mutableLongStateOf(0L) }
+    val bufferedState = remember { mutableLongStateOf(0L) }
     var playing by remember { mutableStateOf(false) }
     var waiting by remember { mutableStateOf(true) }
     var overlay by remember { mutableStateOf<String?>(null) }
@@ -770,23 +851,25 @@ private fun VideoSurface(
             Pair(s.type, startMs until endMs)
         }
     }
-    // Derived state, so the 250 ms position tick doesn't recompose the whole surface while the controls are hidden.
-    val segment by remember(ranges) { derivedStateOf { ranges.firstOrNull { position in it.second } } }
+    // Derived state, so the 250 ms position tick doesn't recompose VideoSurface at all.
+    val segment by remember(ranges) { derivedStateOf { ranges.firstOrNull { positionState.longValue in it.second } } }
     var fastHold by remember { mutableStateOf(false) }
     val fastHolding by rememberUpdatedState(fastHold)
     val haptics = LocalHapticFeedback.current
 
     LaunchedEffect(player) {
         while (true) {
-            position = player.currentPosition
-            duration = player.duration.coerceAtLeast(0)
+            val pos = player.currentPosition
+            val dur = player.duration.coerceAtLeast(0)
+            positionState.longValue = pos
+            durationState.longValue = dur
             // The cached range is shown only with the controls. It is read off the main thread because cache lookups
             // wait on the fill worker's commit lock.
             var cached = 0L
             if (controls && cacheKey != null) {
-                cached = withContext(Dispatchers.IO) { Media.cachedUntilMs(cacheKey, position, duration) }
+                cached = withContext(Dispatchers.IO) { Media.cachedUntilMs(cacheKey, pos, dur) }
             }
-            buffered = maxOf(player.bufferedPosition, cached)
+            bufferedState.longValue = maxOf(player.bufferedPosition, cached)
             playing = player.isPlaying
             // The player is idle before the first prepare (subtitles are fetched first) and after an error.
             waiting = player.playbackState == Player.STATE_BUFFERING || player.playbackState == Player.STATE_IDLE
@@ -807,7 +890,10 @@ private fun VideoSurface(
         }
     }
     // The duration reads 0 until it is known (loading, reconnecting), and clamping to it would seek to the start.
-    fun clamp(ms: Long) = if (duration > 0) ms.coerceIn(0, duration) else ms.coerceAtLeast(0)
+    fun clamp(ms: Long): Long {
+        val d = durationState.longValue
+        return if (d > 0) ms.coerceIn(0, d) else ms.coerceAtLeast(0)
+    }
     LaunchedEffect(crop) {
         playerView.resizeMode = if (crop) AspectRatioFrameLayout.RESIZE_MODE_ZOOM else AspectRatioFrameLayout.RESIZE_MODE_FIT
     }
@@ -984,7 +1070,7 @@ private fun VideoSurface(
                                 val deltaMs = target - startPos
                                 val sign = if (deltaMs / 1000 < 0) "−" else "+"
                                 scrubTarget = target
-                                overlay = "$sign${formatMs(abs(deltaMs))} · ${formatMs(target)} / ${formatMs(duration)}"
+                                overlay = "$sign${formatMs(abs(deltaMs))} · ${formatMs(target)} / ${formatMs(durationState.longValue)}"
                                 change.consume()
                             }
                             axis == 2 && !fullscreen && prefs.gestureFullscreen -> change.consume()
@@ -1068,7 +1154,7 @@ private fun VideoSurface(
                 var onNext: (() -> Unit)? = null
                 if (next != null) onNext = { onPlay(next.id.toString()) }
                 Controls(
-                    player, position, duration, buffered, playing, fullscreen, transcoding, rotationLocked, title,
+                    player, positionState, durationState, bufferedState, playing, fullscreen, transcoding, rotationLocked, title,
                     onBack, onToggleFullscreen, onRotationLock, onTracksChosen, ::seekBy, onNext, skip,
                     onInteraction = { lastInteraction = System.currentTimeMillis() },
                     subtitleView = playerView.subtitleView,
@@ -1096,9 +1182,9 @@ private fun VideoSurface(
 @Composable
 private fun Controls(
     player: ExoPlayer,
-    position: Long,
-    duration: Long,
-    buffered: Long,
+    positionState: LongState,
+    durationState: LongState,
+    bufferedState: LongState,
     playing: Boolean,
     fullscreen: Boolean,
     transcoding: Boolean,
@@ -1117,9 +1203,9 @@ private fun Controls(
 ) {
     var menu by remember { mutableStateOf(false) }
     var sub by remember { mutableStateOf<String?>(null) }
-    var dragging by remember { mutableFloatStateOf(-1f) }
     var subtitleScale by remember { mutableIntStateOf(App.prefs.subtitleScale) }
     var audioDelayMs by remember { mutableIntStateOf(App.prefs.audioDelayMs) }
+    val chapterStarts = remember(chapters) { chapters.map { it.startMs } }
     // Keep the controls alive while the menu is open, since auto-hiding them would close it.
     LaunchedEffect(menu) {
         while (menu) {
@@ -1182,7 +1268,7 @@ private fun Controls(
                             }
                         }
                         "chapters" -> {
-                            val current = chapterAt(chapters.map { it.startMs }, position)
+                            val current = chapterAt(chapterStarts, positionState.longValue)
                             chapters.forEachIndexed { i, c ->
                                 Choice("${formatMs(c.startMs)}  ${c.name.ifEmpty { "Chapter ${i + 1}" }}", i == current) {
                                     player.seekTo(c.startMs)
@@ -1289,47 +1375,77 @@ private fun Controls(
             if (onNext != null) IconButton(onClick = onNext) { Icon(NextIcon, "Next episode", tint = Color.White) }
         }
 
-        Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(horizontal = 12.dp)) {
-            val shown = if (dragging >= 0) dragging.toLong() else position
-            val bufferText = if (duration > 0 && buffered >= duration - 2_000) "" else "  (buffered ${formatMs(buffered)})"
-            val chapterText = if (dragging >= 0 && chapters.isNotEmpty()) {
-                val i = chapterAt(chapters.map { it.startMs }, shown)
-                if (i >= 0) " · ${chapters[i].name.ifEmpty { "Chapter ${i + 1}" }}" else ""
-            } else ""
-            Text("${formatMs(shown)} / ${formatMs(duration)}$bufferText$chapterText", color = Color.White, style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.weight(1f)) {
-                    Canvas(Modifier.matchParentSize()) {
-                        if (duration <= 0 || buffered <= 0) return@Canvas
-                        val left = 10.dp.toPx()
-                        val end = left + (size.width - 2 * left) * (buffered.toFloat() / duration).coerceIn(0f, 1f)
-                        drawLine(
-                            color = Color.White.copy(alpha = 0.35f),
-                            start = Offset(left, center.y),
-                            end = Offset(end, center.y),
-                            strokeWidth = 4.dp.toPx(),
-                            cap = StrokeCap.Round,
-                        )
-                    }
-                    ChapterMarks(chapters, duration, Modifier.matchParentSize())
-                    Slider(
-                        value = shown.toFloat().coerceIn(0f, duration.toFloat().coerceAtLeast(1f)),
-                        valueRange = 0f..duration.toFloat().coerceAtLeast(1f),
-                        onValueChange = { value ->
-                            dragging = value
-                            onInteraction()
-                        },
-                        // D-pad steps can report finished without a change in between, so check [dragging].
-                        onValueChangeFinished = {
-                            if (dragging >= 0) player.seekToNearestKeyframe(dragging.toLong())
-                            dragging = -1f
-                        },
-                        colors = SliderDefaults.colors(inactiveTrackColor = Color.White.copy(alpha = 0.2f)),
-                        modifier = Modifier.fillMaxWidth(),
+        AndroidSeekBarSection(
+            player = player,
+            positionState = positionState,
+            durationState = durationState,
+            bufferedState = bufferedState,
+            chapters = chapters,
+            chapterStarts = chapterStarts,
+            skip = skip,
+            onInteraction = onInteraction,
+            modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(horizontal = 12.dp),
+        )
+    }
+}
+
+/** Isolated from [Controls] so the 250 ms position/buffer tick only recomposes the time text and seek bar. */
+@Composable
+private fun AndroidSeekBarSection(
+    player: ExoPlayer,
+    positionState: LongState,
+    durationState: LongState,
+    bufferedState: LongState,
+    chapters: List<Chapter>,
+    chapterStarts: List<Long>,
+    skip: Skip?,
+    onInteraction: () -> Unit,
+    modifier: Modifier,
+) {
+    var dragging by remember { mutableFloatStateOf(-1f) }
+    val position = positionState.longValue
+    val duration = durationState.longValue
+    val buffered = bufferedState.longValue
+    Column(modifier) {
+        val shown = if (dragging >= 0) dragging.toLong() else position
+        val bufferText = if (duration > 0 && buffered >= duration - 2_000) "" else "  (buffered ${formatMs(buffered)})"
+        val chapterText = if (dragging >= 0 && chapters.isNotEmpty()) {
+            val i = chapterAt(chapterStarts, shown)
+            if (i >= 0) " · ${chapters[i].name.ifEmpty { "Chapter ${i + 1}" }}" else ""
+        } else ""
+        Text("${formatMs(shown)} / ${formatMs(duration)}$bufferText$chapterText", color = Color.White, style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.weight(1f)) {
+                Canvas(Modifier.matchParentSize()) {
+                    if (duration <= 0 || buffered <= 0) return@Canvas
+                    val left = 10.dp.toPx()
+                    val end = left + (size.width - 2 * left) * (buffered.toFloat() / duration).coerceIn(0f, 1f)
+                    drawLine(
+                        color = Color.White.copy(alpha = 0.35f),
+                        start = Offset(left, center.y),
+                        end = Offset(end, center.y),
+                        strokeWidth = 4.dp.toPx(),
+                        cap = StrokeCap.Round,
                     )
                 }
-                if (skip != null) SkipButton(skip, Modifier.padding(start = 8.dp))
+                ChapterMarks(chapters, duration, Modifier.matchParentSize())
+                Slider(
+                    value = shown.toFloat().coerceIn(0f, duration.toFloat().coerceAtLeast(1f)),
+                    valueRange = 0f..duration.toFloat().coerceAtLeast(1f),
+                    onValueChange = { value ->
+                        dragging = value
+                        onInteraction()
+                    },
+                    // D-pad steps can report finished without a change in between, so check [dragging].
+                    onValueChangeFinished = {
+                        if (dragging >= 0) player.seekToNearestKeyframe(dragging.toLong())
+                        dragging = -1f
+                    },
+                    colors = SliderDefaults.colors(inactiveTrackColor = Color.White.copy(alpha = 0.2f)),
+                    modifier = Modifier.fillMaxWidth(),
+                )
             }
+            if (skip != null) SkipButton(skip, Modifier.padding(start = 8.dp))
         }
     }
 }

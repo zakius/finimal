@@ -5,13 +5,23 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.withPermit
 import java.io.IOException
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.abs
 import java.time.Instant
 import java.time.LocalDateTime
@@ -121,8 +131,16 @@ class Server {
      */
     fun now() = System.currentTimeMillis() + clockOffsetMs
 
-    /** Keeps reports in order, so a slow progress report can't land after the stop. */
-    private val reports = Mutex()
+    /** Keeps reports per item in order, so a slow progress report can't land after the stop while allowing bulk flushes to run in parallel. */
+    private val itemLocks = java.util.concurrent.ConcurrentHashMap<String, Mutex>()
+    private fun itemLock(id: String) = itemLocks.computeIfAbsent(id) { Mutex() }
+
+    /** Counts play-state writes queued for [App.disk], so [flush] knows not to skip while a stop is still landing. */
+    private val inFlightRecords = AtomicInteger(0)
+    private val recordVersion = AtomicLong(0)
+
+    /** True when unsynced local play states exist or a record write is still queued on [App.disk]. */
+    fun hasPendingWork(): Boolean = inFlightRecords.get() > 0 || !App.pendingLoadedEmpty()
 
     /** The SDK's HTTP calls block the calling thread. */
     private suspend fun <T> io(block: suspend CoroutineScope.() -> T): T = withContext(Dispatchers.IO, block)
@@ -155,6 +173,7 @@ class Server {
             throw e
         }
         recorded.clear()
+        AppCache.clear()
         synchronized(App) {
             val token = auth.accessToken!!
             val user = auth.user!!
@@ -169,6 +188,7 @@ class Server {
     /** Another saved account takes over; its lists, downloads and unsynced progress are its own. */
     fun switchTo(a: Account) {
         recorded.clear()
+        AppCache.clear()
         synchronized(App) { prefs.switchTo(a) }
         api.update(accessToken = a.token)
         App.downloads?.accountChanged()
@@ -179,6 +199,7 @@ class Server {
     /** Removes the current account; [keepAccount] only ends its session, keeping its name and PIN for the next login. */
     fun logout(keepAccount: Boolean = false) {
         recorded.clear()
+        AppCache.clear()
         ListSnapshots.clear() // Another account's lists must not show, even briefly.
         synchronized(App) { if (keepAccount) prefs.endSession() else prefs.logout() }
         api.update(accessToken = null)
@@ -206,6 +227,7 @@ class Server {
             parentId = if (parentId != null) UUID.fromString(parentId) else null,
             recursive = true,
             includeItemTypes = listOf(BaseItemKind.MOVIE, BaseItemKind.SERIES),
+            fields = listOf(ItemFields.DATE_CREATED, ItemFields.SORT_NAME),
             sortBy = listOf(sort.by, ItemSortBy.SORT_NAME),
             sortOrder = listOf(sort.order, SortOrder.ASCENDING),
             isPlayed = if (unplayedOnly) false else null,
@@ -257,13 +279,19 @@ class Server {
 
     private suspend fun userData(api: ApiClient, userId: UUID, ids: List<UUID>): Map<UUID, UserItemDataDto?> = io {
         ids.chunked(100).flatMap { chunk ->
-            val items = api.libraryApi.getItems(userId = userId, ids = chunk, enableUserData = true, enableImages = false).content.items
+            val items = api.libraryApi.getItems(
+                userId = userId,
+                ids = chunk,
+                enableUserData = true,
+                enableImages = false,
+                enableTotalRecordCount = false,
+            ).content.items
             items.map { item -> item.id to item.userData }
         }.toMap()
     }
 
     suspend fun seasons(seriesId: String): List<BaseItemDto> =
-        io { api.showApi.getSeasons(UUID.fromString(seriesId), userId, enableUserData = true).content.items }
+        io { api.showApi.getSeasons(UUID.fromString(seriesId), userId, enableUserData = true, enableImages = false).content.items }
 
     /**
      * All episodes of a series in season order, or only one season's. [sources] adds media sources (with file sizes)
@@ -275,6 +303,8 @@ class Server {
             userId,
             fields = if (sources) listOf(ItemFields.OVERVIEW, ItemFields.MEDIA_SOURCES) else emptyList(),
             seasonId = if (seasonId != null) UUID.fromString(seasonId) else null,
+            enableImageTypes = listOf(ImageType.PRIMARY),
+            imageTypeLimit = 1,
             enableUserData = true,
         ).content.items }
 
@@ -316,7 +346,7 @@ class Server {
         "${prefs.baseUrl}/Videos/$id/$mediaSourceId/Subtitles/${stream.index}/0/Stream.${subtitleExt(stream)}?ApiKey=${prefs.token}"
 
     suspend fun reportStart(id: String, mediaSourceId: String, positionTicks: Long, transcoding: Boolean, playSession: String) = io {
-        reports.withLock {
+        itemLock(id).withLock {
             runCatching {
                 api.sessionApi.reportPlaybackStart(
                     PlaybackStartInfo(
@@ -332,14 +362,14 @@ class Server {
 
     /**
      * Saves locally first, then tells the server. A failed report leaves the local entry for [flush].
-     * If a newer local change replaced this state while the report waited for [reports], the report is
+     * If a newer local change replaced this state while the report waited for [itemLock], the report is
      * skipped: the server dates a report on arrival, so the stale report would beat that newer change.
      */
     suspend fun reportProgress(id: String, mediaSourceId: String, positionTicks: Long, paused: Boolean, transcoding: Boolean, serverPlayed: Boolean, playSession: String) = io {
         val played = knownPlayed(id, serverPlayed)
         val state = PlayState(positionTicks, played, now())
         val owner = record(id, state) ?: return@io
-        reports.withLock {
+        itemLock(id).withLock {
             if (owner.pending.get(id) == state) {
                 runCatching {
                     owner.api.sessionApi.reportPlaybackProgress(
@@ -360,14 +390,21 @@ class Server {
      * then reports the stop. It always sends a position, because without one the server marks the item played at 0.
      */
     fun reportStop(id: String, mediaSourceId: String, positionTicks: Long, runtimeTicks: Long?, serverPlayed: Boolean, playSession: String) {
+        inFlightRecords.incrementAndGet()
         App.platform.scope.launch(App.disk) {
-            val previous = knownPlayed(id, serverPlayed)
-            val state = ResumeRules.onStop(PlayState(0, previous, null), positionTicks, runtimeTicks, now())
-            val owner = record(id, state)
+            val owner: Owner?
+            val state: PlayState
+            try {
+                val previous = knownPlayed(id, serverPlayed)
+                state = ResumeRules.onStop(PlayState(0, previous, null), positionTicks, runtimeTicks, now())
+                owner = recordOnDisk(id, state)
+            } finally {
+                inFlightRecords.decrementAndGet()
+            }
             io {
                 // Skipped when superseded, as in reportProgress. The server then ends the playback session on its own.
                 if (owner != null) {
-                    reports.withLock {
+                    itemLock(id).withLock {
                         if (owner.pending.get(id) == state) {
                             runCatching {
                                 owner.api.sessionApi.reportPlaybackStopped(
@@ -397,19 +434,52 @@ class Server {
         return latest?.played ?: serverPlayed
     }
 
-    /**
-     * Every local play-state change goes through here: it is queued for the server and kept with the download
-     * for offline resume. Returns the account [state] was queued for, or null when logged out, in which case
-     * the state waits in the last account's file.
-     */
-    private suspend fun record(id: String, state: PlayState): Owner? = withContext(App.disk) {
+    private fun recordOnDisk(id: String, state: PlayState): Owner? {
         val owner = owner()
         recorded[id] = state
         val pending = owner?.pending ?: App.pending
         pending.put(id, state)
         App.downloads?.rememberState(id, state)
+        recordVersion.incrementAndGet()
         localChanges++
-        owner
+        return owner
+    }
+
+    /**
+     * Every local play-state change goes through here: it is queued for the server and kept with the download
+     * for offline resume. Returns the account [state] was queued for, or null when logged out, in which case
+     * the state waits in the last account's file.
+     */
+    private suspend fun record(id: String, state: PlayState): Owner? {
+        inFlightRecords.incrementAndGet()
+        return try {
+            withContext(App.disk) { recordOnDisk(id, state) }
+        } finally {
+            inFlightRecords.decrementAndGet()
+        }
+    }
+
+    /** Records many states in one atomic disk write and one Compose invalidation. */
+    private suspend fun recordAll(entries: Map<String, PlayState>): Owner? {
+        if (entries.isEmpty()) return owner()
+        inFlightRecords.incrementAndGet()
+        return try {
+            withContext(App.disk) {
+                val owner = owner()
+                recorded.putAll(entries)
+                val pending = owner?.pending ?: App.pending
+                pending.putAll(entries)
+                val downloads = App.downloads
+                if (downloads != null) {
+                    for ((id, state) in entries) downloads.rememberState(id, state)
+                }
+                recordVersion.incrementAndGet()
+                localChanges++
+                owner
+            }
+        } finally {
+            inFlightRecords.decrementAndGet()
+        }
     }
 
     /** "Start over" as a saved position of 0, so a restored back stack never restarts the item a second time. */
@@ -431,79 +501,131 @@ class Server {
      * viewer would pick up: the last one marked played, or the first one marked unplayed.
      */
     suspend fun setPlayed(ids: List<String>, played: Boolean) {
+        if (ids.isEmpty()) return
         val now = now()
+        val entries = LinkedHashMap<String, PlayState>(ids.size)
         ids.forEachIndexed { i, id ->
             val stepsBack = if (played) ids.lastIndex - i else i
-            record(id, PlayState(0, played, now - stepsBack))
+            entries[id] = PlayState(0, played, now - stepsBack)
         }
+        recordAll(entries)
         flush()
     }
+
+    private val flushSyncLock = Any()
+    private var activeFlush: Pair<Long, Deferred<Throwable?>>? = null
 
     /**
      * Pushes pending states; the newer LastPlayedDate wins. One failing item doesn't hold up the
      * rest. An item the server doesn't have (deleted, or from a server logged into before) is
      * dropped, and a rejected token ends the session. An unreachable server stops the whole flush
      * rather than timing out once per item. Returns the first failure, null when all went through.
+     *
+     * Fast-paths to null when nothing is pending or queued on [App.disk], and coalesces concurrent
+     * callers when no new local state was recorded since the running flush started.
      */
-    suspend fun flush(): Throwable? = io {
-        flushing.withLock {
-            val snapshot = withContext(App.disk) {
-                val current = owner()
-                if (current == null) null else current to current.pending.all()
-            }
-            if (snapshot == null) return@withLock null
-            val (owner, pending) = snapshot
-            if (pending.isEmpty()) return@withLock null
-            // A 401 for an account we have switched away from must not end the session of the account switched to.
-            fun expireOwner() {
-                if (owner()?.api === owner.api) expire()
-            }
-            // One request fetches every item's server state. An item the server lacks is absent here, and its push returns 404.
-            val serverStates = try {
-                userData(owner.api, owner.userId, pending.keys.map(UUID::fromString))
-            } catch (e: Exception) {
-                if (e is InvalidStatusException && e.status == 401) expireOwner()
-                return@withLock e
-            }
-            var failure: Throwable? = null
-            for ((id, local) in pending) {
-                // Push under [reports], and only while [local] is still pending. A report that landed after
-                // serverStates was fetched is newer than both, and pushing [local] would overwrite it.
-                runCatching {
-                    reports.withLock {
-                        val uuid = UUID.fromString(id)
-                        if (owner.pending.get(id) == local && shouldPush(local, serverStates[uuid].toPlayState())) {
-                            val lastPlayedMs = local.lastPlayedMs
-                            val lastPlayedDate = if (lastPlayedMs == null) null else LocalDateTime.ofInstant(Instant.ofEpochMilli(lastPlayedMs), ZoneId.systemDefault())
-                            owner.api.userDataApi.updateItemUserData(
-                                uuid, owner.userId,
-                                UpdateUserItemDataDto(
-                                    playbackPositionTicks = local.positionTicks,
-                                    played = local.played,
-                                    lastPlayedDate = lastPlayedDate,
-                                ),
-                            )
-                        }
-                    }
-                }.onSuccess {
-                    confirm(owner, id, local)
-                }.onFailure { e ->
-                    val status = (e as? InvalidStatusException)?.status
-                    when (status) {
-                        404 -> confirm(owner, id, local)
-                        401 -> {
-                            expireOwner()
-                            return@withLock e
-                        }
-                        else -> {
-                            if (failure == null) failure = e
-                            if (unreachable(e)) return@withLock e
-                        }
+    suspend fun flush(): Throwable? {
+        if (!hasPendingWork()) return null
+        val version = recordVersion.get()
+        val joined = synchronized(flushSyncLock) {
+            val running = activeFlush
+            if (running != null && running.first == version && running.second.isActive) {
+                running.second
+            } else {
+                val created = App.platform.scope.async(Dispatchers.IO, start = CoroutineStart.LAZY) {
+                    runFlush()
+                }
+                activeFlush = version to created
+                created.invokeOnCompletion {
+                    synchronized(flushSyncLock) {
+                        if (activeFlush?.second === created) activeFlush = null
                     }
                 }
+                created
             }
-            failure
         }
+        joined.start()
+        return joined.await()
+    }
+
+    private suspend fun runFlush(): Throwable? = flushing.withLock {
+        val snapshot = withContext(App.disk) {
+            val current = owner()
+            if (current == null) null else current to current.pending.all()
+        }
+        if (snapshot == null) return@withLock null
+        val (owner, pending) = snapshot
+        if (pending.isEmpty()) return@withLock null
+        // A 401 for an account we have switched away from must not end the session of the account switched to.
+        fun expireOwner() {
+            if (owner()?.api === owner.api) expire()
+        }
+        // One request fetches every item's server state. An item the server lacks is absent here, and its push returns 404.
+        val serverStates = try {
+            userData(owner.api, owner.userId, pending.keys.map(UUID::fromString))
+        } catch (e: Exception) {
+            if (e is InvalidStatusException && e.status == 401) expireOwner()
+            return@withLock e
+        }
+        val confirmed = java.util.concurrent.ConcurrentHashMap<String, PlayState>()
+        val firstFailure = AtomicReference<Throwable?>(null)
+        val abortError = AtomicReference<Throwable?>(null)
+        val aborted = AtomicBoolean(false)
+        val semaphore = Semaphore(4)
+        try {
+            coroutineScope {
+                pending.entries.map { (id, local) ->
+                    async {
+                        if (aborted.get()) return@async
+                        semaphore.withPermit {
+                            if (aborted.get()) return@withPermit
+                            runCatching {
+                                itemLock(id).withLock {
+                                    val uuid = UUID.fromString(id)
+                                    if (owner.pending.get(id) == local && shouldPush(local, serverStates[uuid].toPlayState())) {
+                                        val lastPlayedMs = local.lastPlayedMs
+                                        val lastPlayedDate = if (lastPlayedMs == null) null else LocalDateTime.ofInstant(Instant.ofEpochMilli(lastPlayedMs), ZoneId.systemDefault())
+                                        owner.api.userDataApi.updateItemUserData(
+                                            uuid, owner.userId,
+                                            UpdateUserItemDataDto(
+                                                playbackPositionTicks = local.positionTicks,
+                                                played = local.played,
+                                                lastPlayedDate = lastPlayedDate,
+                                            ),
+                                        )
+                                    }
+                                }
+                            }.onSuccess {
+                                confirmed[id] = local
+                            }.onFailure { e ->
+                                val status = (e as? InvalidStatusException)?.status
+                                when (status) {
+                                    404 -> confirmed[id] = local
+                                    401 -> {
+                                        expireOwner()
+                                        abortError.compareAndSet(null, e)
+                                        aborted.set(true)
+                                    }
+                                    else -> {
+                                        firstFailure.compareAndSet(null, e)
+                                        if (unreachable(e)) {
+                                            abortError.compareAndSet(null, e)
+                                            aborted.set(true)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }.awaitAll()
+            }
+        } finally {
+            if (confirmed.isNotEmpty()) {
+                owner.pending.confirmAll(confirmed)
+                localChanges++
+            }
+        }
+        abortError.get() ?: firstFailure.get()
     }
 
     /** One flush at a time, because two overlapping ones could push an older state after a newer one. */
@@ -514,19 +636,21 @@ class Server {
     }
 }
 
+private val systemZone: ZoneId = ZoneId.systemDefault()
+
 // The SDK's LocalDateTime is in the device's time zone, not UTC. Reading it as UTC would shift every date
 // by the zone offset and break the newer-wins rule.
 fun UserItemDataDto?.toPlayState(): PlayState? {
     if (this == null) return null
     val date = lastPlayedDate
-    val lastPlayedMs = if (date == null) null else date.atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
+    val lastPlayedMs = if (date == null) null else date.atZone(systemZone).toInstant().toEpochMilli()
     return PlayState(playbackPositionTicks, played, lastPlayedMs)
 }
 
 /** The server state with any unsynced local state on top. The Boolean is true when the local state differs from the server's. */
 fun BaseItemDto.localState(): Pair<PlayState?, Boolean> {
     App.server.localChanges // Reading this makes a composable caller redraw on the next local change.
-    val local = App.pending.get(id.toString())
+    val local = if (App.pendingLoadedEmpty()) null else App.pending.get(id.toString())
     val state = local ?: userData.toPlayState()
     return Pair(state, local != null)
 }

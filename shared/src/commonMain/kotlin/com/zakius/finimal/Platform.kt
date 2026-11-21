@@ -4,10 +4,14 @@ import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.mutableStateOf
 import finimal.core.PendingStore
 import java.io.File
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import okhttp3.ConnectionPool
+import okhttp3.Dispatcher
 import okhttp3.OkHttpClient
 import org.jellyfin.sdk.JellyfinOptions
+import org.jellyfin.sdk.model.api.BaseItemDto
 
 /** What the shared code needs from the app it runs in, Android's or the desktop's. Set as [App.platform] at start. */
 interface Platform {
@@ -44,6 +48,12 @@ interface Platform {
     fun evictBuffer()
     /** Deletes all unpinned, non-playing entries from the playback buffer. */
     fun clearBuffer()
+    /** True when the active network is metered (cellular, etc.); speculative network prefetches back off. */
+    val isMetered: Boolean get() = false
+    /** Pre-warms Coil image requests at original size. With [diskOnly], only decodes already-cached disk entries. */
+    fun prefetchImages(urls: List<String>, diskOnly: Boolean) {}
+    /** Pre-fetches sideloaded subtitle files to disk for instant playback start. */
+    suspend fun prefetchSubtitles(item: BaseItemDto) {}
 }
 
 /** Settings storage: SharedPreferences on Android, a JSON file on the desktop. Numbers come back as any [Number]. */
@@ -63,7 +73,13 @@ object App {
     /** Shared by the SDK, images and the player, so they reuse connections to the server. */
     val http by lazy {
         platform.beforeHttp()
-        OkHttpClient()
+        OkHttpClient.Builder()
+            .connectionPool(ConnectionPool(16, 5, TimeUnit.MINUTES))
+            .dispatcher(Dispatcher().apply {
+                maxRequests = 64
+                maxRequestsPerHost = 12
+            })
+            .build()
     }
     val downloads get() = platform.downloads
     /** The remote-first interface: no touch-only controls, D-pad keys in the player, TV-safe margins. */
@@ -128,8 +144,17 @@ object App {
         pendingAccount = account
         store
     }
-    private var pendingStore: PendingStore? = null
-    private var pendingAccount: Pair<String?, String?>? = null
+
+    /** Lock-free check: true when the current account's pending store is loaded in memory and empty. */
+    fun pendingLoadedEmpty(): Boolean {
+        val current = pendingStore ?: return false
+        val uid = prefs.userId
+        if (uid != null && pendingAccount != (prefs.baseUrl to uid)) return false
+        return current.isEmpty()
+    }
+
+    @Volatile private var pendingStore: PendingStore? = null
+    @Volatile private var pendingAccount: Pair<String?, String?>? = null
 
     /**
      * IO one task at a time, in the order submitted. Play-state records and [Server.flush]'s read

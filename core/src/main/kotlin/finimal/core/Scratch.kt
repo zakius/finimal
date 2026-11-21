@@ -114,6 +114,29 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
         private var lowSpace = false
         private var gone = false
         private var touched = 0L
+        /** Cached result of [target], invalidated whenever demands, presence, length or error flags change. */
+        private var targetDirty = true
+        private var cachedTarget: Int? = null
+        private var waiters = 0
+
+        private fun invalidateTarget() {
+            targetDirty = true
+        }
+
+        @Suppress("PLATFORM_CLASS_MAPPED_TO_KOTLIN")
+        private fun notifyWaiters() {
+            if (waiters > 0) (this as Object).notifyAll()
+        }
+
+        @Suppress("PLATFORM_CLASS_MAPPED_TO_KOTLIN")
+        private fun awaitSignal(timeoutMs: Long = 0L) {
+            waiters++
+            try {
+                if (timeoutMs > 0L) (this as Object).wait(timeoutMs) else (this as Object).wait()
+            } finally {
+                waiters--
+            }
+        }
 
         init {
             for (f in folder.listFiles().orEmpty()) {
@@ -183,6 +206,7 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
             error = null
             fatal = false
             lowSpace = false
+            invalidateTarget()
             if (filler == null) filler = thread(name = "fill-$key", isDaemon = true) { fill() }
             wake()
             return d
@@ -190,13 +214,15 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
 
         internal fun drop(d: Demand) = synchronized(this) {
             demands -= d
+            invalidateTarget()
             wake()
         }
 
         /** Called when the demands change. The filler picks its target again, and a fetch nobody wants any more is cancelled. */
         @Synchronized
         internal fun wake() {
-            (this as Object).notifyAll()
+            invalidateTarget()
+            notifyWaiters()
             if (writing >= 0 && target() != writing) call?.cancel()
         }
 
@@ -212,25 +238,64 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
         internal fun shutDown() {
             gone = true
             demands.clear()
+            invalidateTarget()
             call?.cancel()
-            (this as Object).notifyAll()
+            notifyWaiters()
         }
+
+        /**
+         * Sequential reader that keeps the current completed chunk's [FileChannel] open across reads, avoiding an
+         * open/close syscall pair on every 256 KB slice. Incomplete `.part` files are still opened per read so the
+         * filler can rename them freely on every OS.
+         */
+        inner class Reader internal constructor() : Closeable {
+            private var openChunk = -1
+            private var openChannel: FileChannel? = null
+
+            fun read(pos: Long, buf: ByteArray, off: Int, len: Int, timeoutMs: Long): Int =
+                readInternal(pos, buf, off, len, timeoutMs, this)
+
+            internal fun channelFor(chunkIndex: Int, file: File): FileChannel {
+                val existing = openChannel
+                if (existing != null && openChunk == chunkIndex) return existing
+                close()
+                return FileChannel.open(file.toPath()).also {
+                    openChunk = chunkIndex
+                    openChannel = it
+                }
+            }
+
+            override fun close() {
+                openChannel?.let { runCatching { it.close() } }
+                openChannel = null
+                openChunk = -1
+            }
+        }
+
+        fun reader(): Reader = Reader()
 
         /**
          * Reads up to [len] bytes at [pos], waiting up to [timeoutMs] for the filler. Returns -1 past the end. Throws
          * the filler's failure, or [InterruptedIOException] when its last try failed or nothing came in time.
          */
-        fun read(pos: Long, buf: ByteArray, off: Int, len: Int, timeoutMs: Long): Int {
+        fun read(pos: Long, buf: ByteArray, off: Int, len: Int, timeoutMs: Long): Int =
+            readInternal(pos, buf, off, len, timeoutMs, null)
+
+        private fun readInternal(pos: Long, buf: ByteArray, off: Int, len: Int, timeoutMs: Long, reader: Reader?): Int {
             val deadline = System.currentTimeMillis() + timeoutMs
             while (true) {
                 val i = (pos / chunkSize).toInt()
                 val inChunk = pos - i.toLong() * chunkSize
+                var isCompleteChunk = false
                 val (file, available) = synchronized(this) {
                     while (true) {
                         if (gone) throw InterruptedIOException("closed")
                         if (length in 0..pos) return -1
                         when {
-                            length >= 0 && present[i] -> return@synchronized chunkFile(i) to chunkLength(i) - inChunk
+                            length >= 0 && present[i] -> {
+                                isCompleteChunk = true
+                                return@synchronized chunkFile(i) to chunkLength(i) - inChunk
+                            }
                             writing == i && written > inChunk -> return@synchronized partFile(i) to written - inChunk
                             fatal -> throw error!!
                             // The filler's last try failed (no network, or the server is down). Fail now rather than at
@@ -243,15 +308,20 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
                             if (lastError != null) throw InterruptedIOException("no data: ${lastError.message}")
                             throw InterruptedIOException("no data")
                         }
-                        (this as Object).wait(wait)
+                        awaitSignal(wait)
                     }
                     @Suppress("UNREACHABLE_CODE") error("unreachable")
                 }
                 // On Windows, only a FileChannel (not a RandomAccessFile) lets the filler rename the part while it is open.
                 val count = minOf(len.toLong(), available).toInt()
                 val n = try {
-                    FileChannel.open(file.toPath()).use { channel -> channel.read(ByteBuffer.wrap(buf, off, count), inChunk) }
+                    if (isCompleteChunk && reader != null) {
+                        reader.channelFor(i, file).read(ByteBuffer.wrap(buf, off, count), inChunk)
+                    } else {
+                        FileChannel.open(file.toPath()).use { channel -> channel.read(ByteBuffer.wrap(buf, off, count), inChunk) }
+                    }
                 } catch (e: IOException) {
+                    if (isCompleteChunk && reader != null) reader.close()
                     // Between the check above and this open, the filler may have renamed the part to its chunk, or
                     // deleted it to start over. Windows reports a part being deleted as AccessDenied. Retry until the deadline.
                     val partMoved = e is NoSuchFileException || e is AccessDeniedException
@@ -274,7 +344,7 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
                 if (lastError != null) throw InterruptedIOException("no answer: ${lastError.message}")
                 val wait = deadline - System.currentTimeMillis()
                 if (wait <= 0) throw InterruptedIOException("no answer")
-                (this as Object).wait(wait)
+                awaitSignal(wait)
             }
             length
         }
@@ -304,7 +374,7 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
                     synchronized(this) {
                         val lastError = error
                         if (lastError != null && now - lastProgress > stallMs) throw lastError
-                        if (!complete) (this as Object).wait(1_000)
+                        if (!complete) awaitSignal(1_000)
                     }
                 }
             }
@@ -321,6 +391,14 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
 
         /** The next chunk to fetch: the first missing one in the most pressing demand's range. Among readers, the newest goes first. */
         private fun target(): Int? {
+            if (!targetDirty) return cachedTarget
+            val result = computeTarget()
+            cachedTarget = result
+            targetDirty = false
+            return result
+        }
+
+        private fun computeTarget(): Int? {
             if (gone || fatal) return null
             val eligible = demands.filter { d -> !lowSpace || d.priority == Priority.READ }
             val order = eligible.sortedWith(compareBy<Demand> { d -> d.priority }.thenByDescending { d -> d.seq })
@@ -354,7 +432,7 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
                             filler = null
                             return
                         }
-                        (this as Object).wait()
+                        awaitSignal()
                     }
                     @Suppress("UNREACHABLE_CODE") error("unreachable")
                 }
@@ -370,7 +448,8 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
                         } else {
                             lowSpace = true
                         }
-                        (this as Object).notifyAll()
+                        invalidateTarget()
+                        notifyWaiters()
                     }
                 } catch (e: WrongFile) {
                     fail(e)
@@ -402,16 +481,17 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
         private fun fail(e: IOException) = synchronized(this) {
             error = e
             fatal = true
-            (this as Object).notifyAll()
+            invalidateTarget()
+            notifyWaiters()
         }
 
         private fun backOff(e: IOException, attempt: Int) = synchronized(this) {
             error = e
-            (this as Object).notifyAll()
+            notifyWaiters()
             // A new demand, such as a seek or a retry, ends the wait early.
             if (!gone && demands.isNotEmpty()) {
                 val delays = longArrayOf(1_000, 2_000, 4_000, 8_000, 16_000, 30_000)
-                (this as Object).wait(delays[minOf(attempt, 5)])
+                awaitSignal(delays[minOf(attempt, 5)])
             }
         }
 
@@ -452,12 +532,13 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
                             throw StorageError(e)
                         }
                         length = total
-                        (this as Object).notifyAll()
+                        invalidateTarget()
+                        notifyWaiters()
                     }
                 }
                 val input = r.body.byteStream()
                 val buf = ByteArray(64 * 1024)
-                var pos = begin!!
+                var pos = begin
                 while (pos < length) {
                     val i = (pos / chunkSize).toInt()
                     val end = i.toLong() * chunkSize + chunkLength(i)
@@ -502,7 +583,7 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
                             pos += n
                             synchronized(this) {
                                 written += n
-                                (this as Object).notifyAll()
+                                notifyWaiters()
                                 // Nobody wants this chunk any more (a seek elsewhere, or everyone left).
                                 if (target() != i) return stored
                             }
@@ -521,7 +602,8 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
                         writing = -1
                         written = 0
                         stored = true
-                        (this as Object).notifyAll()
+                        invalidateTarget()
+                        notifyWaiters()
                     }
                     touch()
                 }

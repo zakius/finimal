@@ -6,6 +6,8 @@ import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.util.UUID
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.concurrent.thread
 
 /**
@@ -17,6 +19,10 @@ class ScratchServer(private val scratch: () -> Scratch, private val ahead: Long 
     // Not getLoopbackAddress(), which on Android can be ::1, and the 127.0.0.1 in [url] doesn't reach that.
     private val socket = ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"))
     private val token = UUID.randomUUID().toString()
+    private val clientNum = AtomicInteger(0)
+    private val pool = Executors.newCachedThreadPool { task ->
+        Thread(task, "scratch-client-${clientNum.incrementAndGet()}").apply { isDaemon = true }
+    }
 
     init {
         thread(name = "scratch-server", isDaemon = true) {
@@ -26,13 +32,17 @@ class ScratchServer(private val scratch: () -> Scratch, private val ahead: Long 
                 } catch (e: IOException) {
                     break
                 }
-                thread(name = "scratch-client", isDaemon = true) {
-                    // The player often hangs up mid-body, on a seek or after probing the index at the end. Swallow it,
-                    // because on Android an exception escaping a thread kills the app.
-                    try {
-                        client.use(::serve)
-                    } catch (e: IOException) {
+                try {
+                    pool.execute {
+                        // The player often hangs up mid-body, on a seek or after probing the index at the end. Swallow it,
+                        // because on Android an exception escaping a thread kills the app.
+                        try {
+                            client.use(::serve)
+                        } catch (e: IOException) {
+                        }
                     }
+                } catch (e: java.util.concurrent.RejectedExecutionException) {
+                    runCatching { client.close() }
                 }
             }
         }
@@ -41,9 +51,13 @@ class ScratchServer(private val scratch: () -> Scratch, private val ahead: Long 
     /** Works only for an entry whose [Scratch.Entry.source] is set. */
     fun url(key: String) = "http://127.0.0.1:${socket.localPort}/$token/$key"
 
-    override fun close() = socket.close()
+    override fun close() {
+        socket.close()
+        pool.shutdownNow()
+    }
 
     private fun serve(client: Socket) {
+        client.tcpNoDelay = true
         client.soTimeout = 30_000
         val input = client.getInputStream().bufferedReader(Charsets.ISO_8859_1)
         val request = input.readLine()?.split(' ') ?: return
@@ -101,17 +115,19 @@ class ScratchServer(private val scratch: () -> Scratch, private val ahead: Long 
             val buf = ByteArray(256 * 1024)
             var pos = from
             // A failure after the headers can only cut the body short; the player sees that and reconnects.
-            while (pos <= to) {
-                val len = minOf(buf.size.toLong(), to - pos + 1).toInt()
-                val n = try {
-                    entry.read(pos, buf, 0, len, waitMs)
-                } catch (e: IOException) {
-                    return
+            entry.reader().use { reader ->
+                while (pos <= to) {
+                    val len = minOf(buf.size.toLong(), to - pos + 1).toInt()
+                    val n = try {
+                        reader.read(pos, buf, 0, len, waitMs)
+                    } catch (e: IOException) {
+                        return
+                    }
+                    if (n < 0) return
+                    out.write(buf, 0, n)
+                    pos += n
+                    demand.moveTo(pos)
                 }
-                if (n < 0) return
-                out.write(buf, 0, n)
-                pos += n
-                demand.moveTo(pos)
             }
             out.flush()
         }
