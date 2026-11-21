@@ -38,12 +38,10 @@
             android:name="androidx.work.impl.foreground.SystemForegroundService"
             android:foregroundServiceType="dataSync"
             tools:node="merge" />
-        <!-- Start-up steps that would run before App.onCreate. WorkManager starts when first used instead (App is its
-             Configuration.Provider). emoji2 would look up a downloadable emoji font (package manager calls) and lay
-             text out again when it arrives; the system font's emoji are used instead. -->
-        <provider android:name="androidx.startup.InitializationProvider" android:authorities="${applicationId}.androidx-startup" tools:node="merge">
-            <meta-data android:name="androidx.work.WorkManagerInitializer" tools:node="remove" />
-            <meta-data android:name="androidx.emoji2.text.EmojiCompatInitializer" tools:node="remove" />
-        </provider>
+        <!-- Remove androidx-startup's ContentProvider completely so zero ContentProviders run before Application.onCreate:
+             WorkManager initializes on first use (Configuration.Provider), emoji2 is unused, ProcessLifecycleOwner is not
+             used, OkHttp's PlatformRegistry is set lazily before App.http is built, and ProfileInstaller runs after the
+             first frame on API < 35 (Android 15+ compiles assets/art-profile/baseline.prof at install time). -->
+        <provider android:name="androidx.startup.InitializationProvider" android:authorities="${applicationId}.androidx-startup" tools:node="remove" />
     </application>
 </manifest>

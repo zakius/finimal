@@ -1,32 +1,50 @@
-# Code ART compiles ahead of time: finimal's own and the libraries its launch and first list load run through.
-# Compose, WorkManager and the other androidx libraries bring their own rules. The player's libraries (ExoPlayer,
-# FFmpeg, libass) are left out but for the codec list read after the first frame: they run when something plays.
+# Code ART compiles ahead of time.
+# Startup ('S' + class entries L...;) is restricted to the cold-start fast path so base.art (AppImage) stays tiny
+# and loads fast during bindApplication. Hot post-startup code (first list load, navigation, Compose Material3) is
+# marked 'HP' so ART compiles it AOT into base.odex without eagerly loading its classes into the startup AppImage.
 # tools/release.sh embeds the merged profile so ART compiles it when the APK is installed (Android 15+).
-HSPLcom/zakius/finimal/**->**(**)**
-Lcom/zakius/finimal/**;
-HSPLfinimal/core/**->**(**)**
-Lfinimal/core/**;
-HSPLorg/jellyfin/sdk/**->**(**)**
-Lorg/jellyfin/sdk/**;
-HSPLio/github/oshai/kotlinlogging/**->**(**)**
-Lio/github/oshai/kotlinlogging/**;
-HSPLkotlinx/serialization/**->**(**)**
-Lkotlinx/serialization/**;
-HSPLkotlinx/coroutines/**->**(**)**
-Lkotlinx/coroutines/**;
-HSPLokhttp3/**->**(**)**
-Lokhttp3/**;
-HSPLokio/**->**(**)**
-Lokio/**;
-HSPLcoil3/**->**(**)**
-Lcoil3/**;
-HSPLandroidx/media3/common/**->**(**)**
-Landroidx/media3/common/**;
-HSPLandroidx/media3/database/**->**(**)**
-Landroidx/media3/database/**;
-HSPLandroidx/media3/datasource/**->**(**)**
-Landroidx/media3/datasource/**;
-HSPLandroidx/media3/exoplayer/mediacodec/**->**(**)**
-Landroidx/media3/exoplayer/mediacodec/**;
-HSPLandroidx/compose/material3/**->**(**)**
-Landroidx/compose/material3/**;
+HSPLcom/zakius/finimal/AndroidApp**->**(**)**
+Lcom/zakius/finimal/AndroidApp**;
+HSPLcom/zakius/finimal/MainActivity**->**(**)**
+Lcom/zakius/finimal/MainActivity**;
+HSPLcom/zakius/finimal/LibrariesFastView**->**(**)**
+Lcom/zakius/finimal/LibrariesFastView**;
+HSPLcom/zakius/finimal/LoginFastView**->**(**)**
+Lcom/zakius/finimal/LoginFastView**;
+HSPLcom/zakius/finimal/Glyph**->**(**)**
+Lcom/zakius/finimal/Glyph**;
+HSPLcom/zakius/finimal/AvatarCircleDrawView**->**(**)**
+Lcom/zakius/finimal/AvatarCircleDrawView**;
+HSPLcom/zakius/finimal/DividerDrawView**->**(**)**
+Lcom/zakius/finimal/DividerDrawView**;
+HSPLcom/zakius/finimal/OutlinedGlyphBox**->**(**)**
+Lcom/zakius/finimal/OutlinedGlyphBox**;
+HSPLcom/zakius/finimal/FastColors**->**(**)**
+Lcom/zakius/finimal/FastColors**;
+HSPLcom/zakius/finimal/FastStartKt**->**(**)**
+Lcom/zakius/finimal/FastStartKt**;
+HSPLcom/zakius/finimal/App**->**(**)**
+Lcom/zakius/finimal/App**;
+HSPLcom/zakius/finimal/Prefs**->**(**)**
+Lcom/zakius/finimal/Prefs**;
+HSPLcom/zakius/finimal/ListSnapshots**->**(**)**
+Lcom/zakius/finimal/ListSnapshots**;
+HSPLcom/zakius/finimal/LibraryEntry**->**(**)**
+Lcom/zakius/finimal/LibraryEntry**;
+HSPLcom/zakius/finimal/Platform_androidKt**->**(**)**
+Lcom/zakius/finimal/Platform_androidKt**;
+HSPLcom/zakius/finimal/Media**->**(**)**
+Lcom/zakius/finimal/Media**;
+HPLcom/zakius/finimal/**->**(**)**
+HPLfinimal/core/**->**(**)**
+HPLorg/jellyfin/sdk/**->**(**)**
+HPLkotlinx/serialization/**->**(**)**
+HPLkotlinx/coroutines/**->**(**)**
+HPLokhttp3/**->**(**)**
+HPLokio/**->**(**)**
+HPLcoil3/**->**(**)**
+HPLandroidx/media3/common/**->**(**)**
+HPLandroidx/media3/database/**->**(**)**
+HPLandroidx/media3/datasource/**->**(**)**
+HPLandroidx/media3/exoplayer/mediacodec/**->**(**)**
+HPLandroidx/compose/material3/**->**(**)**

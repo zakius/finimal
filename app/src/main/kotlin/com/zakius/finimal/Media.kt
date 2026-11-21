@@ -10,9 +10,8 @@ import android.content.Context
 import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
 import android.os.Build
-import androidx.compose.runtime.getValue
+import androidx.compose.runtime.MutableIntState
 import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.setValue
 import androidx.core.app.NotificationCompat
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.okhttp.OkHttpDataSource
@@ -73,8 +72,14 @@ import finimal.core.WrongFile
  * what "pinned" means. A download the device can't play is the server's transcode instead, under `transcodes/`.
  */
 object Media : Downloads {
-    @Volatile lateinit var scratch: Scratch
-        private set
+    @Volatile private var _scratch: Scratch? = null
+    val scratch: Scratch
+        get() {
+            val current = _scratch
+            if (current != null) return current
+            ensureStarted()
+            return _scratch!!
+        }
     private lateinit var ctx: Context
     /** Shared by the SDK, Coil and the player, so they reuse connections to the server. */
     val http get() = App.http
@@ -123,18 +128,34 @@ object Media : Downloads {
      * streaming only: nothing downloads or buffers to the end into it, so nothing downloads twice or
      * is left behind when the card comes back. Checked again at the next start.
      */
-    @Volatile override var storageMissing = false
-        private set
+    @Volatile private var _storageMissing = false
+    override val storageMissing: Boolean
+        get() {
+            ensureStarted()
+            return _storageMissing
+        }
+    @Volatile private var started = false
 
-    fun onAppStart(context: Context) {
+    /** Binds the application context without doing disk I/O, Binder IPC, or building OkHttp on the main thread. */
+    fun attach(context: Context) {
         ctx = context
-        adoptLooseRecords()
-        storageMissing = App.prefs.storageIndex >= storageRoots().size
-        scratch = openScratch()
+    }
+
+    private fun ensureStarted() {
+        if (started) return
+        synchronized(this) {
+            if (started) return
+            adoptLooseRecords()
+            _storageMissing = App.prefs.storageIndex >= storageRoots().size
+            _scratch = openScratch()
+            started = true
+        }
     }
 
     /** Runs off the main thread after the first frame; see [AndroidApp.afterFirstFrame]. */
     fun afterFirstFrame(context: Context) {
+        attach(context)
+        ensureStarted()
         val wm = WorkManager.getInstance(context)
         wm.cancelAllWorkByTag(FILL_TAG)
         // Media3's cache held downloads and the buffer before 0.7. Those downloads are fetched again into the scratch.
@@ -180,11 +201,11 @@ object Media : Downloads {
         changes++
         val old = scratch
         App.prefs.storageIndex = index
-        storageMissing = false
+        _storageMissing = false
         // A player still open on the old one fails its next read and reconnects to the new one.
         old.close()
         old.dir.deleteRecursively()
-        scratch = openScratch()
+        _scratch = openScratch()
     }
 
     /** Plain HTTP plus file:// for downloaded subtitles and transcoded downloads. */
@@ -255,9 +276,19 @@ object Media : Downloads {
         changes++
     }
 
-    /** Bumped on every download change, so open screens re-read statuses at once rather than at the next poll. */
-    override var changes by mutableIntStateOf(0)
-        private set
+    /** Bumped on every download change, so open screens re-read statuses at once rather than at the next poll.
+     *  Backed by a lazy Compose state so Media.<clinit> doesn't load Compose runtime during Application.onCreate. */
+    @Volatile private var _changes = 0
+    @Volatile private var _changesState: MutableIntState? = null
+    override var changes: Int
+        get() {
+            val s = _changesState ?: mutableIntStateOf(_changes).also { _changesState = it }
+            return s.intValue
+        }
+        private set(value) {
+            _changes = value
+            _changesState?.intValue = value
+        }
     fun subsDir(id: String) = File(ctx.filesDir, "subs/$id")
 
     /** Decoded files, kept until the next change; the status poll would otherwise re-read every file each second. */

@@ -16,11 +16,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
@@ -815,7 +810,7 @@ private fun Controls(
     Box(Modifier.fillMaxSize().background(Color(0x55000000))) {
         Row(Modifier.align(Alignment.TopStart).fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
             Tip("Back (Esc)") {
-                IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = Color.White) }
+                IconButton(onClick = onBack) { com.zakius.finimal.GlyphIcon(com.zakius.finimal.AppIcons.ARROW_BACK, "Back", tint = Color.White, autoMirror = true) }
             }
             Column(Modifier.weight(1f)) {
                 Text(title, color = Color.White, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -828,7 +823,7 @@ private fun Controls(
                             onMenu(true)
                             onInteraction()
                         },
-                    ) { Icon(Icons.Default.MoreVert, "Menu", tint = Color.White) }
+                    ) { com.zakius.finimal.GlyphIcon(com.zakius.finimal.AppIcons.MORE_VERT, "Menu", tint = Color.White) }
                 }
                 DropdownMenu(expanded = menu, onDismissRequest = ::close) {
                     when (sub) {
@@ -967,7 +962,8 @@ private fun Controls(
                             onInteraction()
                         },
                     ) {
-                        Icon(if (mpv.paused) Icons.Default.PlayArrow else PauseIcon, if (mpv.paused) "Play" else "Pause", Modifier.size(32.dp), tint = Color.White)
+                        if (mpv.paused) com.zakius.finimal.GlyphIcon(com.zakius.finimal.AppIcons.PLAY, "Play", size = 32.dp, tint = Color.White)
+                        else Icon(PauseIcon, "Pause", Modifier.size(32.dp), tint = Color.White)
                     }
                 }
                 Tip("Forward ${stepSeconds}s (→)") {
@@ -1076,7 +1072,7 @@ private fun Tip(text: String, content: @Composable () -> Unit) = TooltipArea(
 
 @Composable
 private fun Choice(label: String, selected: Boolean, onClick: () -> Unit) =
-    DropdownMenuItem({ Text(label) }, onClick, trailingIcon = { if (selected) Icon(Icons.Default.Check, null) })
+    DropdownMenuItem({ Text(label) }, onClick, trailingIcon = { if (selected) com.zakius.finimal.GlyphIcon(com.zakius.finimal.AppIcons.CHECK, null) })
 
 private fun speedLabel(s: Double) = "${s.toString().removeSuffix(".0")}×"
 

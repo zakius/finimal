@@ -6,15 +6,11 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.Settings
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.text.BasicText
 import androidx.compose.material.ripple.RippleAlpha
 import androidx.compose.material3.ColorScheme
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.LocalRippleConfiguration
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.RippleConfiguration
@@ -35,16 +31,22 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.runtime.toMutableStateList
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.graphics.painter.Painter
-import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.graphics.vector.addPathNodes
-import androidx.compose.ui.graphics.vector.rememberVectorPainter
 import androidx.compose.ui.layout.layout
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.navigationevent.NavigationEventInfo
 import androidx.navigationevent.compose.NavigationBackHandler
@@ -94,13 +96,18 @@ fun Theme(content: @Composable () -> Unit) {
  * download notification is tapped.
  */
 @Composable
-fun Root(openDownloads: Boolean, openedDownloads: () -> Unit, player: @Composable (itemId: String, onBack: () -> Unit, onPlay: (String) -> Unit) -> Unit) {
+fun Root(
+    openDownloads: Boolean,
+    openedDownloads: () -> Unit,
+    initialStack: List<Screen>? = null,
+    player: @Composable (itemId: String, onBack: () -> Unit, onPlay: (String) -> Unit) -> Unit,
+) {
     val stack = rememberSaveable(
         saver = listSaver(
             save = { list -> list.map { screen -> Json.encodeToString(Screen.serializer(), screen) } },
             restore = { saved -> saved.map { text -> Json.decodeFromString(Screen.serializer(), text) }.toMutableStateList() },
         )
-    ) { listOf(startScreen()).toMutableStateList() }
+    ) { (initialStack ?: listOf(startScreen())).toMutableStateList() }
 
     // Each stack entry keeps its UI state (scroll, sort, search) while covered; leaving the stack drops it.
     val saved = rememberSaveableStateHolder()
@@ -139,66 +146,54 @@ fun Root(openDownloads: Boolean, openedDownloads: () -> Unit, player: @Composabl
     // TVs may crop the picture's edges (overscan). These are Android TV's recommended margins, which keep the UI inside.
     val overscan = if (App.tv) Modifier.padding(horizontal = 48.dp, vertical = 27.dp) else Modifier
     val padded = Modifier.safeDrawingPadding().then(overscan)
-    val back = rememberVectorPainter(Icons.AutoMirrored.Filled.ArrowBack)
-    val more = rememberVectorPainter(Icons.Default.MoreVert)
-    val settings = rememberVectorPainter(Icons.Default.Settings)
-    val play = rememberVectorPainter(Icons.Default.PlayArrow)
-    val search = rememberVectorPainter(Icons.Default.Search)
-    val download = rememberVectorPainter(DownloadIcon)
-    val close = rememberVectorPainter(Icons.Default.Close)
-    val icons = remember(back, more, settings, play, search, download, close) {
-        ListIcons(back, more, settings, play, search, download, close)
-    }
     // Covered screens stay composed so that going back only lays out and draws. Rebuilding the poster grid cost about
     // 13 ms of main-thread time on a phone. Screens read LocalShown to pause their own work while covered.
     // key() gives each entry its own state, so the next episode never inherits the previous player's state.
-    CompositionLocalProvider(LocalIcons provides icons) {
-        stack.forEachIndexed { i, screen ->
-            key(keyOf(i)) {
-                val shown = i == stack.lastIndex
-                // Passed as a State rather than a value: screens watch it from their effects, so covering or uncovering a screen recomposes nothing.
-                val shownState = rememberUpdatedState(shown)
-                Box(if (shown) Modifier.fillMaxSize() else Modifier.hidden(), propagateMinConstraints = true) {
-                    CompositionLocalProvider(LocalShown provides shownState) {
-                        saved.SaveableStateProvider(keyOf(i)) {
-                            FocusMemory {
-                                when (screen) {
-                                    Screen.Login -> LoginScreen(
-                                        padded,
-                                        onSwitchAccount = {
-                                            App.sessionExpired = false
-                                            App.expiredUserName = null
-                                            reset(Screen.Accounts)
-                                        },
-                                    ) { reset(Screen.Libraries) }
-                                    Screen.AddAccount -> LoginScreen(padded, onBack = ::pop) { reset(Screen.Libraries) }
-                                    is Screen.ResetPin -> LoginScreen(
-                                        padded,
-                                        onBack = ::pop,
-                                        title = "Reset PIN",
-                                        subtitle = "Log in with your password to clear this account's PIN.",
-                                        initialUser = screen.username,
-                                    ) {
-                                        App.prefs.setPin(App.prefs.userId!!, null)
-                                        reset(Screen.Libraries)
-                                    }
-                                    Screen.Accounts -> AccountsScreen(
-                                        padded,
-                                        if (i == 0) null else ::pop,
-                                        { reset(Screen.Libraries) },
-                                        { push(Screen.AddAccount) },
-                                    ) { username -> push(Screen.ResetPin(username)) }
-                                    Screen.Libraries -> LibrariesScreen(padded, ::push)
-                                    Screen.Downloads -> DownloadsScreen(padded, ::push, ::pop)
-                                    Screen.Settings -> SettingsScreen(padded, ::pop, { push(Screen.Accounts) }) { reset(startScreen()) }
-                                    is Screen.Library -> LibraryScreen(padded, screen, ::push, ::pop)
-                                    is Screen.Series -> SeriesScreen(padded, screen, ::push, ::pop)
-                                    is Screen.Season -> SeasonScreen(padded, screen, ::push, ::pop)
-                                    // "Play next" replaces the player instead of stacking players.
-                                    is Screen.Play -> player(screen.itemId, ::pop) { next ->
-                                        pop()
-                                        push(Screen.Play(next))
-                                    }
+    stack.forEachIndexed { i, screen ->
+        key(keyOf(i)) {
+            val shown = i == stack.lastIndex
+            // Passed as a State rather than a value: screens watch it from their effects, so covering or uncovering a screen recomposes nothing.
+            val shownState = rememberUpdatedState(shown)
+            Box(if (shown) Modifier.fillMaxSize() else Modifier.hidden(), propagateMinConstraints = true) {
+                CompositionLocalProvider(LocalShown provides shownState) {
+                    saved.SaveableStateProvider(keyOf(i)) {
+                        FocusMemory {
+                            when (screen) {
+                                Screen.Login -> LoginScreen(
+                                    padded,
+                                    onSwitchAccount = {
+                                        App.sessionExpired = false
+                                        App.expiredUserName = null
+                                        reset(Screen.Accounts)
+                                    },
+                                ) { reset(Screen.Libraries) }
+                                Screen.AddAccount -> LoginScreen(padded, onBack = ::pop) { reset(Screen.Libraries) }
+                                is Screen.ResetPin -> LoginScreen(
+                                    padded,
+                                    onBack = ::pop,
+                                    title = "Reset PIN",
+                                    subtitle = "Log in with your password to clear this account's PIN.",
+                                    initialUser = screen.username,
+                                ) {
+                                    App.prefs.setPin(App.prefs.userId!!, null)
+                                    reset(Screen.Libraries)
+                                }
+                                Screen.Accounts -> AccountsScreen(
+                                    padded,
+                                    if (i == 0) null else ::pop,
+                                    { reset(Screen.Libraries) },
+                                    { push(Screen.AddAccount) },
+                                ) { username -> push(Screen.ResetPin(username)) }
+                                Screen.Libraries -> LibrariesScreen(padded, ::push)
+                                Screen.Downloads -> DownloadsScreen(padded, ::push, ::pop)
+                                Screen.Settings -> SettingsScreen(padded, ::pop, { push(Screen.Accounts) }) { reset(startScreen()) }
+                                is Screen.Library -> LibraryScreen(padded, screen, ::push, ::pop)
+                                is Screen.Series -> SeriesScreen(padded, screen, ::push, ::pop)
+                                is Screen.Season -> SeasonScreen(padded, screen, ::push, ::pop)
+                                // "Play next" replaces the player instead of stacking players.
+                                is Screen.Play -> player(screen.itemId, ::pop) { next ->
+                                    pop()
+                                    push(Screen.Play(next))
                                 }
                             }
                         }
@@ -213,30 +208,78 @@ fun Root(openDownloads: Boolean, openedDownloads: () -> Unit, player: @Composabl
  * At a cold start with several accounts, the first screen asks who is watching; a single account opens at once. When
  * logged out with saved accounts left, the picker shows too, because one of them may have a PIN.
  */
-private fun startScreen() = when {
-    App.prefs.accounts().size > 1 || (!App.prefs.loggedIn && App.prefs.accounts().isNotEmpty()) -> Screen.Accounts
-    App.prefs.loggedIn -> Screen.Libraries
-    else -> Screen.Login
+private fun startScreen(): Screen {
+    val count = App.prefs.accountCount
+    return when {
+        count > 1 || (!App.prefs.loggedIn && count > 0) -> Screen.Accounts
+        App.prefs.loggedIn -> Screen.Libraries
+        else -> Screen.Login
+    }
 }
 
-private val DownloadIcon = ImageVector.Builder("Download", 24.dp, 24.dp, 24f, 24f)
-    .addPath(addPathNodes("M5,20h14v-2H5v2zM19,9h-4V3H9v6H5l7,7 7,-7z"), fill = SolidColor(Color.Black)).build()
-
 /**
- * The list screens' icons, one painter each for the whole activity. Otherwise each Icon renders its own bitmap, and on
- * a phone's GPU driver the first bitmap a frame uploads stalled the main thread for 7 to 8 ms on every screen opened.
- * The player keeps its own icons: its play icon is bigger, and a shared painter would redraw at each size.
+ * Codepoints in the bundled TrueType icon font (`finimal_icons.ttf`). Rendering icons and the avatar circle as
+ * text glyphs batches them into Skia's text atlas (`AtlasTextOp`) with zero offscreen bitmaps, zero texture uploads,
+ * and zero extra GPU shader compiles on the first frame.
  */
-class ListIcons(
-    val back: Painter,
-    val more: Painter,
-    val settings: Painter,
-    val play: Painter,
-    val search: Painter,
-    val download: Painter,
-    val close: Painter,
-)
-val LocalIcons = staticCompositionLocalOf<ListIcons> { error("provided by Root") }
+object AppIcons {
+    const val SETTINGS = "\uE001"
+    const val ARROW_BACK = "\uE002"
+    const val MORE_VERT = "\uE003"
+    const val PLAY = "\uE004"
+    const val CHECK = "\uE005"
+    const val CIRCLE = "\uE006"
+    const val ARROW_FORWARD = "\uE007"
+    /** 2x2 quarter-circle glyphs (16dp each -> 32dp circle) that stay under Skia's A8 text atlas limit, avoiding CircleOp and SDF shaders. */
+    const val CIRCLE_2X2 = "\uE008\uE009\n\uE00A\uE00B"
+    /** 1dp-tall horizontal divider segment (at 16dp fontSize) so dividers batch into AtlasTextOp instead of compiling FillRectOp. */
+    const val HLINE = "\uE00C"
+    const val VLINE = "\uE00D"
+    const val BLOCK = "\uE00E"
+    const val SEARCH = "\uE00F"
+    const val DOWNLOAD = "\uE010"
+    const val CLOSE = "\uE011"
+}
+
+@Composable
+fun GlyphIcon(
+    glyph: String,
+    contentDescription: String?,
+    modifier: Modifier = Modifier,
+    size: Dp = 24.dp,
+    tint: Color = LocalContentColor.current,
+    autoMirror: Boolean = false,
+) {
+    val text = if (autoMirror && LocalLayoutDirection.current == LayoutDirection.Rtl && glyph == AppIcons.ARROW_BACK) {
+        AppIcons.ARROW_FORWARD
+    } else {
+        glyph
+    }
+    val sizeSp = with(LocalDensity.current) { size.toSp() }
+    val sem = if (contentDescription != null) {
+        Modifier.clearAndSetSemantics {
+            this.contentDescription = contentDescription
+            this.role = Role.Image
+        }
+    } else {
+        Modifier.clearAndSetSemantics {}
+    }
+    Box(modifier.size(size).then(sem), contentAlignment = Alignment.Center) {
+        BasicText(
+            text = text,
+            style = TextStyle(
+                color = tint,
+                fontSize = sizeSp,
+                lineHeight = sizeSp,
+                fontFamily = iconFontFamily(),
+            ),
+            maxLines = 1,
+            softWrap = false,
+        )
+    }
+}
+
+internal expect fun iconFontFamily(): FontFamily
 
 /** False while another screen covers this one (see Root). Read it in effects through snapshotFlow, not in composition. */
 val LocalShown = staticCompositionLocalOf<State<Boolean>> { mutableStateOf(true) }

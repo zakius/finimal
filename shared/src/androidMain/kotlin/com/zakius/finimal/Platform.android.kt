@@ -2,6 +2,7 @@ package com.zakius.finimal
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.graphics.Typeface
 import android.net.ConnectivityManager
 import android.net.Network
 import android.os.Build
@@ -19,9 +20,14 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
 
 /** The application context, for toasts; set by the Application before anything else runs. */
 lateinit var appContext: Context
+
+val iconTypeface: Typeface by lazy { Typeface.createFromAsset(appContext.assets, "finimal_icons.ttf") }
+private val androidIconFontFamily: FontFamily by lazy { FontFamily(iconTypeface) }
+internal actual fun iconFontFamily(): FontFamily = androidIconFontFamily
 
 @Composable
 internal actual fun platformColors(dark: Boolean): ColorScheme {
@@ -59,19 +65,38 @@ internal actual fun RetryOnNewNetwork(onRetry: () -> Unit) {
 }
 
 class PrefsStore(private val p: SharedPreferences) : KeyValueStore {
-    override fun get(key: String): Any? = p.all[key]
-    override fun keys(): Set<String> = p.all.keys
+    private var cache: HashMap<String, Any?>? = null
+
+    @Synchronized
+    private fun map(): HashMap<String, Any?> {
+        val current = cache
+        if (current != null) return current
+        val loaded = HashMap<String, Any?>(p.all)
+        cache = loaded
+        return loaded
+    }
+
+    @Synchronized override fun get(key: String): Any? = map()[key]
+    @Synchronized override fun keys(): Set<String> = map().keys.toSet()
+
+    @Synchronized
     override fun edit(block: MutableMap<String, Any?>.() -> Unit) {
         val changes = LinkedHashMap<String, Any?>().apply(block)
+        val m = map()
         val e = p.edit()
         for ((k, v) in changes) {
-            when (v) {
-                null -> e.remove(k)
-                is String -> e.putString(k, v)
-                is Boolean -> e.putBoolean(k, v)
-                is Int -> e.putInt(k, v)
-                is Long -> e.putLong(k, v)
-                else -> error("unsupported $k: $v")
+            if (v == null) {
+                m.remove(k)
+                e.remove(k)
+            } else {
+                m[k] = v
+                when (v) {
+                    is String -> e.putString(k, v)
+                    is Boolean -> e.putBoolean(k, v)
+                    is Int -> e.putInt(k, v)
+                    is Long -> e.putLong(k, v)
+                    else -> error("unsupported $k: $v")
+                }
             }
         }
         e.apply()

@@ -9,6 +9,11 @@ plugins {
     id("org.jetbrains.kotlin.plugin.serialization")
 }
 
+composeCompiler {
+    includeSourceInformation = false
+    includeTraceMarkers = false
+}
+
 kotlin {
     android {
         namespace = "com.zakius.finimal.shared"
@@ -26,7 +31,6 @@ kotlin {
             api("org.jetbrains.compose.ui:ui:1.12.2")
             api("org.jetbrains.androidx.navigationevent:navigationevent-compose:1.1.0")
             api("org.jetbrains.compose.material3:material3:1.9.0")
-            api("org.jetbrains.compose.material:material-icons-core:1.7.3")
             api("org.jellyfin.sdk:jellyfin-core:1.9.3")
             api("org.slf4j:slf4j-api:2.0.20") // the SDK logs through it; without a binding it is a no-op
             api("io.coil-kt.coil3:coil-compose:3.6.3")

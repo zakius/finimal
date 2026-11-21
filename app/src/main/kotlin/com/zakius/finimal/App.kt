@@ -5,41 +5,47 @@ import android.content.Context
 import android.app.UiModeManager
 import android.content.res.Configuration.UI_MODE_TYPE_TELEVISION
 import android.content.pm.PackageManager
-import androidx.lifecycle.ProcessLifecycleOwner
-import androidx.lifecycle.lifecycleScope
+import android.os.Build
 import coil3.ImageLoader
 import coil3.PlatformContext
 import coil3.SingletonImageLoader
 import coil3.serviceLoaderEnabled
+import androidx.profileinstaller.ProfileInstaller
 import androidx.work.Configuration
 import coil3.network.okhttp.OkHttpNetworkFetcherFactory
 import androidx.media3.common.MimeTypes
 import androidx.media3.exoplayer.mediacodec.MediaCodecUtil
 import java.io.File
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import okhttp3.Dispatcher
+import okhttp3.OkHttp
 import kotlin.concurrent.thread
 import org.jellyfin.sdk.JellyfinOptions
 
 /** The Android app as the shared code's [Platform]; the shared singletons are in [App]. */
 class AndroidApp : Application(), Platform, SingletonImageLoader.Factory, Configuration.Provider {
-    @android.annotation.SuppressLint("MissingSuperCall") // called on the fonts thread
+    @android.annotation.SuppressLint("MissingSuperCall") // called on the fonts thread on ASUS
     override fun onCreate() {
         // Stock Android's Application.onCreate is empty, but ASUS's applies its FlipFont theme and rebuilds the system
-        // font map, which costs 31 ms of main thread on every cold start on a Zenfone 10. Running it on another thread
-        // overlaps it with the rest of start-up. Activity.onCreate makes the same call under the same lock, so the
-        // activity still waits for it to finish.
-        thread(name = "fonts") { superOnCreate() }
+        // font map, which costs 31 ms of main thread on every cold start on a Zenfone 10. Overlap it on ASUS only.
+        if (Build.MANUFACTURER.equals("asus", ignoreCase = true)) {
+            thread(name = "fonts") { superOnCreate() }
+        } else {
+            superOnCreate()
+        }
         instance = this
         appContext = this
         App.platform = this
-        Media.onAppStart(this)
+        Media.attach(this)
         thread(name = "warm-up") {
             // Load ICU's locale-key data now; otherwise the first line break loads it during the first frame (10 ms).
             // This avoids laying out text, which would race the font swap above.
             val lineBreakTag = java.util.Locale.getDefault().toLanguageTag() + "-u-lb-normal"
             java.util.Locale.forLanguageTag(lineBreakTag).displayName
-            if (App.prefs.loggedIn) ListSnapshots.prefetchLibraries()
-            App.server // Built now because the first list load needs it right after the first frame.
+            iconTypeface // Preload the 1.6 KB icon font off the main thread.
+            if (App.prefs.loggedIn) ListSnapshots.prefetchFastLibraries()
         }
     }
 
@@ -53,8 +59,11 @@ class AndroidApp : Application(), Platform, SingletonImageLoader.Factory, Config
         if (startedUp) return
         startedUp = true
         thread(name = "after-first-frame") {
+            App.server // Warm the API client now that Frame 1 is on screen.
             Media.afterFirstFrame(this)
             warmDecoders()
+            // Android 15+ compiles assets/art-profile/baseline.prof at install time; older versions use ProfileInstaller.
+            if (Build.VERSION.SDK_INT < 35) runCatching { ProfileInstaller.writeProfile(this) }
         }
     }
     private var startedUp = false
@@ -96,10 +105,11 @@ class AndroidApp : Application(), Platform, SingletonImageLoader.Factory, Config
         getSystemService(UiModeManager::class.java).currentModeType == UI_MODE_TYPE_TELEVISION ||
             !packageManager.hasSystemFeature(PackageManager.FEATURE_TOUCHSCREEN)
     }
-    override val scope get() = ProcessLifecycleOwner.get().lifecycleScope
+    override val scope: CoroutineScope by lazy { CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate) }
     override val transcodeHeight get() = HardwareDecoders.h264Height
     override val downloads: Downloads get() = Media
     override fun configure(options: JellyfinOptions.Builder) { options.context = this }
+    override fun beforeHttp() { OkHttp.initialize(this) }
     override fun scheduleHousekeeping() { Housekeeping.enqueue(this) }
     override fun askNotifications() { activity?.askNotifications() }
     override fun decoderSummary() = HardwareDecoders.summary()

@@ -1,8 +1,7 @@
 package com.zakius.finimal
 
-import androidx.compose.runtime.getValue
+import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.setValue
 import finimal.core.PendingStore
 import java.io.File
 import kotlinx.coroutines.CoroutineScope
@@ -30,6 +29,8 @@ interface Platform {
     val downloads: Downloads?
     /** Sets the device identity for the Jellyfin SDK. */
     fun configure(options: JellyfinOptions.Builder)
+    /** Called once right before [App.http] is constructed (e.g. OkHttp Android context registration). */
+    fun beforeHttp() {}
     /** Pushes progress and applies "keep next N" in the background. */
     fun scheduleHousekeeping()
     /** Asks for the notification permission downloads show progress with, where there is one. */
@@ -60,7 +61,10 @@ object App {
     val prefs by lazy { Prefs(platform.store) }
     val server by lazy { Server() }
     /** Shared by the SDK, images and the player, so they reuse connections to the server. */
-    val http by lazy { OkHttpClient() }
+    val http by lazy {
+        platform.beforeHttp()
+        OkHttpClient()
+    }
     val downloads get() = platform.downloads
     /** The remote-first interface: no touch-only controls, D-pad keys in the player, TV-safe margins. */
     val tv get() = when (prefs.interfaceMode) {
@@ -72,12 +76,33 @@ object App {
 
     /**
      * Set when the server rejects the token, which sends the UI back to login. Unsynced progress is kept
-     * and pushed after the next login. It lives here rather than on [Server] so that the first frame
-     * doesn't have to build the API client.
+     * and pushed after the next login. Backed by a lazy Compose state so App.<clinit> doesn't load
+     * Compose runtime classes during cold start.
      */
-    var sessionExpired by mutableStateOf(false)
-    /** Username of the account whose session expired, so LoginScreen can prefill it. */
-    var expiredUserName by mutableStateOf<String?>(null)
+    @Volatile private var _sessionExpired = false
+    @Volatile private var _sessionExpiredState: MutableState<Boolean>? = null
+    var sessionExpired: Boolean
+        get() {
+            val s = _sessionExpiredState ?: mutableStateOf(_sessionExpired).also { _sessionExpiredState = it }
+            return s.value
+        }
+        set(value) {
+            _sessionExpired = value
+            _sessionExpiredState?.value = value
+        }
+
+    /** Username of the account whose session expired, so LoginScreen can prefill it. Lazy so App.<clinit> skips Compose. */
+    @Volatile private var _expiredUserName: String? = null
+    @Volatile private var _expiredUserNameState: MutableState<String?>? = null
+    var expiredUserName: String?
+        get() {
+            val s = _expiredUserNameState ?: mutableStateOf(_expiredUserName).also { _expiredUserNameState = it }
+            return s.value
+        }
+        set(value) {
+            _expiredUserName = value
+            _expiredUserNameState?.value = value
+        }
 
     /**
      * Unsynced play states of the logged-in account. Each server and user has its own file, so

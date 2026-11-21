@@ -19,12 +19,39 @@ class Prefs(private val p: KeyValueStore) {
     /** Server clock minus device clock, from the last response; see [Server.now]. */
     var clockOffsetMs by long("clockOffsetMs")
 
+    @Volatile private var accountsCache: List<Account>? = null
+
     /** The accounts on [baseUrl]; only one server is kept at a time. The current account is [userId], with its token in [token]. */
     fun accounts(): List<Account> {
+        accountsCache?.let { return it }
         val saved = p["accounts"] as String?
-        if (saved == null) return emptyList()
-        val accounts = runCatching { json.decodeFromString<List<Account>>(saved) }.getOrNull()
-        return accounts.orEmpty()
+        if (saved == null) {
+            accountsCache = emptyList()
+            return emptyList()
+        }
+        val parsed = runCatching { json.decodeFromString<List<Account>>(saved) }.getOrNull().orEmpty()
+        accountsCache = parsed
+        return parsed
+    }
+
+    /** Number of saved accounts, read without parsing JSON on cold start. */
+    val accountCount: Int
+        get() {
+            val saved = (p["accountCount"] as Number?)?.toInt()
+            if (saved != null) return saved
+            val count = accounts().size
+            p.edit { put("accountCount", count) }
+            return count
+        }
+
+    /** Display name of the current account, or null if none is logged in; avoids JSON parsing on cold start. */
+    fun currentUserName(): String? {
+        val uid = userId ?: return null
+        val saved = p["userName"] as String?
+        if (saved != null) return saved
+        val found = accounts().firstOrNull { it.userId == uid }?.name ?: return null
+        p.edit { put("userName", found) }
+        return found
     }
 
     /**
@@ -32,19 +59,25 @@ class Prefs(private val p: KeyValueStore) {
      * without its user. Logging in to a different server replaces every account.
      */
     fun login(url: String, token: String, user: String, name: String) {
-        val kept = if (url == baseUrl) accounts().filter { it.userId != user } else emptyList()
-        val pin = accounts().firstOrNull { it.userId == user && url == baseUrl }?.pin
+        val current = accounts()
+        val kept = if (url == baseUrl) current.filter { it.userId != user } else emptyList()
+        val pin = current.firstOrNull { it.userId == user && url == baseUrl }?.pin
+        val updated = kept + Account(user, name, token, pin)
+        accountsCache = updated
         p.edit {
             put("baseUrl", url)
             put("token", token)
             put("userId", user)
-            put("accounts", json.encodeToString(kept + Account(user, name, token, pin)))
+            put("userName", name)
+            put("accountCount", updated.size)
+            put("accounts", json.encodeToString(updated))
         }
     }
 
     fun switchTo(a: Account) = p.edit {
         put("token", a.token)
         put("userId", a.userId)
+        put("userName", a.name)
     }
 
     fun setPin(userId: String, pin: String?) = update(userId) { account ->
@@ -52,10 +85,17 @@ class Prefs(private val p: KeyValueStore) {
         account.copy(pin = hash)
     }
     /** Fills in the name of an account migrated from before names were stored (see init). */
-    fun setName(userId: String, name: String) = update(userId) { it.copy(name = name) }
-    private fun update(userId: String, change: (Account) -> Account) = p.edit {
+    fun setName(userId: String, name: String) {
+        update(userId) { it.copy(name = name) }
+        if (userId == this.userId) p.edit { put("userName", name) }
+    }
+    private fun update(userId: String, change: (Account) -> Account) {
         val updated = accounts().map { account -> if (account.userId == userId) change(account) else account }
-        put("accounts", json.encodeToString(updated))
+        accountsCache = updated
+        p.edit {
+            put("accountCount", updated.size)
+            put("accounts", json.encodeToString(updated))
+        }
     }
 
     fun pinMatches(a: Account, pin: String): Boolean {
@@ -136,16 +176,23 @@ class Prefs(private val p: KeyValueStore) {
     val loggedIn get() = token != null
 
     /** Removes the current account; its unsynced progress and settings stay for when it logs in again. */
-    fun logout() = p.edit {
-        put("accounts", json.encodeToString(accounts().filter { it.userId != userId }))
-        put("token", null)
-        put("userId", null)
+    fun logout() {
+        val remaining = accounts().filter { it.userId != userId }
+        accountsCache = remaining
+        p.edit {
+            put("accounts", json.encodeToString(remaining))
+            put("accountCount", remaining.size)
+            put("token", null)
+            put("userId", null)
+            put("userName", null)
+        }
     }
 
     /** The server ended the session: logged out, the account and its PIN kept for logging in again. */
     fun endSession() = p.edit {
         put("token", null)
         put("userId", null)
+        put("userName", null)
     }
 
     /** The key for a setting that follows the account rather than the device. */
@@ -159,8 +206,12 @@ class Prefs(private val p: KeyValueStore) {
             val moved = p.keys()
                 .filter { key -> key in USER_KEYS || USER_PREFIXES.any { prefix -> key.startsWith(prefix) } }
                 .associateWith { key -> p[key] }
+            val migrated = listOf(Account(user, "", token))
+            accountsCache = migrated
             p.edit {
-                put("accounts", json.encodeToString(listOf(Account(user, "", token))))
+                put("accounts", json.encodeToString(migrated))
+                put("accountCount", 1)
+                put("userName", "")
                 for ((key, value) in moved) {
                     put("$user/$key", value)
                     put(key, null)

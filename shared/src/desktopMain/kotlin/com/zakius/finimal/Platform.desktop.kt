@@ -9,6 +9,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalWindowInfo
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.platform.Font
 import finimal.core.writeAtomically
 import java.io.File
 import kotlinx.serialization.json.Json
@@ -20,6 +22,12 @@ import kotlinx.serialization.json.longOrNull
 
 @Composable
 internal actual fun platformColors(dark: Boolean): ColorScheme = if (dark) darkColorScheme() else lightColorScheme()
+
+private val desktopIconFontFamily: FontFamily by lazy {
+    val bytes = Thread.currentThread().contextClassLoader.getResourceAsStream("finimal_icons.ttf")!!.use { it.readAllBytes() }
+    FontFamily(Font("finimal_icons.ttf", bytes))
+}
+internal actual fun iconFontFamily(): FontFamily = desktopIconFontFamily
 
 @Composable
 internal actual fun smallestWidthDp(): Int {

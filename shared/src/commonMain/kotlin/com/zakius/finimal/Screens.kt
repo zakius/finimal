@@ -59,7 +59,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -103,6 +102,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentType
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.ImeAction
@@ -135,44 +135,86 @@ private val lastGood = object : LinkedHashMap<List<Any?>, List<BaseItemDto>>(16,
     override fun removeEldestEntry(eldest: MutableMap.MutableEntry<List<Any?>, List<BaseItemDto>>) = size > 20
 }
 
+/** Seeds the in-memory libraries cache (called by Android's fast-start view before handing off to Compose). */
+fun seedLibrariesLastGood(list: List<BaseItemDto>) {
+    lastGood[listOf(App.prefs.baseUrl, App.prefs.userId)] = list
+}
+
+/** Lightweight id+name pair for the Libraries snapshot so cold start avoids loading BaseItemDto and kotlinx.serialization. */
+data class LibraryEntry(val id: String, val name: String)
+
 /**
  * The same lists on disk, so a cold start shows the last list at once instead of "Loading…".
  * For display only: pending local play state is drawn over it, and a fresh fetch replaces it.
  */
 object ListSnapshots {
-    private val json = Json { ignoreUnknownKeys = true }
+    private val json by lazy { Json { ignoreUnknownKeys = true } }
     private val dir get() = File(App.platform.appCache, "lists")
-    private fun file(key: List<Any?>): File {
-        val parent = dir
+    private fun hexHash(key: List<Any?>): String {
         val digest = MessageDigest.getInstance("SHA-1").digest(key.joinToString("\u0000").toByteArray())
-        val hex = digest.joinToString("") { byte -> "%02x".format(byte) }
-        return File(parent, "$hex.json")
+        return digest.joinToString("") { byte -> "%02x".format(byte) }
     }
+    private fun file(key: List<Any?>) = File(dir, "${hexHash(key)}.json")
+    private fun fastLibrariesFile(key: List<Any?>) = File(dir, "${hexHash(key)}.tsv")
 
-    fun read(key: List<Any?>): List<BaseItemDto>? = runCatching { json.decodeFromString<List<BaseItemDto>>(file(key).readText()) }.getOrNull()
+    fun read(key: List<Any?>): List<BaseItemDto>? {
+        if (key.size == 2) readFastLibraryEntries(key)?.let { entries ->
+            return entries.map { e -> BaseItemDto(id = java.util.UUID.fromString(e.id), type = BaseItemKind.COLLECTION_FOLDER, name = e.name) }
+        }
+        val decoded = runCatching { json.decodeFromString<List<BaseItemDto>>(file(key).readText()) }.getOrNull()
+        if (decoded != null && key.size == 2) writeFastLibraries(key, decoded)
+        return decoded
+    }
 
     fun write(key: List<Any?>, list: List<BaseItemDto>) {
         runCatching {
             dir.mkdirs()
+            if (key.size == 2) writeFastLibraries(key, list)
             file(key).writeAtomically(json.encodeToString(list))
+        }
+    }
+
+    fun readFastLibraryEntries(key: List<Any?>): List<LibraryEntry>? = runCatching {
+        val f = fastLibrariesFile(key)
+        if (!f.exists()) return null
+        val text = f.readText()
+        if (text.isEmpty()) return emptyList()
+        text.lineSequence().filter { it.isNotEmpty() }.map { line ->
+            val tab = line.indexOf('\t')
+            LibraryEntry(line.substring(0, tab), line.substring(tab + 1))
+        }.toList()
+    }.getOrNull()
+
+    private fun writeFastLibraries(key: List<Any?>, list: List<BaseItemDto>) {
+        runCatching {
+            dir.mkdirs()
+            val encoded = list.joinToString("\n") { lib ->
+                "${lib.id}\t${lib.name.orEmpty().replace('\t', ' ').replace('\n', ' ')}"
+            }
+            fastLibrariesFile(key).writeAtomically(encoded)
         }
     }
 
     fun clear() { dir.deleteRecursively() }
 
-    /** Reads Libraries, the usual first screen, off the main thread at app start, so the first frame can show it. */
-    fun prefetchLibraries() {
+    /** Reads Libraries (lightweight TSV only, zero SDK/JSON classes) off the main thread at app start. */
+    fun prefetchFastLibraries() {
         val key = listOf(App.prefs.baseUrl, App.prefs.userId)
-        val list = read(key)
-        if (list != null) prefetched = Pair(key, list)
+        val entries = readFastLibraryEntries(key)
+        if (entries != null) prefetchedEntries = Pair(key, entries)
     }
-    @Volatile private var prefetched: Pair<List<Any?>, List<BaseItemDto>>? = null
+    @Volatile private var prefetchedEntries: Pair<List<Any?>, List<LibraryEntry>>? = null
+
+    fun takePrefetchedFastLibraries(key: List<Any?>): List<LibraryEntry>? {
+        val found = prefetchedEntries
+        if (found == null || found.first != key) return null
+        prefetchedEntries = null
+        return found.second
+    }
 
     fun takePrefetched(key: List<Any?>): List<BaseItemDto>? {
-        val found = prefetched
-        if (found == null || found.first != key) return null
-        prefetched = null
-        return found.second
+        val entries = takePrefetchedFastLibraries(key) ?: return null
+        return entries.map { e -> BaseItemDto(id = java.util.UUID.fromString(e.id), type = BaseItemKind.COLLECTION_FOLDER, name = e.name) }
     }
 }
 
@@ -364,7 +406,7 @@ private fun downloadAllAction(fetch: suspend () -> List<BaseItemDto>): () -> Uni
 private fun BarMenu(content: @Composable (close: () -> Unit) -> Unit) {
     var open by remember { mutableStateOf(false) }
     Box {
-        IconButton(onClick = { open = true }) { Icon(LocalIcons.current.more, "More options") }
+        IconButton(onClick = { open = true }) { GlyphIcon(AppIcons.MORE_VERT, "More options") }
         DropdownMenu(open, { open = false }) { content { open = false } }
     }
 }
@@ -441,7 +483,7 @@ fun formatBytes(b: Long) = if (b >= 1e9) "%.1f GB".format(b / 1e9) else "%.0f MB
 private fun Bar(title: String, onBack: (() -> Unit)?, actions: @Composable () -> Unit = {}) = TopAppBar(
     title = { Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
     navigationIcon = {
-        if (onBack != null) IconButton(onClick = onBack) { Icon(LocalIcons.current.back, "Back") }
+        if (onBack != null) IconButton(onClick = onBack) { GlyphIcon(AppIcons.ARROW_BACK, "Back", autoMirror = true) }
     },
     actions = { actions() },
 )
@@ -562,7 +604,7 @@ fun LoginScreen(
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            if (onBack != null) IconButton(onClick = onBack) { Icon(LocalIcons.current.back, "Back") }
+            if (onBack != null) IconButton(onClick = onBack) { GlyphIcon(AppIcons.ARROW_BACK, "Back", autoMirror = true) }
             Text(title ?: if (adding) "Add account" else "finimal", style = MaterialTheme.typography.headlineMedium)
         }
         if (subtitle != null) Text(subtitle)
@@ -656,15 +698,15 @@ fun LoginScreen(
 fun LibrariesScreen(modifier: Modifier, push: (Screen) -> Unit) {
     var refresh by remember { mutableIntStateOf(0) }
     val libs = loadFresh(refresh = refresh) { App.server.libraries() }
-    var me by remember { mutableStateOf(App.prefs.accounts().firstOrNull { it.userId == App.prefs.userId }) }
+    var userName by remember { mutableStateOf(App.prefs.currentUserName()) }
     // Accounts migrated from before names were stored have an empty name. Fetch it from the server once.
     LaunchedEffect(Unit) {
-        val m = me
-        if (m == null || m.name.isNotEmpty()) return@LaunchedEffect
+        val uid = App.prefs.userId
+        if (uid == null || !userName.isNullOrEmpty()) return@LaunchedEffect
         val name = runCatching { App.server.userName() }.getOrNull()
         if (!name.isNullOrEmpty()) {
-            App.prefs.setName(m.userId, name)
-            me = m.copy(name = name)
+            App.prefs.setName(uid, name)
+            userName = name
         }
     }
     Column(
@@ -676,10 +718,10 @@ fun LibrariesScreen(modifier: Modifier, push: (Screen) -> Unit) {
             )
     ) {
         Bar("finimal", null) {
-            IconButton(onClick = { push(Screen.Library(null, "Search")) }) { Icon(LocalIcons.current.search, "Search") }
-            if (App.downloads != null) IconButton(onClick = { push(Screen.Downloads) }) { Icon(LocalIcons.current.download, "Downloads") }
-            IconButton(onClick = { push(Screen.Settings) }) { Icon(LocalIcons.current.settings, "Settings") }
-            IconButton(onClick = { push(Screen.Accounts) }) { Avatar(me?.name.orEmpty(), Modifier.semantics { contentDescription = "Accounts" }) }
+            IconButton(onClick = { push(Screen.Library(null, "Search")) }) { GlyphIcon(AppIcons.SEARCH, "Search") }
+            if (App.downloads != null) IconButton(onClick = { push(Screen.Downloads) }) { GlyphIcon(AppIcons.DOWNLOAD, "Downloads") }
+            IconButton(onClick = { push(Screen.Settings) }) { GlyphIcon(AppIcons.SETTINGS, "Settings") }
+            IconButton(onClick = { push(Screen.Accounts) }) { Avatar(userName.orEmpty(), Modifier.semantics { contentDescription = "Accounts" }) }
             BarMenu { close ->
                 DropdownMenuItem({ Text("Refresh") }, {
                     close()
@@ -689,18 +731,20 @@ fun LibrariesScreen(modifier: Modifier, push: (Screen) -> Unit) {
         }
         Loaded(libs, { refresh++ }, { push(Screen.Downloads) }) { list ->
             if (list.isEmpty()) Empty("No movie or TV libraries on this server")
-            else LazyColumn {
-                items(list, key = { it.id }) { lib ->
-                    Text(
-                        lib.name.orEmpty(),
-                        style = MaterialTheme.typography.titleLarge,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .focusMemory(lib.id)
-                            .combinedClickable(onClick = { push(Screen.Library(lib.id.toString(), lib.name.orEmpty())) })
-                            .padding(20.dp),
-                    )
-                    HorizontalDivider()
+            else Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
+                for (lib in list) {
+                    key(lib.id) {
+                        Text(
+                            lib.name.orEmpty(),
+                            style = MaterialTheme.typography.titleLarge,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .focusMemory(lib.id)
+                                .combinedClickable(onClick = { push(Screen.Library(lib.id.toString(), lib.name.orEmpty())) })
+                                .padding(20.dp),
+                        )
+                        HorizontalDivider()
+                    }
                 }
             }
         }
@@ -770,7 +814,7 @@ fun LibraryScreen(modifier: Modifier, screen: Screen.Library, push: (Screen) -> 
                     } else {
                         openSearch()
                     }
-                }) { Icon(LocalIcons.current.search, "Search") }
+                }) { GlyphIcon(AppIcons.SEARCH, "Search") }
             }
             BarMenu { close ->
                 DropdownMenuItem({ Text("Refresh") }, {
@@ -789,7 +833,7 @@ fun LibraryScreen(modifier: Modifier, screen: Screen.Library, push: (Screen) -> 
                     IconButton(onClick = {
                         search = ""
                         query = ""
-                    }) { Icon(LocalIcons.current.close, "Clear search") }
+                    }) { GlyphIcon(AppIcons.CLOSE, "Clear search") }
                 }
             } else {
                 null
@@ -1166,7 +1210,7 @@ private fun ContinueButton(ep: BaseItemDto, onClick: () -> Unit) {
     val runtime = ep.runTimeTicks
     val minutesLeft = if (runtime != null && position > 0) (runtime - position) / TICKS_PER_MS / 60_000 else null
     Button(onClick, Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
-        Icon(LocalIcons.current.play, null)
+        GlyphIcon(AppIcons.PLAY, null)
         val verb = if (position > 0) "Continue " else "Play "
         Text(
             verb + episodeLabel(ep),
@@ -1222,7 +1266,7 @@ fun EpisodeRow(
             Text(bits.joinToString(" · "), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         Box {
-            IconButton(onClick = { menu = true }) { Icon(LocalIcons.current.more, "More options") }
+            IconButton(onClick = { menu = true }) { GlyphIcon(AppIcons.MORE_VERT, "More options") }
             ItemMenu(ep, state?.played == true, unsynced, menu, { menu = false }, download != null, onStartOver, onChanged)
         }
     }
@@ -1447,7 +1491,7 @@ fun DownloadsScreen(modifier: Modifier, push: (Screen) -> Unit, pop: () -> Unit)
                 Fill.DONE -> {}
             }
             Box {
-                IconButton(onClick = { menu = true }) { Icon(LocalIcons.current.more, "More options") }
+                IconButton(onClick = { menu = true }) { GlyphIcon(AppIcons.MORE_VERT, "More options") }
                 ItemMenu(
                     d.item,
                     state?.played == true,
@@ -1849,17 +1893,26 @@ fun ChapterMarks(chapters: List<Chapter>, durationMs: Long, modifier: Modifier, 
         }
     }
 
-/** The account's initial in a circle. */
+/** The account's initial in a circle. Uses 4x16dp quarter-circle glyphs so Skia batches it into the same A8 AtlasTextOp as text. */
 @Composable
-private fun Avatar(name: String, modifier: Modifier = Modifier) =
-    Box(
-        modifier
-            .size(32.dp)
-            .background(MaterialTheme.colorScheme.primaryContainer, androidx.compose.foundation.shape.CircleShape),
-        contentAlignment = Alignment.Center,
-    ) {
+private fun Avatar(name: String, modifier: Modifier = Modifier) {
+    val halfSp = with(androidx.compose.ui.platform.LocalDensity.current) { 16.dp.toSp() }
+    Box(modifier.size(32.dp), contentAlignment = Alignment.Center) {
+        androidx.compose.foundation.text.BasicText(
+            text = AppIcons.CIRCLE_2X2,
+            style = androidx.compose.ui.text.TextStyle(
+                color = MaterialTheme.colorScheme.primaryContainer,
+                fontSize = halfSp,
+                lineHeight = halfSp,
+                fontFamily = iconFontFamily(),
+            ),
+            maxLines = 2,
+            softWrap = false,
+            modifier = Modifier.clearAndSetSemantics {},
+        )
         Text(name.firstOrNull()?.uppercase() ?: "?", color = MaterialTheme.colorScheme.onPrimaryContainer, style = MaterialTheme.typography.titleSmall)
     }
+}
 
 /**
  * The accounts saved on this device, all on one server. Picking one switches to it, after its PIN when it has one. As

@@ -49,11 +49,6 @@ import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
@@ -113,8 +108,6 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
-import androidx.lifecycle.ProcessLifecycleOwner
-import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
@@ -203,7 +196,7 @@ fun PlayerScreen(itemId: String, onBack: () -> Unit, onPlay: (String) -> Unit) {
         val downloaded = download?.item
         val complete = download != null && withContext(Dispatchers.IO) { Media.isDone(download) }
         // Outside this screen's scope, so giving up on a slow server below doesn't cut a flush short.
-        val process = ProcessLifecycleOwner.get().lifecycleScope
+        val process = App.platform.scope
         val fetch = process.async {
             runCatching {
                 // Only this item's unsynced state must reach the server before the item is read; the rest syncs in
@@ -339,7 +332,7 @@ private fun Playback(
         // subtitles, and the fetch finishes on its own so the files are there next time.
         // A transcode, live or downloaded, has no embedded subtitles: those come as files too.
         val sideload = transcoding || localPlaylist != null
-        val fetch = ProcessLifecycleOwner.get().lifecycleScope.async { Media.fetchSubtitles(item, sideload) }
+        val fetch = App.platform.scope.async { Media.fetchSubtitles(item, sideload) }
         val subs = withTimeoutOrNull(SUBTITLE_WAIT_MS) { fetch.await() } ?: emptyMap()
         val streams = sideloadedSubs(item, sideload).associateBy { it.index }
         val startSub = startSubtitle(source, prefs.subLang(seriesKey))?.index
@@ -528,7 +521,7 @@ private fun Playback(
                 val stopTicks = if (creditsDone && runtime != null) runtime else positionTicks()
                 App.server.reportStop(id, sourceId, stopTicks, runtime, serverPlayed, playSession)
             }
-            ProcessLifecycleOwner.get().lifecycleScope.launch(App.buffers) { Media.stopBuffer(id) }
+            App.platform.scope.launch(App.buffers) { Media.stopBuffer(id) }
             Media.playing = null
             player.release()
         }
@@ -1138,7 +1131,7 @@ private fun Controls(
     Box(Modifier.fillMaxSize().background(Color(0x55000000)).then(if (fullscreen) Modifier.safeDrawingPadding() else Modifier)
         .then(if (App.tv) Modifier.padding(horizontal = 48.dp, vertical = 27.dp) else Modifier)) {
         Row(Modifier.align(Alignment.TopStart).fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = Color.White) }
+            IconButton(onClick = onBack) { GlyphIcon(AppIcons.ARROW_BACK, "Back", tint = Color.White, autoMirror = true) }
             // In portrait the title is under the video instead.
             Column(Modifier.weight(1f)) {
                 if (fullscreen) Text(title, color = Color.White, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -1151,7 +1144,7 @@ private fun Controls(
                     menu = true
                     onInteraction()
                 }) {
-                    Icon(Icons.Default.MoreVert, "Menu", tint = Color.White)
+                    GlyphIcon(AppIcons.MORE_VERT, "Menu", tint = Color.White)
                 }
                 DropdownMenu(expanded = menu, onDismissRequest = {
                     menu = false
@@ -1284,7 +1277,8 @@ private fun Controls(
                 if (playing) player.pause() else player.play()
                 onInteraction()
             }, Modifier.padding(horizontal = 16.dp).size(64.dp).takeFocus()) {
-                Icon(if (playing) PauseIcon else Icons.Default.PlayArrow, if (playing) "Pause" else "Play", Modifier.size(40.dp), tint = Color.White)
+                if (playing) Icon(PauseIcon, "Pause", Modifier.size(40.dp), tint = Color.White)
+                else GlyphIcon(AppIcons.PLAY, "Play", size = 40.dp, tint = Color.White)
             }
             IconButton(onClick = {
                 onSeek(step * 1000L)
@@ -1391,7 +1385,7 @@ private class VideoView(context: Context) : android.widget.FrameLayout(context),
 /** A menu entry ticked when it is the current choice. */
 @Composable
 private fun Choice(label: String, selected: Boolean, onClick: () -> Unit) =
-    DropdownMenuItem({ Text(label) }, onClick, trailingIcon = { if (selected) Icon(Icons.Default.Check, null) })
+    DropdownMenuItem({ Text(label) }, onClick, trailingIcon = { if (selected) GlyphIcon(AppIcons.CHECK, null) })
 
 /**
  * Starts the current item again from where it stopped. A bare prepare() after a failed load resumes

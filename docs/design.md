@@ -169,8 +169,10 @@ Rules:
 
 ## Start-up
 
-- Release APKs embed the baseline profile at `assets/art-profile/baseline.prof` (`tools/release.sh`), so Android 15+ compiles the app when it is installed. `app/src/main/baseline-prof.txt` covers finimal and the libraries its launch and first list load run through.
-- The Libraries list from the last visit is read from disk at app start, off the main thread, so the first frame usually shows it instead of a spinner.
-- Only what the first frame needs runs before it. WorkManager starts on first use, emoji2's start-up step is removed, and the WorkManager calls, the codec-list read and the queue kick wait for MainActivity's first frame (`App.afterFirstFrame`). The first composition reads login state from the preferences, not from the API client.
+- Release APKs embed the baseline profile at `assets/art-profile/baseline.prof` (`tools/release.sh`), so Android 15+ compiles the app when it is installed. `app/src/main/baseline-prof.txt` covers finimal and the libraries its launch and first list load run through; during release builds, third-party AAR profile rules are demoted from startup/AppImage flags to hot AOT (`HP`) so `base.art` stays small while Compose/Material/Media3 remain AOT-compiled in `base.odex`.
+- Cold start with a single logged-in account (or zero accounts) renders its first frame with lightweight Android Views (`FastStart.kt`: `LibrariesFastView` / `LoginFastView`) and hands off seamlessly to Compose `Root` on the first navigation action, keeping Compose, Material 3, OkHttp, and `kotlinx.serialization` off the cold-start critical path.
+- UI icons and fast-start geometric primitives (dividers, circular avatar backdrop, outlined borders, pill button) render through a 1.7 KB custom icon font (`finimal_icons.ttf`) so Frame 1 batches into a single HWUI `AtlasTextOp` shader instead of compiling multiple GPU shaders.
+- The Libraries list from the last visit is cached as a compact TSV snapshot alongside the JSON cache and read off the main thread at app start, so the first frame shows the libraries without loading `BaseItemDto` or `kotlinx.serialization`.
+- Only what the first frame needs runs before it. `androidx.startup.InitializationProvider` is removed completely (zero startup ContentProviders); `OkHttp`, `Media` scratch storage, WorkManager, `ProfileInstaller` (API < 35), the codec-list read, and queue kicks all initialize lazily or after `MainActivity`'s first frame (`App.afterFirstFrame`).
 - The splash goes without Android's fade-out, and the starting window follows the system's light or dark mode.
 - Measuring: install with `adb install --no-incremental` (an incremental install skips compilation), then take the median `am start -W` TotalTime of at least 10 cold starts.

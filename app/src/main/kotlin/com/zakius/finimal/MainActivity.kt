@@ -9,58 +9,52 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.isSystemInDarkTheme
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.safeDrawingPadding
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
-import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.dynamicDarkColorScheme
-import androidx.compose.material3.dynamicLightColorScheme
-import androidx.compose.material3.lightColorScheme
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.key
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.CompositionLocalProvider
-import androidx.compose.material.ripple.RippleAlpha
-import androidx.compose.material3.LocalRippleConfiguration
-import androidx.compose.material3.RippleConfiguration
-import androidx.compose.foundation.layout.padding
-import androidx.compose.ui.unit.dp
+import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.setValue
-import androidx.compose.runtime.saveable.listSaver
-import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.runtime.saveable.rememberSaveableStateHolder
-import androidx.compose.runtime.toMutableStateList
-import androidx.compose.ui.Modifier
-import androidx.compose.foundation.layout.Box
-import androidx.compose.runtime.State
-import androidx.compose.runtime.rememberUpdatedState
-import androidx.compose.runtime.staticCompositionLocalOf
-import androidx.compose.ui.layout.layout
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Settings
-import androidx.compose.ui.graphics.painter.Painter
-import androidx.compose.ui.graphics.vector.rememberVectorPainter
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalFocusManager
-import androidx.compose.ui.semantics.clearAndSetSemantics
-import kotlinx.serialization.Serializable
-import kotlinx.serialization.json.Json
 
 class MainActivity : ComponentActivity() {
     // A denial is fine, since downloads run without the notification. Android stops asking after two denials.
     private val notifications = registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
-    private var openDownloads by mutableStateOf(false)
+    private var openDownloadsFlag = false
+    private var openDownloadsState: MutableState<Boolean>? = null
+    private var fastLibrariesView: LibrariesFastView? = null
+    private var fastLoginView: LoginFastView? = null
+    private var composeMounted = false
 
     fun askNotifications() {
         if (Build.VERSION.SDK_INT >= 33) notifications.launch(Manifest.permission.POST_NOTIFICATIONS)
+    }
+
+    private fun mountCompose(initialStack: List<Screen>? = null) {
+        if (composeMounted) return
+        composeMounted = true
+        fastLibrariesView?.dispose()
+        fastLibrariesView = null
+        fastLoginView?.dispose()
+        fastLoginView = null
+        val state = mutableStateOf(openDownloadsFlag).also { openDownloadsState = it }
+        setContent {
+            Theme {
+                Root(state.value, {
+                    openDownloadsFlag = false
+                    state.value = false
+                }, initialStack = initialStack) { id, onBack, onPlay ->
+                    PlayerScreen(id, onBack, onPlay)
+                }
+            }
+        }
+    }
+
+    private fun showFastLibraries() {
+        fastLoginView?.dispose()
+        fastLoginView = null
+        val view = LibrariesFastView(
+            this,
+            onNavigate = { target -> mountCompose(listOf(Screen.Libraries, target)) },
+            onSessionExpired = { mountCompose(listOf(Screen.Login)) },
+        )
+        fastLibrariesView = view
+        setContentView(view)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -70,20 +64,29 @@ class MainActivity : ComponentActivity() {
         if (Build.VERSION.SDK_INT >= 31) splashScreen.setOnExitAnimationListener { it.remove() }
         enableEdgeToEdge()
         // A recreated activity restores its back stack, so don't push Downloads again.
-        if (savedInstanceState == null) openDownloads = intent.getBooleanExtra(EXTRA_DOWNLOADS, false)
-        setContent {
-            Theme {
-                Root(openDownloads, { openDownloads = false }) { id, onBack, onPlay ->
-                    PlayerScreen(id, onBack, onPlay)
+        if (savedInstanceState == null) openDownloadsFlag = intent.getBooleanExtra(EXTRA_DOWNLOADS, false)
+
+        val count = if (savedInstanceState == null) App.prefs.accountCount else -1
+        when {
+            savedInstanceState == null && !openDownloadsFlag && App.prefs.loggedIn && count <= 1 -> showFastLibraries()
+            savedInstanceState == null && !App.prefs.loggedIn && count == 0 -> {
+                val login = LoginFastView(this) {
+                    showFastLibraries()
+                    fastLibrariesView?.startRefresh()
                 }
+                fastLoginView = login
+                setContentView(login)
             }
+            else -> mountCompose()
         }
+
         val decor = window.decorView
         decor.viewTreeObserver.addOnDrawListener(object : ViewTreeObserver.OnDrawListener {
             override fun onDraw() {
                 decor.post { // A listener can't be removed from inside onDraw.
                     decor.viewTreeObserver.removeOnDrawListener(this)
                     AndroidApp.instance.afterFirstFrame()
+                    fastLibrariesView?.startRefresh()
                 }
             }
         })
@@ -96,7 +99,14 @@ class MainActivity : ComponentActivity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        if (intent.getBooleanExtra(EXTRA_DOWNLOADS, false)) openDownloads = true
+        if (intent.getBooleanExtra(EXTRA_DOWNLOADS, false)) {
+            if (!composeMounted && fastLibrariesView != null) {
+                mountCompose(listOf(Screen.Libraries, Screen.Downloads))
+            } else {
+                openDownloadsFlag = true
+                openDownloadsState?.value = true
+            }
+        }
     }
 
     companion object { const val EXTRA_DOWNLOADS = "downloads" }
