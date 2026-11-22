@@ -11,6 +11,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.platform.Font
+import finimal.core.catching
 import finimal.core.writeAtomically
 import java.io.File
 import kotlinx.serialization.json.Json
@@ -62,7 +63,7 @@ internal actual fun RetryOnNewNetwork(onRetry: () -> Unit) {}
  * single background thread so UI clicks (sort, unplayed, audio delay, window save) never block on fsync.
  */
 class JsonFileStore(private val file: File) : KeyValueStore {
-    private val values: MutableMap<String, Any?> = runCatching { Json.parseToJsonElement(file.readText()) as JsonObject }
+    private val values: MutableMap<String, Any?> = catching { Json.parseToJsonElement(file.readText()) as JsonObject }
         .getOrDefault(JsonObject(emptyMap()))
         .mapValues { (_, v) -> decode(v) }
         .toMutableMap()
@@ -100,7 +101,7 @@ class JsonFileStore(private val file: File) : KeyValueStore {
                 pendingJson = null
                 p
             }
-            runCatching {
+            catching {
                 file.parentFile?.mkdirs()
                 file.writeAtomically(toWrite)
             }

@@ -1,5 +1,6 @@
 package com.zakius.finimal
 
+import finimal.core.catching
 import finimal.core.writeAtomically
 import kotlinx.serialization.json.Json
 import java.security.MessageDigest
@@ -120,7 +121,6 @@ import coil3.request.ImageRequest
 import coil3.size.Size
 import androidx.compose.runtime.State
 import androidx.compose.runtime.snapshotFlow
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.collectLatest
@@ -163,13 +163,13 @@ object ListSnapshots {
         if (key.size == 2) readFastLibraryEntries(key)?.let { entries ->
             return entries.map { e -> BaseItemDto(id = java.util.UUID.fromString(e.id), type = BaseItemKind.COLLECTION_FOLDER, name = e.name) }
         }
-        val decoded = runCatching { json.decodeFromString<List<BaseItemDto>>(file(key).readText()) }.getOrNull()
+        val decoded = catching { json.decodeFromString<List<BaseItemDto>>(file(key).readText()) }.getOrNull()
         if (decoded != null && key.size == 2) writeFastLibraries(key, decoded)
         return decoded
     }
 
     fun write(key: List<Any?>, list: List<BaseItemDto>) {
-        runCatching {
+        catching {
             dir.mkdirs()
             if (key.size == 2) writeFastLibraries(key, list)
             // Disposable display cache in appCache: atomic rename without fsync avoids flash I/O stalls on navigation.
@@ -183,7 +183,7 @@ object ListSnapshots {
         write(key, list)
     }
 
-    fun readFastLibraryEntries(key: List<Any?>): List<LibraryEntry>? = runCatching {
+    fun readFastLibraryEntries(key: List<Any?>): List<LibraryEntry>? = catching {
         val f = fastLibrariesFile(key)
         if (!f.exists()) return null
         val text = f.readText()
@@ -195,7 +195,7 @@ object ListSnapshots {
     }.getOrNull()
 
     private fun writeFastLibraries(key: List<Any?>, list: List<BaseItemDto>) {
-        runCatching {
+        catching {
             dir.mkdirs()
             val encoded = list.joinToString("\n") { lib ->
                 "${lib.id}\t${lib.name.orEmpty().replace('\t', ' ').replace('\n', ' ')}"
@@ -246,7 +246,7 @@ fun FocusMemory(content: @Composable () -> Unit) {
         snapshotFlow { shown.value }.collect { visible ->
             if (visible) {
                 val key = state.focusedKey.value ?: return@collect
-                runCatching { state.requesters[key]?.requestFocus() }
+                catching { state.requesters[key]?.requestFocus() }
             }
         }
     }
@@ -354,7 +354,7 @@ private fun loadFresh(
                 val result = if (pushed != null && unreachable(pushed)) {
                     Result.failure(pushed)
                 } else {
-                    runCatching { block() }.onFailure { e ->
+                    catching { block() }.onFailure { e ->
                         if (e is InvalidStatusException && e.status == 401) App.server.expire()
                     }
                 }
@@ -413,15 +413,12 @@ private suspend fun downloadAll(episodes: List<BaseItemDto>) {
         for (ep in episodes) {
             if (downloads.download(ep.id.toString()) != null) continue
             // Episodes already fetched with sources queue as purely local writes, so leaving the screen can't stop it partway.
-            runCatching {
+            catching {
                 val full = if (ep.mediaSources != null) ep else App.server.item(ep.id.toString())
                 downloads.startDownload(full, auto = false)
             }
                 .onSuccess { queued++ }
-                .onFailure { e ->
-                    if (e is CancellationException) throw e
-                    failures += e
-                }
+                .onFailure { e -> failures += e }
         }
     }
     val firstFailure = failures.firstOrNull()
@@ -471,17 +468,14 @@ private fun downloadAllAction(fetch: suspend () -> List<BaseItemDto>): () -> Uni
         busy = true
         toast("Checking episodes…")
         scope.launch {
-            runCatching { fetch() }
+            catching { fetch() }
                 .onSuccess { fetched ->
                     val new = withContext(Dispatchers.IO) {
                         fetched.filter { ep -> App.downloads?.download(ep.id.toString()) == null }
                     }
                     if (new.isEmpty()) toast("Nothing new to download") else pending = new
                 }
-                .onFailure { e ->
-                    if (e is CancellationException) throw e
-                    toast(loadError(e))
-                }
+                .onFailure { e -> toast(loadError(e)) }
             busy = false
         }
     }
@@ -674,8 +668,8 @@ fun LoginScreen(
     LaunchedEffect(Unit) {
         if (!focusedOnce) {
             focusedOnce = true
-            if (prefilledUser.isNotBlank()) runCatching { passFocus.requestFocus() }
-            else if (adding) runCatching { userFocus.requestFocus() }
+            if (prefilledUser.isNotBlank()) catching { passFocus.requestFocus() }
+            else if (adding) catching { userFocus.requestFocus() }
         }
     }
     val scope = rememberCoroutineScope()
@@ -685,7 +679,7 @@ fun LoginScreen(
         if (busy || !canSubmit) return
         busy = true
         scope.launch {
-            runCatching { App.server.login(url, port, user, pass) }
+            catching { App.server.login(url, port, user, pass) }
                 .onSuccess { onDone() }
                 .onFailure { error = it }
             busy = false
@@ -809,7 +803,7 @@ fun LibrariesScreen(modifier: Modifier, push: (Screen) -> Unit) {
     LaunchedEffect(Unit) {
         val uid = App.prefs.userId
         if (uid == null || !userName.isNullOrEmpty()) return@LaunchedEffect
-        val name = runCatching { App.server.userName() }.getOrNull()
+        val name = catching { App.server.userName() }.getOrNull()
         if (!name.isNullOrEmpty()) {
             App.prefs.setName(uid, name)
             userName = name
@@ -885,13 +879,13 @@ fun LibraryScreen(modifier: Modifier, screen: Screen.Library, push: (Screen) -> 
     LaunchedEffect(Unit) {
         if (searchOnly && !focusedOnce) {
             focusedOnce = true
-            runCatching { focus.requestFocus() }
+            catching { focus.requestFocus() }
             keyboard?.show()
         }
     }
     LaunchedEffect(searchFocusTrigger) {
         if (searchFocusTrigger > 0 && showSearch) {
-            runCatching { focus.requestFocus() }
+            catching { focus.requestFocus() }
             keyboard?.show()
         }
     }
@@ -1626,7 +1620,7 @@ private fun ItemInfoDialog(item: BaseItemDto, onDismiss: () -> Unit) {
     var loading by remember(item.id) { mutableStateOf(cachedFull == null) }
     LaunchedEffect(item.id) {
         if (full == null) {
-            full = runCatching { AppCache.fetchOrJoinItem(itemId, flushFirst = false) }.getOrNull() ?: item
+            full = catching { AppCache.fetchOrJoinItem(itemId, flushFirst = false) }.getOrNull() ?: item
             loading = false
         }
     }
@@ -1803,7 +1797,7 @@ private fun DownloadRow(
                 Fill.PAUSED -> TextButton(onClick = {
                     scope.launch(Dispatchers.IO) {
                         // A fresh copy of the item when the server answers, else the one saved with the download.
-                        val fresh = runCatching { AppCache.fetchOrJoinItem(id, flushFirst = false) }.getOrDefault(d.item)
+                        val fresh = catching { AppCache.fetchOrJoinItem(id, flushFirst = false) }.getOrDefault(d.item)
                         media.startDownload(fresh, d.auto)
                     }
                 }) { Text(if (d.failed) "Retry" else "Resume") }
@@ -2185,7 +2179,7 @@ private fun Modifier.screenShortcuts(
         val shown = LocalShown.current
         LaunchedEffect(Unit) {
             snapshotFlow { shown.value }.collect { visible ->
-                if (visible && latestFocusOnShow) runCatching { requester.requestFocus() }
+                if (visible && latestFocusOnShow) catching { requester.requestFocus() }
             }
         }
         Modifier.focusRequester(requester).focusable()
@@ -2421,13 +2415,13 @@ private fun PinDialog(
     val ok = pin.length in 4..8
     // Typing goes straight in, from a keyboard or a TV remote's number keys.
     val focus = remember { FocusRequester() }
-    LaunchedEffect(Unit) { runCatching { focus.requestFocus() } }
+    LaunchedEffect(Unit) { catching { focus.requestFocus() } }
     // A wrong PIN clears the field, and focus goes back to it, because the now disabled OK button can't keep focus.
     fun submit() {
         if (!onPin(pin)) {
             wrong = true
             pin = ""
-            runCatching { focus.requestFocus() }
+            catching { focus.requestFocus() }
         }
     }
     AlertDialog(onDismiss,

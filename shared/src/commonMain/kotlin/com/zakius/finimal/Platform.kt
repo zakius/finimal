@@ -3,6 +3,8 @@ package com.zakius.finimal
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.mutableStateOf
 import finimal.core.PendingStore
+import finimal.core.catching
+import finimal.core.moveOver
 import java.io.File
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CoroutineScope
@@ -138,7 +140,7 @@ object App {
         val file = File(platform.appFiles, "pending-$name.json")
         // Older versions kept one pending.json for everyone. It goes to the next account that logs in.
         val legacy = File(platform.appFiles, "pending.json")
-        if (account.second != null && legacy.exists() && !file.exists()) legacy.renameTo(file)
+        if (account.second != null && legacy.exists() && !file.exists()) catching { legacy.moveOver(file) }
         val store = PendingStore(file)
         pendingStore = store
         pendingAccount = account

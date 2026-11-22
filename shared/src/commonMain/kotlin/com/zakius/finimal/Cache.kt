@@ -1,5 +1,6 @@
 package com.zakius.finimal
 
+import finimal.core.catching
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CancellationException
@@ -307,7 +308,7 @@ object AppCache {
                 val existing = getList(cacheKey)
                 if (existing != null && isListFresh(existing, maxAgeMs = 30_000L)) continue
                 val changes = App.server.localChanges
-                val list = runCatching { App.server.items(id, sort, unplayed, "") }.getOrNull() ?: return@launchSpeculative
+                val list = catching { App.server.items(id, sort, unplayed, "") }.getOrNull() ?: return@launchSpeculative
                 if (generation.get() != gen) return@launchSpeculative
                 putList(cacheKey, list, fromNetwork = true, localChanges = changes)
                 ListSnapshots.writeIfChanged(cacheKey, list, existing?.items)
@@ -340,8 +341,8 @@ object AppCache {
             val fetchEpisodes = episodesCached == null || !isListFresh(episodesCached, maxAgeMs = 30_000L)
             if (!fetchSeasons && !fetchEpisodes) return@launchSpeculative
             val changes = App.server.localChanges
-            val sJob = if (fetchSeasons) async { runCatching { App.server.seasons(seriesId) }.getOrNull() } else null
-            val eJob = if (fetchEpisodes) async { runCatching { App.server.episodes(seriesId) }.getOrNull() } else null
+            val sJob = if (fetchSeasons) async { catching { App.server.seasons(seriesId) }.getOrNull() } else null
+            val eJob = if (fetchEpisodes) async { catching { App.server.episodes(seriesId) }.getOrNull() } else null
             val s = sJob?.await()
             val e = eJob?.await()
             if (generation.get() != gen) return@launchSpeculative
@@ -365,10 +366,10 @@ object AppCache {
         val gen = generation.get()
         val (base, user) = accountPrefix()
         launchSpeculative(listOf("play", base, user, itemId)) {
-            val segJob = launch { runCatching { fetchOrJoinSegments(itemId) } }
-            val loaded = runCatching { fetchOrJoinItem(itemId, flushFirst = false) }.getOrNull()
+            val segJob = launch { catching { fetchOrJoinSegments(itemId) } }
+            val loaded = catching { fetchOrJoinItem(itemId, flushFirst = false) }.getOrNull()
             if (loaded != null && includeSubtitles && !App.platform.isMetered && generation.get() == gen) {
-                runCatching { App.platform.prefetchSubtitles(loaded) }
+                catching { App.platform.prefetchSubtitles(loaded) }
             }
             segJob.join()
         }

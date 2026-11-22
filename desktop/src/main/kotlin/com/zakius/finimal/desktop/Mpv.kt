@@ -13,6 +13,7 @@ import com.sun.jna.Memory
 import com.sun.jna.Native
 import com.sun.jna.Pointer
 import com.sun.jna.ptr.PointerByReference
+import finimal.core.catching
 import java.lang.ref.Reference
 import java.util.concurrent.locks.ReentrantReadWriteLock
 import kotlin.concurrent.read
@@ -68,7 +69,7 @@ private object Lib {
             libc.setlocale(category, "C")
         }
         val names = listOf("mpv", "libmpv.so.2", "libmpv-2", "mpv-2", "mpv-1")
-        val loaded = names.firstNotNullOfOrNull { name -> runCatching { Native.load(name, LibMpv::class.java) }.getOrNull() }
+        val loaded = names.firstNotNullOfOrNull { name -> catching { Native.load(name, LibMpv::class.java) }.getOrNull() }
         loaded ?: throw UnsatisfiedLinkError("libmpv not found (tried ${names.joinToString()}). On Linux install libmpv2.")
     }
 }
@@ -385,7 +386,7 @@ class Mpv(options: Map<String, String>) {
         private val closer = Executors.newSingleThreadExecutor { task -> Thread(task, "mpv-close").apply { isDaemon = true } }
         /** Preloads the native libmpv library off the UI thread so the first Play doesn't stall on JNA loading. */
         fun warmLibrary() {
-            runCatching { Lib.mpv }
+            catching { Lib.mpv }
         }
     }
 }

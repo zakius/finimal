@@ -2,6 +2,7 @@
 
 package com.zakius.finimal
 
+import finimal.core.catching
 import finimal.core.chapterAt
 import finimal.core.Reconnect
 import android.os.Looper
@@ -236,7 +237,7 @@ fun PlayerScreen(itemId: String, onBack: () -> Unit, onPlay: (String) -> Unit) {
         // Outside this screen's scope, so giving up on a slow server below doesn't cut a flush short.
         val process = App.platform.scope
         val fetch = process.async {
-            runCatching {
+            catching {
                 // Only this item's unsynced state must reach the server before the item is read; the rest syncs in
                 // parallel. The check runs on App.disk so it sees a stop that the previous player recorded on exit.
                 val pending = withContext(App.disk) { App.pending.get(itemId) != null }
@@ -280,7 +281,7 @@ fun PlayerScreen(itemId: String, onBack: () -> Unit, onPlay: (String) -> Unit) {
             if (refresh == 0 && cachedEntry != null && AppCache.isListFresh(cachedEntry, maxAgeMs = 15_000L)) {
                 return@LaunchedEffect
             }
-            val fromServer = if (online) runCatching { server.episodes(seriesId) }.getOrNull() else null
+            val fromServer = if (online) catching { server.episodes(seriesId) }.getOrNull() else null
             if (fromServer != null) {
                 AppCache.putList(cacheKey, fromServer, fromNetwork = true)
                 siblings = fromServer
@@ -394,7 +395,7 @@ private fun Playback(
         // Set before anything else, so eviction and subtitle cleanup leave the playing item alone.
         Media.playing = cacheKey
         if (online && segments.isEmpty()) {
-            launch { segments = runCatching { AppCache.fetchOrJoinSegments(id) }.getOrDefault(emptyList()) }
+            launch { segments = catching { AppCache.fetchOrJoinSegments(id) }.getOrDefault(emptyList()) }
         }
         // A transcode, live or downloaded, has no embedded subtitles: those come as files too.
         val sideload = transcoding || localPlaylist != null
@@ -1022,7 +1023,7 @@ private fun VideoSurface(
                     val maxVol = audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
                     val startVol = audio.getStreamVolume(AudioManager.STREAM_MUSIC)
                     val windowBright = activity.window.attributes.screenBrightness
-                    val startBright = if (windowBright >= 0) windowBright else runCatching {
+                    val startBright = if (windowBright >= 0) windowBright else catching {
                         val sys = Settings.System.getInt(activity.contentResolver, Settings.System.SCREEN_BRIGHTNESS)
                         (sys / 255f).coerceIn(0.01f, 1f)
                     }.getOrDefault(0.5f)

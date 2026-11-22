@@ -42,7 +42,7 @@ class ScratchServer(private val scratch: () -> Scratch, private val ahead: Long 
                         }
                     }
                 } catch (e: java.util.concurrent.RejectedExecutionException) {
-                    runCatching { client.close() }
+                    catching { client.close() }
                 }
             }
         }

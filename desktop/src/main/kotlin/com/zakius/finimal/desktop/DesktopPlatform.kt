@@ -8,6 +8,7 @@ import coil3.size.Size
 import com.zakius.finimal.App
 import com.zakius.finimal.JsonFileStore
 import com.zakius.finimal.Platform
+import finimal.core.catching
 import java.io.File
 import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
@@ -61,7 +62,7 @@ object DesktopPlatform : Platform {
         val name = if (computerName != null) {
             computerName
         } else {
-            val hostname = runCatching { File("/proc/sys/kernel/hostname").readText().trim() }.getOrNull()
+            val hostname = catching { File("/proc/sys/kernel/hostname").readText().trim() }.getOrNull()
             if (hostname.isNullOrEmpty()) "Desktop" else hostname
         }
         options.deviceInfo = DeviceInfo(id, name)

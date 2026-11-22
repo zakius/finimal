@@ -21,6 +21,7 @@ import androidx.compose.ui.graphics.toComposeImageBitmap
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import androidx.compose.runtime.snapshotFlow
+import finimal.core.catching
 import java.awt.AWTEvent
 import java.awt.KeyboardFocusManager
 import java.awt.Toolkit
@@ -110,7 +111,7 @@ fun main(args: Array<String>) {
 private fun scaleFromXftDpi() {
     if (!System.getProperty("os.name").startsWith("Linux") || System.getProperty("sun.java2d.uiScale") != null ||
         System.getenv("J2D_UISCALE") != null) return
-    val resources = runCatching {
+    val resources = catching {
         val x11 = Native.load("libX11.so.6", X11::class.java)
         val display = x11.XOpenDisplay(null) ?: return
         try { x11.XResourceManagerString(display) } finally { x11.XCloseDisplay(display) }

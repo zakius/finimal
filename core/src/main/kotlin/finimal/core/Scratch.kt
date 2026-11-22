@@ -266,7 +266,7 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
             }
 
             override fun close() {
-                openChannel?.let { runCatching { it.close() } }
+                openChannel?.let { catching { it.close() } }
                 openChannel = null
                 openChunk = -1
             }
@@ -597,7 +597,11 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
                     synchronized(this) {
                         // Once gone, the folder may belong to a new entry, and this part to that entry's filler.
                         if (gone) return stored
-                        if (!partFile(i).renameTo(chunkFile(i))) throw StorageError(IOException("rename failed"))
+                        try {
+                            partFile(i).moveOver(chunkFile(i))
+                        } catch (e: IOException) {
+                            throw StorageError(e)
+                        }
                         present.set(i)
                         writing = -1
                         written = 0
