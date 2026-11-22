@@ -20,7 +20,7 @@ From the repo root:
 .claude/skills/verify-play-state-sync/run.sh
 ```
 
-About 5 s. It needs Java 11 or newer: `java` on PATH, `JAVA=/path/to/bin/java`, or `~/toolchain/jdk-*/bin/java`. The first run downloads tla2tools.jar v1.8.0 to `~/.cache/finimal-formal/` (override with `FINIMAL_FORMAL_CACHE`) and checks its pinned SHA-256. Each run writes TLC's full output to a fresh folder under `/tmp` and prints its path.
+About 5 s. It needs Java 11 or newer: `java` on PATH, `JAVA=/path/to/bin/java`, or `~/toolchain/jdk-*/bin/java`. The first run downloads tla2tools.jar v1.7.4, the latest stable release (pre-release jars such as v1.8.0 get re-uploaded under the same tag, which breaks the pin), to `~/.cache/finimal-formal/` (override with `FINIMAL_FORMAL_CACHE`) and checks its pinned SHA-256. Each run writes TLC's full output to a fresh folder under `build/formal/` in the repo and prints its path.
 
 Each line of output is one TLC run (the table at the top of `run.sh`):
 
