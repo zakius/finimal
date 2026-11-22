@@ -21,12 +21,11 @@ import androidx.compose.ui.graphics.toComposeImageBitmap
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import androidx.compose.runtime.snapshotFlow
-import androidx.compose.ui.ExperimentalComposeUiApi
-import androidx.compose.ui.input.pointer.PointerButton
-import androidx.compose.ui.input.pointer.PointerEventType
-import androidx.compose.ui.input.pointer.onPointerEvent
+import java.awt.AWTEvent
 import java.awt.KeyboardFocusManager
+import java.awt.Toolkit
 import java.awt.event.KeyEvent
+import java.awt.event.MouseEvent
 import kotlinx.coroutines.flow.collectLatest
 import coil3.ImageLoader
 import coil3.PlatformContext
@@ -55,12 +54,17 @@ import okio.Path.Companion.toOkioPath
 import kotlin.concurrent.thread
 import kotlin.system.exitProcess
 
-@OptIn(ExperimentalComposeUiApi::class)
 fun main(args: Array<String>) {
     if ("--check-player" in args) exitProcess(checkPlayer())
     scaleFromXftDpi()
     App.platform = DesktopPlatform
     SingletonImageLoader.setSafe(::imageLoader)
+    // The mouse's back button acts like Esc. X11 numbers it 8, after the wheel's 4 to 7, so Java reports button 6 on
+    // Linux and 4 elsewhere. Compose knows only buttons 1 to 5, so it never sees the Linux one: listen to AWT instead.
+    val backButton = if (System.getProperty("os.name").startsWith("Linux")) 6 else 4
+    Toolkit.getDefaultToolkit().addAWTEventListener({ e ->
+        if (e.id == MouseEvent.MOUSE_PRESSED && (e as MouseEvent).button == backButton) pressEscape()
+    }, AWTEvent.MOUSE_EVENT_MASK)
     // Warm libmpv (JNA native load) and the saved Libraries snapshot off the UI thread so the first play and first frame are fast.
     thread(name = "desktop-warm-up", isDaemon = true) {
         if (App.prefs.loggedIn) ListSnapshots.prefetchFastLibraries()
@@ -87,10 +91,7 @@ fun main(args: Array<String>) {
         ) {
             Theme {
                 CompositionLocalProvider(LocalWindow provides control) {
-                    Box(Modifier.fillMaxSize().onPointerEvent(PointerEventType.Press) { e ->
-                        // The mouse's back button acts like Esc.
-                        if (e.button == PointerButton.Back) pressEscape()
-                    }) {
+                    Box(Modifier.fillMaxSize()) {
                         Root(openDownloads = false, openedDownloads = {}) { id, onBack, onPlay -> PlayerScreen(id, onBack, onPlay) }
                         ToastHost(Modifier.align(Alignment.BottomCenter))
                     }

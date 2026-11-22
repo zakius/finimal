@@ -16,6 +16,8 @@ import finimal.core.serverCandidates
 import androidx.compose.ui.input.pointer.isSecondaryPressed
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.unit.round
 import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.widthIn
@@ -40,6 +42,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -1099,7 +1102,9 @@ private fun Poster(
     var showInfo by remember { mutableStateOf(false) }
     // The focus highlight doesn't show over artwork; a border does.
     var focused by remember { mutableStateOf(false) }
-    val openMenu: (() -> Unit)? = if (onChanged != null) remember { { menu = true } } else null
+    var menuAt by remember { mutableStateOf<Offset?>(null) }
+    val openMenu: (() -> Unit)? = if (onChanged != null) remember { { menuAt = null; menu = true } } else null
+    val openMenuAt: ((Offset) -> Unit)? = if (onChanged != null) remember { { at: Offset -> menuAt = at; menu = true } } else null
     val latestHover by rememberUpdatedState(onFocusOrHover)
     val imageTag = item.imageTags?.get(ImageType.PRIMARY)
     val imageUrl = remember(item.id, imageTag) { App.server.imageUrl(item) }
@@ -1135,7 +1140,7 @@ private fun Poster(
                     Modifier
                 }
             )
-            .onSecondaryClick(openMenu)
+            .onSecondaryClick(openMenuAt)
             .combinedClickable(onClick = onClick, onLongClickLabel = "Actions", onLongClick = openMenu)
     ) {
         Box(if (focused) Modifier.border(3.dp, MaterialTheme.colorScheme.primary) else Modifier) {
@@ -1175,7 +1180,7 @@ private fun Poster(
             if (unsynced) Text("not synced", color = Color.White, style = MaterialTheme.typography.labelSmall,
                 modifier = Modifier.align(Alignment.BottomStart).padding(bottom = if (focused) 7.dp else 4.dp).background(Color(0xAA000000)))
             ProgressBar(item, state, Modifier.align(Alignment.BottomStart).padding(if (focused) 3.dp else 0.dp)) // Stays inside the focus border.
-            if (onChanged != null && menu) {
+            if (onChanged != null && menu) MenuAt(menuAt) {
                 ItemMenu(
                     item,
                     state?.played == true,
@@ -1529,7 +1534,9 @@ fun EpisodeRow(
     var menu by remember { mutableStateOf(false) }
     var confirmDelete by remember { mutableStateOf(false) }
     var showInfo by remember { mutableStateOf(false) }
-    val openMenu = remember { { menu = true } }
+    var menuAt by remember { mutableStateOf<Offset?>(null) }
+    val openMenu = remember { { menuAt = null; menu = true } }
+    val openMenuAt = remember { { at: Offset -> menuAt = at; menu = true } }
     val imageTag = ep.imageTags?.get(ImageType.PRIMARY)
     val imageUrl = remember(ep.id, imageTag) { App.server.imageUrl(ep, ImageType.PRIMARY, 320) }
     val imageRequest = rememberImageRequest(imageUrl)
@@ -1540,47 +1547,51 @@ fun EpisodeRow(
     val runtimeText = remember(ep.runTimeTicks) {
         ep.runTimeTicks?.let { formatMs(it / TICKS_PER_MS) }
     }
-    Row(
-        Modifier.fillMaxWidth()
-            .background(if (highlighted) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent)
-            .focusMemory(ep.id)
-            .onSecondaryClick(openMenu)
-            .combinedClickable(onClick = onPlay, onLongClickLabel = "Actions", onLongClick = openMenu)
-            .padding(8.dp),
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        Box(Modifier.width(140.dp)) {
-            AsyncImage(imageRequest, null, contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9).background(Color.DarkGray))
-            ProgressBar(ep, state, Modifier.align(Alignment.BottomStart))
-        }
-        Column(Modifier.weight(1f)) {
-            Text(title, style = MaterialTheme.typography.titleSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
-            val dl = resolvedDownload
-            val bits = listOfNotNull(
-                runtimeText,
-                if (state?.played == true) "✓ played" else null,
-                dl?.label,
-                if (unsynced) "not synced" else null,
-            )
-            Text(bits.joinToString(" · "), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-        Box {
-            IconButton(onClick = openMenu) { GlyphIcon(AppIcons.MORE_VERT, "More options") }
-            if (menu) {
-                ItemMenu(
-                    ep,
-                    state?.played == true,
-                    unsynced,
-                    onDismiss = { menu = false },
-                    downloaded = resolvedDownload != null,
-                    onStartOver = onStartOver,
-                    onRequestDelete = { confirmDelete = true },
-                    onRequestInfo = { showInfo = true },
-                    onChanged = onChanged,
+    val itemMenu = @Composable {
+        ItemMenu(
+            ep,
+            state?.played == true,
+            unsynced,
+            onDismiss = { menu = false },
+            downloaded = resolvedDownload != null,
+            onStartOver = onStartOver,
+            onRequestDelete = { confirmDelete = true },
+            onRequestInfo = { showInfo = true },
+            onChanged = onChanged,
+        )
+    }
+    Box {
+        Row(
+            Modifier.fillMaxWidth()
+                .background(if (highlighted) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent)
+                .focusMemory(ep.id)
+                .onSecondaryClick(openMenuAt)
+                .combinedClickable(onClick = onPlay, onLongClickLabel = "Actions", onLongClick = openMenu)
+                .padding(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Box(Modifier.width(140.dp)) {
+                AsyncImage(imageRequest, null, contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9).background(Color.DarkGray))
+                ProgressBar(ep, state, Modifier.align(Alignment.BottomStart))
+            }
+            Column(Modifier.weight(1f)) {
+                Text(title, style = MaterialTheme.typography.titleSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                val dl = resolvedDownload
+                val bits = listOfNotNull(
+                    runtimeText,
+                    if (state?.played == true) "✓ played" else null,
+                    dl?.label,
+                    if (unsynced) "not synced" else null,
                 )
+                Text(bits.joinToString(" · "), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Box {
+                IconButton(onClick = openMenu) { GlyphIcon(AppIcons.MORE_VERT, "More options") }
+                if (menu && menuAt == null) itemMenu()
             }
         }
+        if (menu && menuAt != null) MenuAt(menuAt) { itemMenu() }
     }
     if (confirmDelete) ConfirmDelete(ep, { confirmDelete = false }, onChanged)
     if (showInfo) ItemInfoDialog(ep) { showInfo = false }
@@ -1731,7 +1742,9 @@ private fun DownloadRow(
     var menu by remember { mutableStateOf(false) }
     var confirmDelete by remember { mutableStateOf(false) }
     var showInfo by remember { mutableStateOf(false) }
-    val openMenu = remember { { menu = true } }
+    var menuAt by remember { mutableStateOf<Offset?>(null) }
+    val openMenu = remember { { menuAt = null; menu = true } }
+    val openMenuAt = remember { { at: Offset -> menuAt = at; menu = true } }
     val rowTitle = remember(group, d.item) {
         if (group == "h-queue" && d.item.type == BaseItemKind.EPISODE && !d.item.seriesName.isNullOrBlank()) {
             "${d.item.seriesName} · ${episodeLabel(d.item)}"
@@ -1739,65 +1752,69 @@ private fun DownloadRow(
             itemLabel(d.item)
         }
     }
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .focusMemory(id)
-            .onSecondaryClick(openMenu)
-            .combinedClickable(onClick = { push(Screen.Play(id)) }, onLongClickLabel = "Actions", onLongClick = openMenu)
-            .padding(start = 16.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Column(Modifier.weight(1f)) {
-            Text(rowTitle)
-            val size = when {
-                status.fill != Fill.DONE -> if (status.totalBytes > 0) {
-                    " · ${formatBytes(status.bytes)} / ${formatBytes(status.totalBytes)}"
-                } else {
-                    " · ${formatBytes(status.bytes)}"
+    val itemMenu = @Composable {
+        ItemMenu(
+            d.item,
+            state?.played == true,
+            unsynced,
+            onDismiss = { menu = false },
+            downloaded = true,
+            onStartOver = { scope.launch { startOver(d.item, push) } },
+            onRequestDelete = { confirmDelete = true },
+            onRequestInfo = { showInfo = true },
+            onChanged = {},
+        )
+    }
+    Box {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .focusMemory(id)
+                .onSecondaryClick(openMenuAt)
+                .combinedClickable(onClick = { push(Screen.Play(id)) }, onLongClickLabel = "Actions", onLongClick = openMenu)
+                .padding(start = 16.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(rowTitle)
+                val size = when {
+                    status.fill != Fill.DONE -> if (status.totalBytes > 0) {
+                        " · ${formatBytes(status.bytes)} / ${formatBytes(status.totalBytes)}"
+                    } else {
+                        " · ${formatBytes(status.bytes)}"
+                    }
+                    status.bytes > 0 -> " · ${formatBytes(status.bytes)}"
+                    else -> ""
                 }
-                status.bytes > 0 -> " · ${formatBytes(status.bytes)}"
-                else -> ""
-            }
-            val bits = listOfNotNull(
-                status.label + size,
-                if (d.auto) "kept by keep-next" else null,
-                if (state?.played == true) "✓ played" else null,
-                if (unsynced) "not synced" else null,
-            )
-            Text(bits.joinToString(" · "), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            if (status.fill != Fill.DONE) LinearProgressIndicator({ status.percent / 100f }, Modifier.fillMaxWidth().padding(top = 4.dp))
-            else ProgressBar(d.item, state)
-        }
-        when (status.fill) {
-            Fill.RUNNING, Fill.QUEUED -> TextButton(onClick = {
-                scope.launch(Dispatchers.IO) { media.pauseDownload(id) }
-            }) { Text("Pause") }
-            Fill.PAUSED -> TextButton(onClick = {
-                scope.launch(Dispatchers.IO) {
-                    // A fresh copy of the item when the server answers, else the one saved with the download.
-                    val fresh = runCatching { AppCache.fetchOrJoinItem(id, flushFirst = false) }.getOrDefault(d.item)
-                    media.startDownload(fresh, d.auto)
-                }
-            }) { Text(if (d.failed) "Retry" else "Resume") }
-            Fill.DONE -> {}
-        }
-        Box {
-            IconButton(onClick = openMenu) { GlyphIcon(AppIcons.MORE_VERT, "More options") }
-            if (menu) {
-                ItemMenu(
-                    d.item,
-                    state?.played == true,
-                    unsynced,
-                    onDismiss = { menu = false },
-                    downloaded = true,
-                    onStartOver = { scope.launch { startOver(d.item, push) } },
-                    onRequestDelete = { confirmDelete = true },
-                    onRequestInfo = { showInfo = true },
-                    onChanged = {},
+                val bits = listOfNotNull(
+                    status.label + size,
+                    if (d.auto) "kept by keep-next" else null,
+                    if (state?.played == true) "✓ played" else null,
+                    if (unsynced) "not synced" else null,
                 )
+                Text(bits.joinToString(" · "), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (status.fill != Fill.DONE) LinearProgressIndicator({ status.percent / 100f }, Modifier.fillMaxWidth().padding(top = 4.dp))
+                else ProgressBar(d.item, state)
+            }
+            when (status.fill) {
+                Fill.RUNNING, Fill.QUEUED -> TextButton(onClick = {
+                    scope.launch(Dispatchers.IO) { media.pauseDownload(id) }
+                }) { Text("Pause") }
+                Fill.PAUSED -> TextButton(onClick = {
+                    scope.launch(Dispatchers.IO) {
+                        // A fresh copy of the item when the server answers, else the one saved with the download.
+                        val fresh = runCatching { AppCache.fetchOrJoinItem(id, flushFirst = false) }.getOrDefault(d.item)
+                        media.startDownload(fresh, d.auto)
+                    }
+                }) { Text(if (d.failed) "Retry" else "Resume") }
+                Fill.DONE -> {}
+            }
+            Box {
+                IconButton(onClick = openMenu) { GlyphIcon(AppIcons.MORE_VERT, "More options") }
+                if (menu && menuAt == null) itemMenu()
             }
         }
+        if (menu && menuAt != null) MenuAt(menuAt) { itemMenu() }
     }
     if (confirmDelete) ConfirmDelete(d.item, { confirmDelete = false })
     if (showInfo) ItemInfoDialog(d.item) { showInfo = false }
@@ -2197,17 +2214,26 @@ private fun Modifier.screenShortcuts(
     }.then(focusModifier)
 }
 
-/** A right click does what a long press does, opening an item's menu with the mouse. Touch has no secondary button. */
-private fun Modifier.onSecondaryClick(action: (() -> Unit)?): Modifier = if (action == null) this else pointerInput(action) {
+/**
+ * A right click does what a long press does, opening an item's menu with the mouse. [action] gets where the click
+ * landed in this element, so the menu opens at the pointer. Touch has no secondary button.
+ */
+private fun Modifier.onSecondaryClick(action: ((Offset) -> Unit)?): Modifier = if (action == null) this else pointerInput(action) {
     awaitPointerEventScope {
         while (true) {
             val e = awaitPointerEvent()
             if (e.type == PointerEventType.Press && e.buttons.isSecondaryPressed) {
                 e.changes.forEach { change -> change.consume() }
-                action()
+                action(e.changes.first().position)
             }
         }
     }
+}
+
+/** Shows [menu] at [at], a point in the parent's coordinates, or anchored to the parent itself when [at] is null. */
+@Composable
+private fun MenuAt(at: Offset?, menu: @Composable () -> Unit) {
+    if (at == null) menu() else Box(Modifier.offset { at.round() }) { menu() }
 }
 
 /** A "− value +" control that steps through [options]. A stored value not in the list shows as the nearest option. */
