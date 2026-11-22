@@ -95,5 +95,5 @@ fun File.writeAtomically(text: String, sync: Boolean = true) {
         out.write(text.toByteArray())
         if (sync) out.fd.sync()
     }
-    Files.move(tmp.toPath(), toPath(), REPLACE_EXISTING, ATOMIC_MOVE)
+    if (!tmp.renameTo(this)) error("cannot replace $this")
 }
