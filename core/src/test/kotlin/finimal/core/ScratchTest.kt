@@ -351,7 +351,7 @@ class ScratchTest {
         assertEquals(2L * chunk, e.bytes())
     }
 
-    @Test fun readerReusesChannelAcrossCompletedChunks() {
+    @Test fun readerReadsAWholeDownloadAcrossChunks() {
         entry().download()
         val e = scratch.entry("k")
         val out = java.io.ByteArrayOutputStream()
