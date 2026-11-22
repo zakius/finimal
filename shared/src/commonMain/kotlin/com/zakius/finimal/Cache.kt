@@ -81,10 +81,8 @@ object AppCache {
     ) {
         synchronized(lock) {
             val existing = lists[key]
-            // Don't let an older disk snapshot overwrite a fresh network fetch.
             if (!fromNetwork && existing != null && existing.fromNetwork) return
             lists[key] = ListEntry(list, fromNetwork, fetchedAtMs, localChanges)
-            // Series episodes contain every season's episodes: slice them so tapping any Season opens at 0 ms.
             if (key.size == 4 && key[3] == "episodes") {
                 val base = key[0]
                 val user = key[1]
@@ -374,7 +372,6 @@ object AppCache {
         }
     }
 
-    /** Pre-warms episode thumbnails around [focusIndex] into Coil's cache. */
     fun prefetchEpisodeThumbnails(episodes: List<BaseItemDto>, focusIndex: Int = 0, count: Int = 10) {
         if (episodes.isEmpty()) return
         val start = (focusIndex - 2).coerceAtLeast(0)

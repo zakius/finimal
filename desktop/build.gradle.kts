@@ -17,7 +17,6 @@ java {
 }
 kotlin { compilerOptions { jvmTarget = JvmTarget.JVM_21 } }
 
-// JNA's jar bundles native code for about 30 platforms; keep only Linux and Windows x86-64, the ones the app ships for.
 val jna = configurations.create("jna")
 val jnaTrimmed = tasks.register<Jar>("jnaTrimmed") {
     archiveFileName = "jna.jar"
@@ -34,7 +33,6 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-swing:1.11.0")
     jna("net.java.dev.jna:jna:5.19.1")
     implementation(files(jnaTrimmed))
-    // D-Bus, to keep the screensaver off during playback. This transport uses the JDK's own Unix sockets.
     implementation("com.github.hypfvieh:dbus-java-core:5.2.2")
     implementation("com.github.hypfvieh:dbus-java-transport-native-unixsocket:5.2.2")
     testImplementation(kotlin("test"))
@@ -48,20 +46,17 @@ compose.desktop {
     application {
         mainClass = "com.zakius.finimal.desktop.MainKt"
         jvmArgs += "-Dfinimal.version=$versionName"
-        // ProGuard strips code the app never calls from release builds, about half the jars' size.
         buildTypes.release.proguard {
             configurationFiles.from(project.file("proguard-rules.pro"))
             obfuscate = true
         }
         nativeDistributions {
-            // MSI only: tools/flatpak.sh and tools/linux-packages.sh build the Linux packages from the app image.
             targetFormats(TargetFormat.Msi)
             packageName = "finimal"
             packageVersion = versionName
             description = "Jellyfin client for movies and TV"
             vendor = "zakius"
             licenseFile = rootProject.file("LICENSE")
-            // Holds windows/libmpv-2.dll from tools/fetch-libmpv-windows.sh. Linux uses the system libmpv.
             appResourcesRootDir = layout.projectDirectory.dir("resources")
             // Modules beyond java.base and the desktop ones: OkHttp's DNS and TLS, JNA, and dbus-java's login as the user's uid.
             modules("java.naming", "jdk.crypto.ec", "jdk.unsupported", "jdk.security.auth")
@@ -118,8 +113,6 @@ fun trimSkiaIcu(lib: File) {
     }
     lib.writeBytes(out)
 }
-// On Linux, also strip Skia's symbol table (3 MB), keeping its exported symbols. The Java runtime's libraries keep their
-// symbols, for readable crash logs.
 tasks.matching { it.name == "createDistributable" || it.name == "createReleaseDistributable" }.configureEach {
     doLast {
         val libs = outputs.files.asFileTree.matching { include("**/lib/app/*skiko*.so", "**/app/icudtl.dat") }.files
@@ -131,7 +124,6 @@ tasks.matching { it.name == "createDistributable" || it.name == "createReleaseDi
     }
 }
 
-// The original Skia files, for skiaCheck to compare the trimmed ones with, each in a JVM of its own.
 val skiaFull = tasks.register<Copy>("skiaFull") {
     from({ configurations["runtimeClasspath"].filter { it.name.startsWith("skiko-awt-runtime-") }.map { zipTree(it) } })
     include("*.so", "*.dll", "icudtl.dat")
@@ -141,7 +133,7 @@ tasks.register<JavaExec>("skiaCheck") {
     classpath = sourceSets["test"].runtimeClasspath
     mainClass = "com.zakius.finimal.desktop.SkiaCheckKt"
     val windows = System.getProperty("os.name").startsWith("Windows")
-    val app = "compose/binaries/main-release/app/finimal/" + if (windows) "app" else "lib/app" // jpackage's layout per OS
+    val app = "compose/binaries/main-release/app/finimal/" + if (windows) "app" else "lib/app"
     args(skiaFull.get().destinationDir.path, layout.buildDirectory.dir(app).get().asFile.path)
     dependsOn(skiaFull, "createReleaseDistributable")
 }

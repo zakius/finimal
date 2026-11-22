@@ -142,7 +142,6 @@ fun seedLibrariesLastGood(list: List<BaseItemDto>, fromNetwork: Boolean = true) 
     AppCache.putList(listOf(App.prefs.baseUrl, App.prefs.userId), list, fromNetwork = fromNetwork)
 }
 
-/** Lightweight id+name pair for the Libraries snapshot so cold start avoids loading BaseItemDto and kotlinx.serialization. */
 data class LibraryEntry(val id: String, val name: String)
 
 /**
@@ -172,7 +171,6 @@ object ListSnapshots {
         runCatching {
             dir.mkdirs()
             if (key.size == 2) writeFastLibraries(key, list)
-            // Disposable display cache in appCache: atomic rename without fsync avoids flash I/O stalls on navigation.
             file(key).writeAtomically(json.encodeToString(list), sync = false)
         }
     }
@@ -227,10 +225,6 @@ object ListSnapshots {
     }
 }
 
-/**
- * Tracks the item last focused with the D-pad on a screen with one screen-level effect instead of one coroutine per
- * item, so scrolling grids and covering/uncovering screens pay zero coroutine overhead (and touch/mouse pay nothing).
- */
 private class FocusMemoryState(val focusedKey: MutableState<String?>) {
     val requesters = HashMap<String, FocusRequester>()
 }
@@ -253,7 +247,6 @@ fun FocusMemory(content: @Composable () -> Unit) {
     CompositionLocalProvider(LocalFocusMemory provides state, content = content)
 }
 
-/** Put before the item's clickable. Records D-pad focus under [key] and takes it back when the item shows again. Touch never focuses. */
 @Composable
 private fun Modifier.focusMemory(key: Any): Modifier {
     val memory = LocalFocusMemory.current ?: return this
@@ -288,13 +281,6 @@ private fun rememberImageRequest(url: String?): ImageRequest? {
 /** A list, plus the refresh error when the list shown is an older copy because the refresh failed. */
 class Load(val result: Result<List<BaseItemDto>>?, val refreshError: Throwable?)
 
-/**
- * Loads [block] after pushing unsynced progress, so the list never shows state older than this device's.
- * Loads again each time the screen comes back on top (skipping only when a network copy was just fetched
- * with no local changes since). Until the load ends, the list from the last visit shows synchronously
- * (from memory, disk prefetch, or [fallback]), with unsynced local state drawn over it. A failed load
- * keeps that list and says why below it.
- */
 @Composable
 private fun loadFresh(
     vararg keys: Any?,
@@ -306,7 +292,6 @@ private fun loadFresh(
     val k = keys.toList()
     val cacheKey = listOf(App.prefs.baseUrl, App.prefs.userId) + k
     var last by remember { mutableStateOf<Pair<List<Any?>, Result<List<BaseItemDto>>>?>(null) }
-    // Resolve cached or derived data synchronously when keys change, avoiding a 1-frame spinner or stale list flash.
     val syncResult = remember(cacheKey, last) {
         val current = last
         if (current != null && current.first == k) {
@@ -324,7 +309,7 @@ private fun loadFresh(
         snapshotFlow { shown.value }.collectLatest { visible ->
             if (visible) coroutineScope {
                 refreshError = null
-                if (last?.second?.isFailure == true) last = null // A retry shows "Loading…" again.
+                if (last?.second?.isFailure == true) last = null
                 var existingEntry = AppCache.getList(cacheKey)
                 if (last?.first != k) {
                     var cached = existingEntry?.items
@@ -342,15 +327,12 @@ private fun loadFresh(
                         if (derived != null) last = Pair(k, Result.success(derived))
                     }
                 }
-                // Skip a redundant network refetch when we already have a network-fresh copy (e.g. Series -> Season
-                // sliced from the episodes we just fetched, or a speculatively preloaded Library).
                 if (refresh == 0 && existingEntry != null && AppCache.isListFresh(existingEntry)) {
                     if (last?.first != k) last = Pair(k, Result.success(existingEntry.items))
                     return@coroutineScope
                 }
                 val changesBefore = App.server.localChanges
                 val pushed = App.server.flush()
-                // If the flush found the server unreachable, the fetch would only time out a second time.
                 val result = if (pushed != null && unreachable(pushed)) {
                     Result.failure(pushed)
                 } else {
@@ -358,7 +340,7 @@ private fun loadFresh(
                         if (e is InvalidStatusException && e.status == 401) App.server.expire()
                     }
                 }
-                ensureActive() // If the screen was covered meanwhile, this isn't a failure; the next visit loads again.
+                ensureActive()
                 val prev = last
                 when {
                     result.isSuccess -> {
@@ -403,7 +385,6 @@ fun rememberDownloadStatusesState(): State<Map<String, DownloadStatus>?> {
 @Composable
 fun rememberDownloadStatuses(): Map<String, DownloadStatus>? = rememberDownloadStatusesState().value
 
-/** Queues downloads and says how many were queued. */
 private suspend fun downloadAll(episodes: List<BaseItemDto>) {
     val downloads = App.downloads ?: return
     val noun = if (episodes.all { it.type == BaseItemKind.MOVIE }) "movie" else "episode"
@@ -412,7 +393,6 @@ private suspend fun downloadAll(episodes: List<BaseItemDto>) {
     withContext(Dispatchers.IO) {
         for (ep in episodes) {
             if (downloads.download(ep.id.toString()) != null) continue
-            // Episodes already fetched with sources queue as purely local writes, so leaving the screen can't stop it partway.
             runCatching {
                 val full = if (ep.mediaSources != null) ep else App.server.item(ep.id.toString())
                 downloads.startDownload(full, auto = false)
@@ -437,16 +417,11 @@ private suspend fun downloadAll(episodes: List<BaseItemDto>) {
     toast(text)
 }
 
-/**
- * An action that fetches episodes and asks before queuing the ones not downloaded or queued yet,
- * with their total size when every file's size is known.
- */
 @Composable
 private fun downloadAllAction(fetch: suspend () -> List<BaseItemDto>): () -> Unit {
     var busy by remember { mutableStateOf(false) }
     var pending by remember { mutableStateOf<List<BaseItemDto>?>(null) }
     val scope = rememberCoroutineScope()
-    // If the fetch ends after the screen was covered, the question waits until the screen is back on top.
     val eps = pending
     if (eps != null && LocalShown.current.value) {
         val sizes = eps.mapNotNull { ep -> ep.mediaSources?.firstOrNull()?.size }
@@ -487,7 +462,6 @@ private fun downloadAllAction(fetch: suspend () -> List<BaseItemDto>): () -> Uni
     }
 }
 
-/** A ⋮ button in the top bar, so actions don't push a long title off it. */
 @Composable
 private fun BarMenu(content: @Composable (close: () -> Unit) -> Unit) {
     var open by remember { mutableStateOf(false) }
@@ -497,7 +471,6 @@ private fun BarMenu(content: @Composable (close: () -> Unit) -> Unit) {
     }
 }
 
-/** "Mark played" for many episodes at once. Asks first, because it drops their resume points. */
 @Composable
 private fun markAllAction(onChanged: () -> Unit): (List<BaseItemDto>) -> Unit {
     var asking by remember { mutableStateOf<List<BaseItemDto>?>(null) }
@@ -543,7 +516,6 @@ fun upNext(episodes: List<BaseItemDto>): BaseItemDto? {
     }
 }
 
-/** Plays [item] from the start: the position is saved as 0 first, so nothing can resume it later. */
 private suspend fun startOver(item: BaseItemDto, push: (Screen) -> Unit) {
     App.server.startOver(item)
     push(Screen.Play(item.id.toString()))
@@ -560,7 +532,6 @@ private fun Confirm(text: String, confirmLabel: String, onConfirm: () -> Unit, o
     dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     text = { Text(text) })
 
-/** Asks before deleting [item]'s download; shows nothing while [item] is null. */
 @Composable
 private fun ConfirmDelete(item: BaseItemDto?, onDismiss: () -> Unit, onDeleted: () -> Unit = {}) {
     val scope = rememberCoroutineScope()
@@ -594,7 +565,6 @@ fun loadError(e: Throwable) = when {
     else -> "Something went wrong"
 }
 
-/** A plain [sentence], with the [raw] error under it in small text. */
 @Composable
 fun ErrorText(sentence: String, raw: String?, color: Color = Color.Unspecified) {
     Text(sentence, color = color)
@@ -619,8 +589,6 @@ private fun Loaded(load: Load, onRetry: () -> Unit, onDownloads: () -> Unit, con
                 if (App.downloads != null) TextButton(onClick = onDownloads) { Text("Downloads") }
             }
         }
-        // The note about a failed refresh goes under the list, so the list shrinks from below. A note above it would push
-        // down whatever is under the pointer.
         else -> Column(Modifier.fillMaxSize()) {
             Box(Modifier.weight(1f)) { content(result.getOrThrow()) }
             val e = load.refreshError
@@ -641,7 +609,6 @@ private fun Loaded(load: Load, onRetry: () -> Unit, onDownloads: () -> Unit, con
     }
 }
 
-/** Centred note for a list with nothing in it. */
 @Composable
 private fun Empty(text: String) = Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) { Text(text) }
 
@@ -655,12 +622,10 @@ fun LoginScreen(
     onSwitchAccount: (() -> Unit)? = null,
     onDone: () -> Unit,
 ) {
-    // Adding an account or resetting a PIN logs into the same server, so the server fields are locked.
     val adding = onBack != null
     val saved = remember { splitServerAddress(App.prefs.baseUrl) }
     var url by rememberSaveable { mutableStateOf(saved.first) }
     var port by rememberSaveable { mutableStateOf(saved.second) }
-    // Typing the server refills the port with defaultPortFor's guess until the user writes their own.
     var portEdited by rememberSaveable { mutableStateOf(false) }
     val prefilledUser = initialUser ?: if (App.sessionExpired && !adding) App.expiredUserName.orEmpty() else ""
     var user by rememberSaveable { mutableStateOf(prefilledUser) }
@@ -691,8 +656,6 @@ fun LoginScreen(
             busy = false
         }
     }
-    // The padded modifier already includes the IME inset; scrolling keeps the button reachable above it.
-    // A phone-wide form on tablets and desktop windows: full-width fields there are hard to read.
     Box(modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
     Column(
         Modifier
@@ -708,7 +671,6 @@ fun LoginScreen(
         }
         if (subtitle != null) Text(subtitle)
         else if (App.sessionExpired && !adding) Text("The server ended this session. Log in again; unsynced progress is kept.")
-        // The port has its own field, prefilled from the host. A port typed into the server field wins (see serverCandidates).
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             OutlinedTextField(
                 url,
@@ -805,7 +767,6 @@ fun LibrariesScreen(modifier: Modifier, push: (Screen) -> Unit) {
         if (entry?.fromNetwork == true) AppCache.prefetchLibrariesNetwork(ids)
     }
     var userName by remember { mutableStateOf(App.prefs.currentUserName()) }
-    // Accounts migrated from before names were stored have an empty name. Fetch it from the server once.
     LaunchedEffect(Unit) {
         val uid = App.prefs.userId
         if (uid == null || !userName.isNullOrEmpty()) return@LaunchedEffect
@@ -881,7 +842,7 @@ fun LibraryScreen(modifier: Modifier, screen: Screen.Library, push: (Screen) -> 
     }
     val focus = remember { FocusRequester() }
     val keyboard = LocalSoftwareKeyboardController.current
-    var focusedOnce by rememberSaveable { mutableStateOf(false) } // Don't grab focus again when coming back.
+    var focusedOnce by rememberSaveable { mutableStateOf(false) }
     LaunchedEffect(Unit) {
         if (searchOnly && !focusedOnce) {
             focusedOnce = true
@@ -917,7 +878,6 @@ fun LibraryScreen(modifier: Modifier, screen: Screen.Library, push: (Screen) -> 
             },
         ) { App.server.items(libraryId, sort, unplayed, query) }
     }
-    // Instant in-library search preview while the debounced server query is still catching up.
     val livePreview = remember(libraryId, sort, unplayed, search, query) {
         if (libraryId != null && search.isNotBlank() && search != query) {
             AppCache.deriveLibraryList(App.prefs.baseUrl, App.prefs.userId, libraryId, sort, unplayed, search)
@@ -1004,9 +964,7 @@ fun LibraryScreen(modifier: Modifier, screen: Screen.Library, push: (Screen) -> 
         }
         val statusesState = rememberDownloadStatusesState()
         val scope = rememberCoroutineScope()
-        // Outside Loaded, so the scroll survives its "Loading…" pass; a new sort, filter or query starts at the top.
         val gridState = rememberSaveable(sort, unplayed, query, saver = LazyGridState.Saver) { LazyGridState() }
-        // Debounced hover/focus speculative prefetch for the single poster the user is about to open.
         var hoveredItem by remember { mutableStateOf<BaseItemDto?>(null) }
         LaunchedEffect(hoveredItem) {
             val target = hoveredItem ?: return@LaunchedEffect
@@ -1026,7 +984,6 @@ fun LibraryScreen(modifier: Modifier, screen: Screen.Library, push: (Screen) -> 
                 else -> "This library is empty"
             })
             else {
-                // Scroll-ahead image preloading: keep 2-3 rows of posters ahead of the viewport warm in Coil.
                 LaunchedEffect(list, gridState) {
                     var prefetchedThrough = -1
                     snapshotFlow { gridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0 }
@@ -1080,7 +1037,6 @@ fun LibraryScreen(modifier: Modifier, screen: Screen.Library, push: (Screen) -> 
     }
 }
 
-/** Movies (non-null [onChanged]) also get progress, download state and the long-press menu. */
 @Composable
 private fun Poster(
     item: BaseItemDto,
@@ -1091,7 +1047,6 @@ private fun Poster(
     onFocusOrHover: (() -> Unit)? = null,
 ) {
     val itemId = remember(item.id) { item.id.toString() }
-    // Derived, so a local change or download tick recomposes only the poster whose state actually changed.
     val local by remember(item) { derivedStateOf { item.localState() } }
     val (state, unsynced) = local
     val download by remember(itemId, statusesState) {
@@ -1100,7 +1055,6 @@ private fun Poster(
     var menu by remember { mutableStateOf(false) }
     var confirmDelete by remember { mutableStateOf(false) }
     var showInfo by remember { mutableStateOf(false) }
-    // The focus highlight doesn't show over artwork; a border does.
     var focused by remember { mutableStateOf(false) }
     var menuAt by remember { mutableStateOf<Offset?>(null) }
     val openMenu: (() -> Unit)? = if (onChanged != null) remember { { menuAt = null; menu = true } } else null
@@ -1179,7 +1133,7 @@ private fun Poster(
             }
             if (unsynced) Text("not synced", color = Color.White, style = MaterialTheme.typography.labelSmall,
                 modifier = Modifier.align(Alignment.BottomStart).padding(bottom = if (focused) 7.dp else 4.dp).background(Color(0xAA000000)))
-            ProgressBar(item, state, Modifier.align(Alignment.BottomStart).padding(if (focused) 3.dp else 0.dp)) // Stays inside the focus border.
+            ProgressBar(item, state, Modifier.align(Alignment.BottomStart).padding(if (focused) 3.dp else 0.dp))
             if (onChanged != null && menu) MenuAt(menuAt) {
                 ItemMenu(
                     item,
@@ -1213,7 +1167,6 @@ private fun Poster(
 fun SeriesScreen(modifier: Modifier, screen: Screen.Series, push: (Screen) -> Unit, pop: () -> Unit) {
     var refresh by remember { mutableIntStateOf(0) }
     val seasons = loadFresh(screen.id, refresh = refresh) { App.server.seasons(screen.id) }
-    // Every episode, for Continue. A show with one season lists its episodes here instead of a one-row season list.
     val episodes = loadFresh(screen.id, "episodes", refresh = refresh) { App.server.episodes(screen.id) }
     val statusesState = rememberDownloadStatusesState()
     var keepNext by remember { mutableIntStateOf(App.prefs.keepNext(screen.id)) }
@@ -1227,7 +1180,6 @@ fun SeriesScreen(modifier: Modifier, screen: Screen.Series, push: (Screen) -> Un
         if (onlySeason != null) all?.filter { ep -> ep.seasonId == onlySeason.id } else null
     }
     val next by remember(all) { derivedStateOf { if (all != null) upNext(all) else null } }
-    // Only highlight up-next within a single season someone has started; an untouched season has nothing to point at.
     val seasonNext by remember(shownEpisodes) {
         derivedStateOf {
             if (shownEpisodes != null && shownEpisodes.any { ep -> ep.localState().first?.lastPlayedMs != null }) {
@@ -1237,7 +1189,6 @@ fun SeriesScreen(modifier: Modifier, screen: Screen.Series, push: (Screen) -> Un
             }
         }
     }
-    // Precompute unplayed counts per season in O(episodes) once instead of O(seasons * episodes) on every row.
     val unplayedBySeason by remember(all) {
         derivedStateOf {
             if (all == null) null
@@ -1253,7 +1204,6 @@ fun SeriesScreen(modifier: Modifier, screen: Screen.Series, push: (Screen) -> Un
             }
         }
     }
-    // Speculatively prefetch the Continue/up-next episode (metadata, segments, subtitles) and warm thumbnails around it.
     LaunchedEffect(next?.id) {
         val target = next ?: return@LaunchedEffect
         AppCache.prefetchPlayable(target.id.toString())
@@ -1261,7 +1211,7 @@ fun SeriesScreen(modifier: Modifier, screen: Screen.Series, push: (Screen) -> Un
         val idx = seasonEps.indexOfFirst { it.id == target.id }.coerceAtLeast(0)
         AppCache.prefetchEpisodeThumbnails(seasonEps, focusIndex = idx, count = 10)
     }
-    val listState = rememberLazyListState() // Outside Loaded, so the scroll survives its "Loading…" pass.
+    val listState = rememberLazyListState()
     var scrolled by rememberSaveable { mutableStateOf(false) }
     LaunchedEffect(seasonNext != null) {
         val i = shownEpisodes.orEmpty().indexOf(seasonNext)
@@ -1296,7 +1246,6 @@ fun SeriesScreen(modifier: Modifier, screen: Screen.Series, push: (Screen) -> Un
             confirmButton = { TextButton(onClick = { showKeepNextDialog = false }) { Text("Done") } },
         )
     }
-    // With one season, "all" means its episodes as shown. With several, it means every episode outside the specials.
     val markable = remember(shownEpisodes, all) {
         val candidates = shownEpisodes ?: all?.filter { ep -> ep.parentIndexNumber != 0 && ep.locationType != LocationType.VIRTUAL }
         if (candidates.isNullOrEmpty()) null else candidates
@@ -1410,12 +1359,11 @@ fun SeasonScreen(modifier: Modifier, screen: Screen.Season, push: (Screen) -> Un
     var refresh by remember { mutableIntStateOf(0) }
     val episodes = loadFresh(screen.seasonId, refresh = refresh) { App.server.episodes(screen.seriesId, screen.seasonId) }
     val statusesState = rememberDownloadStatusesState()
-    val listState = rememberLazyListState() // Outside Loaded, so the scroll survives its "Loading…" pass when coming back.
+    val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
     val downloadAll = downloadAllAction { App.server.episodes(screen.seriesId, screen.seasonId, sources = true) }
     val markAll = markAllAction { refresh++ }
     val list = episodes.result?.getOrNull()
-    // Only highlight up-next within a season someone has started; an untouched season has nothing to point at.
     val next by remember(list) {
         derivedStateOf {
             if (list != null && list.any { ep -> ep.localState().first?.lastPlayedMs != null }) upNext(list) else null
@@ -1425,7 +1373,7 @@ fun SeasonScreen(modifier: Modifier, screen: Screen.Season, push: (Screen) -> Un
         val target = next ?: list?.firstOrNull { it.locationType != LocationType.VIRTUAL } ?: return@LaunchedEffect
         AppCache.prefetchPlayable(target.id.toString())
     }
-    var scrolled by rememberSaveable { mutableStateOf(false) } // Scroll to up-next only once; coming back keeps the user's scroll.
+    var scrolled by rememberSaveable { mutableStateOf(false) }
     LaunchedEffect(next != null) {
         val i = list.orEmpty().indexOf(next)
         if (!scrolled && i > 0) {
@@ -1491,7 +1439,6 @@ fun SeasonScreen(modifier: Modifier, screen: Screen.Season, push: (Screen) -> Un
     }
 }
 
-/** "Continue S2E5 · Title" with the time left, or "Play" for an episode not started. */
 @Composable
 private fun ContinueButton(ep: BaseItemDto, onClick: () -> Unit) {
     val local by remember(ep) { derivedStateOf { ep.localState() } }
@@ -1513,7 +1460,6 @@ private fun ContinueButton(ep: BaseItemDto, onClick: () -> Unit) {
     }
 }
 
-/** Thumbnail, title, progress and download state. The ⋮ button or a long-press opens the item's actions. */
 @Composable
 fun EpisodeRow(
     ep: BaseItemDto,
@@ -1525,7 +1471,6 @@ fun EpisodeRow(
     onChanged: () -> Unit = {},
 ) {
     val epId = remember(ep.id) { ep.id.toString() }
-    // Derived, so a local change or download tick recomposes only the row whose state actually changed.
     val local by remember(ep) { derivedStateOf { ep.localState() } }
     val (state, unsynced) = local
     val resolvedDownload by remember(epId, download, statusesState) {
@@ -1670,7 +1615,6 @@ private fun ItemInfoDialog(item: BaseItemDto, onDismiss: () -> Unit) {
     )
 }
 
-/** Actions of an episode or movie. Mounted only while the menu is open so scrolling lists compose zero menus. */
 @Composable
 private fun ItemMenu(
     item: BaseItemDto,
@@ -1802,7 +1746,6 @@ private fun DownloadRow(
                 }) { Text("Pause") }
                 Fill.PAUSED -> TextButton(onClick = {
                     scope.launch(Dispatchers.IO) {
-                        // A fresh copy of the item when the server answers, else the one saved with the download.
                         val fresh = runCatching { AppCache.fetchOrJoinItem(id, flushFirst = false) }.getOrDefault(d.item)
                         media.startDownload(fresh, d.auto)
                     }
@@ -1822,7 +1765,7 @@ private fun DownloadRow(
 
 @Composable
 fun DownloadsScreen(modifier: Modifier, push: (Screen) -> Unit, pop: () -> Unit) {
-    val media = App.downloads!! // The screen is only offered where there are downloads.
+    val media = App.downloads!!
     val statuses = rememberDownloadStatuses()
     val queueItems = remember(statuses) {
         statuses.orEmpty().values
@@ -1885,7 +1828,6 @@ fun DownloadsScreen(modifier: Modifier, push: (Screen) -> Unit, pop: () -> Unit)
                             if (anyActive) {
                                 TextButton(onClick = {
                                     scope.launch(Dispatchers.IO) {
-                                        // Pause queued items first so pausing the running item doesn't briefly start the next one.
                                         val ordered = queueItems.filter { it.fill == Fill.QUEUED } + queueItems.filter { it.fill == Fill.RUNNING }
                                         for (s in ordered) media.pauseDownload(s.download.item.id.toString())
                                     }
@@ -1936,7 +1878,7 @@ fun DownloadsScreen(modifier: Modifier, push: (Screen) -> Unit, pop: () -> Unit)
 @Composable
 fun SettingsScreen(modifier: Modifier, pop: () -> Unit, onAccounts: () -> Unit, onLoggedOut: () -> Unit) {
     val p = App.prefs
-    var refresh by remember { mutableIntStateOf(0) } // Bumped to redraw after a pref changes.
+    var refresh by remember { mutableIntStateOf(0) }
     var bufferRefresh by remember { mutableIntStateOf(0) }
     var clearingBuffer by remember { mutableStateOf(false) }
     val bufferUsed by produceState<Long?>(null, bufferRefresh) {
@@ -1991,7 +1933,6 @@ fun SettingsScreen(modifier: Modifier, pop: () -> Unit, onAccounts: () -> Unit, 
             onLoggedOut()
         }, { confirmLogout = false })
     }
-    // Load decoder summary and removable-storage check off the main thread once, rather than per switch toggle.
     val decoders by produceState<String?>(null) {
         value = withContext(Dispatchers.IO) { App.platform.decoderSummary() }
     }
@@ -1999,12 +1940,10 @@ fun SettingsScreen(modifier: Modifier, pop: () -> Unit, onAccounts: () -> Unit, 
         val d = App.downloads
         value = if (d != null) withContext(Dispatchers.IO) { d.storageRoots().size > 1 } else false
     }
-    // Reading [refresh] here recomposes in place without destroying the tree (so switches animate and remember stays intact).
     @Suppress("UNUSED_VARIABLE")
     val tick = refresh
     Column(modifier.fillMaxSize()) {
         Bar("Settings", pop)
-        // A readable width on tablets and desktop windows, where a label and its control would sit a screen apart.
         Column(
             Modifier
                 .fillMaxWidth()
@@ -2058,14 +1997,13 @@ fun SettingsScreen(modifier: Modifier, pop: () -> Unit, onAccounts: () -> Unit, 
                     ) { Text("Clear buffer") }
                 }
             }
-            if (downloads != null && (hasRemovableStorage || downloads.storageMissing)) { // When the card is missing, switching back to internal storage is the way out.
+            if (downloads != null && (hasRemovableStorage || downloads.storageMissing)) {
                 toggle("Store on SD card (switching deletes downloads and the buffer)", p.storageIndex > 0, enabled = !moving) { on ->
                     moveTo = if (on) 1 else 0
                 }
             }
 
             Text("Playback", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(16.dp))
-            // Android applies the delay only while a wireless output is connected. The desktop can't tell, so it always applies it.
             val audioDelayLabel = if (android) "Wireless audio delay (ms), for Bluetooth headphones and speakers" else "Audio delay (ms)"
             Stepper(audioDelayLabel, p.audioDelayMs, AUDIO_DELAYS_MS) { ms ->
                 App.platform.setAudioDelay(ms)
@@ -2075,7 +2013,6 @@ fun SettingsScreen(modifier: Modifier, pop: () -> Unit, onAccounts: () -> Unit, 
                 p.doubleTapSeconds = seconds
                 refresh++
             }
-            // Files past these limits start as a transcode. Auto asks the hardware decoders per file.
             if (decoders != null) {
                 Text(
                     "Hardware decoders: $decoders",
@@ -2102,7 +2039,6 @@ fun SettingsScreen(modifier: Modifier, pop: () -> Unit, onAccounts: () -> Unit, 
                     }, { Text(label) })
                 }
             }
-            // The desktop player decodes every codec, so there the height limit above only serves bandwidth.
             if (android) Text("Direct play codecs", Modifier.padding(16.dp, 8.dp, 16.dp, 0.dp))
             if (android) Row(Modifier.padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 listOf("Auto", "H.264 only", "All").forEachIndexed { i, label ->
@@ -2169,7 +2105,6 @@ fun SettingsScreen(modifier: Modifier, pop: () -> Unit, onAccounts: () -> Unit, 
     }
 }
 
-/** Keyboard shortcuts for list screens: F5 / Ctrl+R refreshes; Ctrl+F or / opens search when supported. */
 private fun Modifier.screenShortcuts(
     onRefresh: () -> Unit,
     onSearch: (() -> Unit)? = null,
@@ -2214,10 +2149,6 @@ private fun Modifier.screenShortcuts(
     }.then(focusModifier)
 }
 
-/**
- * A right click does what a long press does, opening an item's menu with the mouse. [action] gets where the click
- * landed in this element, so the menu opens at the pointer. Touch has no secondary button.
- */
 private fun Modifier.onSecondaryClick(action: ((Offset) -> Unit)?): Modifier = if (action == null) this else pointerInput(action) {
     awaitPointerEventScope {
         while (true) {
@@ -2230,13 +2161,11 @@ private fun Modifier.onSecondaryClick(action: ((Offset) -> Unit)?): Modifier = i
     }
 }
 
-/** Shows [menu] at [at], a point in the parent's coordinates, or anchored to the parent itself when [at] is null. */
 @Composable
 private fun MenuAt(at: Offset?, menu: @Composable () -> Unit) {
     if (at == null) menu() else Box(Modifier.offset { at.round() }) { menu() }
 }
 
-/** A "− value +" control that steps through [options]. A stored value not in the list shows as the nearest option. */
 @Composable
 private fun Stepper(
     label: String,
@@ -2252,7 +2181,6 @@ private fun Stepper(
         TextButton(onClick = { set(options[i - 1]) }, enabled = i > 0) {
             Text("−", Modifier.semantics { contentDescription = "Decrease $label, now ${show(options[i])}" })
         }
-        // A fixed width, so "−" doesn't move under the pointer when the value gets a digit longer.
         Text(show(options[i]), Modifier.widthIn(min = 48.dp), textAlign = TextAlign.Center, maxLines = 1)
         TextButton(onClick = { set(options[i + 1]) }, enabled = i < options.lastIndex) {
             Text("+", Modifier.semantics { contentDescription = "Increase $label, now ${show(options[i])}" })
@@ -2275,7 +2203,6 @@ fun ChapterMarks(chapters: List<Chapter>, durationMs: Long, modifier: Modifier, 
         }
     }
 
-/** The account's initial in a circle. Uses 4x16dp quarter-circle glyphs so Skia batches it into the same A8 AtlasTextOp as text. */
 @Composable
 private fun Avatar(name: String, modifier: Modifier = Modifier) {
     val halfSp = with(androidx.compose.ui.platform.LocalDensity.current) { 16.dp.toSp() }
@@ -2407,7 +2334,6 @@ fun AccountsScreen(
     }
 }
 
-/** Asks for a PIN of 4 to 8 digits; [onPin] answers whether it was accepted. */
 @Composable
 private fun PinDialog(
     title: String,
@@ -2419,10 +2345,8 @@ private fun PinDialog(
     var pin by remember { mutableStateOf("") }
     var wrong by remember { mutableStateOf(false) }
     val ok = pin.length in 4..8
-    // Typing goes straight in, from a keyboard or a TV remote's number keys.
     val focus = remember { FocusRequester() }
     LaunchedEffect(Unit) { runCatching { focus.requestFocus() } }
-    // A wrong PIN clears the field, and focus goes back to it, because the now disabled OK button can't keep focus.
     fun submit() {
         if (!onPin(pin)) {
             wrong = true

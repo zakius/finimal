@@ -13,7 +13,6 @@ import okhttp3.OkHttpClient
 import org.jellyfin.sdk.JellyfinOptions
 import org.jellyfin.sdk.model.api.BaseItemDto
 
-/** What the shared code needs from the app it runs in, Android's or the desktop's. Set as [App.platform] at start. */
 interface Platform {
     val versionName: String
     /** Shows the Android-only settings: interface mode, touch gestures, metered networks, decoder limits. */
@@ -31,7 +30,6 @@ interface Platform {
     val transcodeHeight: Int
     /** Null where there are no downloads yet. */
     val downloads: Downloads?
-    /** Sets the device identity for the Jellyfin SDK. */
     fun configure(options: JellyfinOptions.Builder)
     /** Called once right before [App.http] is constructed (e.g. OkHttp Android context registration). */
     fun beforeHttp() {}
@@ -42,9 +40,7 @@ interface Platform {
     /** "h264 1080p60, hevc 4K…" for Settings; null hides the line. */
     fun decoderSummary(): String?
     fun setAudioDelay(ms: Int)
-    /** Bytes currently held in the unpinned playback buffer. */
     fun bufferBytes(): Long
-    /** Trims the playback buffer to the configured limit. */
     fun evictBuffer()
     /** Deletes all unpinned, non-playing entries from the playback buffer. */
     fun clearBuffer()
@@ -52,7 +48,6 @@ interface Platform {
     val isMetered: Boolean get() = false
     /** Pre-warms Coil image requests at original size. With [diskOnly], only decodes already-cached disk entries. */
     fun prefetchImages(urls: List<String>, diskOnly: Boolean) {}
-    /** Pre-fetches sideloaded subtitle files to disk for instant playback start. */
     suspend fun prefetchSubtitles(item: BaseItemDto) {}
 }
 
@@ -64,13 +59,11 @@ interface KeyValueStore {
     fun edit(block: MutableMap<String, Any?>.() -> Unit)
 }
 
-/** Process-wide singletons. There is one server and one user, so nothing here needs scoping. */
 object App {
     lateinit var platform: Platform
 
     val prefs by lazy { Prefs(platform.store) }
     val server by lazy { Server() }
-    /** Shared by the SDK, images and the player, so they reuse connections to the server. */
     val http by lazy {
         platform.beforeHttp()
         OkHttpClient.Builder()
@@ -90,11 +83,6 @@ object App {
     }
     val autoTv get() = platform.autoTv
 
-    /**
-     * Set when the server rejects the token, which sends the UI back to login. Unsynced progress is kept
-     * and pushed after the next login. Backed by a lazy Compose state so App.<clinit> doesn't load
-     * Compose runtime classes during cold start.
-     */
     @Volatile private var _sessionExpired = false
     @Volatile private var _sessionExpiredState: MutableState<Boolean>? = null
     var sessionExpired: Boolean
@@ -107,7 +95,6 @@ object App {
             _sessionExpiredState?.value = value
         }
 
-    /** Username of the account whose session expired, so LoginScreen can prefill it. Lazy so App.<clinit> skips Compose. */
     @Volatile private var _expiredUserName: String? = null
     @Volatile private var _expiredUserNameState: MutableState<String?>? = null
     var expiredUserName: String?
@@ -125,7 +112,6 @@ object App {
      * progress kept over a logout waits for that account and never reaches another.
      */
     val pending: PendingStore get() = synchronized(this) {
-        // After a session expires, stops that are still being recorded belong to the account that just left.
         if (prefs.userId == null) {
             val kept = pendingStore
             if (kept != null) return kept
@@ -136,7 +122,6 @@ object App {
         val hash = java.security.MessageDigest.getInstance("SHA-1").digest("${account.first}\u0000${account.second}".toByteArray())
         val name = hash.take(8).joinToString("") { "%02x".format(it) }
         val file = File(platform.appFiles, "pending-$name.json")
-        // Older versions kept one pending.json for everyone. It goes to the next account that logs in.
         val legacy = File(platform.appFiles, "pending.json")
         if (account.second != null && legacy.exists() && !file.exists()) legacy.renameTo(file)
         val store = PendingStore(file)

@@ -1,4 +1,3 @@
-// The UI and server code the Android and desktop apps share. Each app supplies a [com.zakius.finimal.Platform].
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {

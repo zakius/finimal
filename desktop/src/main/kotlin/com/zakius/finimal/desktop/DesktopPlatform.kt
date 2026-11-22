@@ -17,7 +17,6 @@ import kotlinx.coroutines.launch
 import org.jellyfin.sdk.JellyfinOptions
 import org.jellyfin.sdk.model.DeviceInfo
 
-/** Folders by the platform's conventions: XDG on Linux, %APPDATA% and %LOCALAPPDATA% on Windows. */
 private object Dirs {
     private val windows = System.getProperty("os.name").startsWith("Windows")
     private val home = System.getProperty("user.home")

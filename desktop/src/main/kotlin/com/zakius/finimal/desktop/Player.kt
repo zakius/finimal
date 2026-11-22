@@ -113,14 +113,10 @@ import org.jellyfin.sdk.model.api.MediaSegmentType
 
 private const val REPORT_INTERVAL_MS = 10_000L
 private const val RESUME_REWIND_MS = 5_000L
-/** A file that ends this far before its duration was cut off by a dropped connection, not played to the end. */
 private const val EARLY_END_MS = 10_000L
-/** Buffering this long while the server doesn't answer counts as a dropped connection. */
 private const val STALL_MS = 10_000L
-/** How far before the resume position, in bytes, background buffering of the rest of the file starts. */
 private const val BUFFER_MARGIN_BYTES = 32_000_000L
 
-/** The chosen speed and volume, kept for the session so "Play next" does not reset them. */
 private var sessionSpeed = 1.0
 private var sessionVolume = 100.0
 
@@ -135,13 +131,11 @@ private val ForwardIcon = icon("FastForward", "M4,18l8.5,-6L4,6v12zm9,-12v12l8.5
 private val VolumeUpIcon = icon("VolumeUp", "M3,9v6h4l5,5V4L7,9H3zm13.5,3c0,-1.77 -1.02,-3.29 -2.5,-4.03v8.05c1.48,-0.73 2.5,-2.25 2.5,-4.02zM14,3.23v2.06c2.89,0.86 5,3.54 5,6.71s-2.11,5.85 -5,6.71v2.06c4.01,-0.91 7,-4.49 7,-8.77s-2.99,-7.86 -7,-8.77z")
 private val VolumeOffIcon = icon("VolumeOff", "M16.5,12c0,-1.77 -1.02,-3.29 -2.5,-4.03v2.21l2.45,2.45c0.03,-0.2 0.05,-0.41 0.05,-0.63zm2.5,0c0,0.94 -0.2,1.82 -0.54,2.64l1.51,1.51C20.63,14.91 21,13.5 21,12c0,-4.28 -2.99,-7.86 -7,-8.77v2.06c2.89,0.86 5,3.54 5,6.71zM4.27,3L3,4.27 7.73,9H3v6h4l5,5v-6.73l4.25,4.25c-0.67,0.52 -1.42,0.93 -2.25,1.18v2.06c1.38,-0.31 2.63,-0.95 3.69,-1.81L19.73,21 21,19.73l-9,-9L4.27,3zM12,4L9.91,6.09 12,8.18V4z")
 
-/** Blank 1x1 cursor created once per process instead of allocating a native cursor on every recomposition. */
 private val BlankCursor: PointerIcon by lazy {
     val blank = java.awt.image.BufferedImage(1, 1, java.awt.image.BufferedImage.TYPE_INT_ARGB)
     PointerIcon(java.awt.Toolkit.getDefaultToolkit().createCustomCursor(blank, java.awt.Point(), "none"))
 }
 
-/** Loads the item and constructs libmpv in parallel off the UI thread, then plays. */
 @Composable
 fun PlayerScreen(itemId: String, onBack: () -> Unit, onPlay: (String) -> Unit) {
     val prefs = App.prefs
@@ -164,7 +158,6 @@ fun PlayerScreen(itemId: String, onBack: () -> Unit, onPlay: (String) -> Unit) {
     }
     var error by remember { mutableStateOf<Throwable?>(null) }
     var retry by remember { mutableIntStateOf(0) }
-    // Construct libmpv on Dispatchers.IO so opening a video never freezes the UI thread and overlaps the API fetch.
     LaunchedEffect(Unit) {
         val created = withContext(Dispatchers.IO) {
             runCatching {
@@ -174,12 +167,9 @@ fun PlayerScreen(itemId: String, onBack: () -> Unit, onPlay: (String) -> Unit) {
                     "sub-scale" to "${prefs.subtitleScale / 100.0}",
                     "speed" to "$sessionSpeed",
                     "volume" to "$sessionVolume",
-                    // Holding the video back compensates for late wireless audio. The desktop can't tell which output is wireless,
-                    // so the user sets the delay.
                     "audio-delay" to "${-prefs.audioDelayMs / 1000.0}",
                 ))
             }.also { result ->
-                // If the user already left while mpv was initializing, close it right here so threads never leak.
                 if (disposed.get()) result.getOrNull()?.close()
             }
         }
@@ -200,7 +190,6 @@ fun PlayerScreen(itemId: String, onBack: () -> Unit, onPlay: (String) -> Unit) {
             App.platform.scope.launch { server.flush() }
             return@LaunchedEffect
         }
-        // Only this item's unsynced state must reach the server before the item is fetched. Other items sync in the background.
         val pending = withContext(App.disk) { App.pending.get(itemId) != null }
         if (!pending) App.platform.scope.launch { server.flush() }
         runCatching { AppCache.fetchOrJoinItem(itemId, flushFirst = pending) }
@@ -279,7 +268,6 @@ private fun Playback(item: BaseItemDto, mpv: Mpv, siblings: List<BaseItemDto>, o
     var lastPositionMs by remember { mutableLongStateOf(0L) }
     var reconnect by remember { mutableStateOf<Reconnect>(Reconnect.Idle) }
     var reloadAtMs by remember { mutableLongStateOf(0L) }
-    // The file really does end early: it ended at the same spot again after a reload, while the server was answering.
     var trustEnd by remember { mutableStateOf(false) }
     // A transcode's stream never fails. mpv keeps retrying it behind the spinner for as long as the server is gone,
     // so this flag detects that stall instead.
@@ -350,7 +338,6 @@ private fun Playback(item: BaseItemDto, mpv: Mpv, siblings: List<BaseItemDto>, o
         }
     }
 
-    // Speculatively prefetch the next episode's metadata and segments once current playback is underway.
     LaunchedEffect(next?.id) {
         val upcoming = next ?: return@LaunchedEffect
         delay(2_000)
@@ -372,7 +359,6 @@ private fun Playback(item: BaseItemDto, mpv: Mpv, siblings: List<BaseItemDto>, o
         mpv.load(loadUrl, startMs / 1000.0)
         if (!transcoding) {
             launch(Dispatchers.IO) {
-                // Meanwhile, buffer the rest of the file to disk, starting a little before the resume position.
                 var len = DesktopMedia.lengthOf(item)
                 if (len <= 0) len = source.size ?: 0
                 val runtime = runtimeTicks()
@@ -386,7 +372,6 @@ private fun Playback(item: BaseItemDto, mpv: Mpv, siblings: List<BaseItemDto>, o
 
     DisposableEffect(mpv) {
         onDispose {
-            // If the user left before the file loaded, there is no position, and reporting 0 would wipe the resume point.
             if (!ended && mpv.loaded) {
                 val runtime = runtimeTicks()
                 val stopTicks = if (creditsDone && runtime != null) runtime else positionTicks()
@@ -398,7 +383,6 @@ private fun Playback(item: BaseItemDto, mpv: Mpv, siblings: List<BaseItemDto>, o
         }
     }
 
-    // Pausing reports at once, playing reports every REPORT_INTERVAL_MS, and the end reports the whole runtime.
     LaunchedEffect(mpv) {
         snapshotFlow { mpv.paused }.collect { if (it && mpv.loaded) report() }
     }
@@ -415,28 +399,23 @@ private fun Playback(item: BaseItemDto, mpv: Mpv, siblings: List<BaseItemDto>, o
                 val runtime = runtimeTicks()
                 App.server.reportStop(id, sourceId, runtime ?: positionTicks(), runtime, serverPlayed, playSession)
             }
-            // Seeking back from the end screen resumes playback.
             if (!eof) ended = false
         }
     }
-    // After a dropped connection, reload the file at the same spot with a backoff. After RECONNECT_WINDOW_MS, show the error.
     LaunchedEffect(mpv) {
         // mpv pauses itself at an early end. The reload resumes playback unless the user had paused.
         var playOn = false
-        // Where the last reload started. Cleared once playback moves on from there.
         var reloadedAtMs: Long? = null
         while (true) {
             snapshotFlow { mpv.error != null || endedEarly() || stalled }.first { it }
             val reloadedAt = reloadedAtMs
             if (reloadedAt != null && lastPositionMs > reloadedAt + 1_000) reloadedAtMs = null
-            // It ended early again right where it was reloaded, while the server answers, so the file really ends there.
             if (mpv.eof && reloadedAtMs != null && App.server.reachable()) {
                 trustEnd = true
                 reconnect = Reconnect.Idle
                 continue
             }
             if (reconnect !is Reconnect.Retrying) {
-                // A load error while the server answers is the file's fault. Show it at once and let Retry load again.
                 if (mpv.error != null && App.server.reachable()) {
                     snapshotFlow { mpv.error == null }.first { it }
                     continue
@@ -467,11 +446,8 @@ private fun Playback(item: BaseItemDto, mpv: Mpv, siblings: List<BaseItemDto>, o
                     mpv.command("stop")
                     reconnect = Reconnect.GaveUp
                     snapshotFlow { reconnect }.first { it != Reconnect.GaveUp }
-                    // Wait for Retry's load, which replaces the stopped file's state.
                     snapshotFlow { mpv.loaded || mpv.error != null }.first { it }
                 }
-                // Loaded while the server answers, so the connection is back, and a slow one just buffers. A load can also
-                // succeed from what is on disk without the server, but that one fails again where the data on disk ends.
                 mpv.error == null && App.server.reachable() -> reconnect = Reconnect.Idle
             }
         }
@@ -486,7 +462,6 @@ private fun Playback(item: BaseItemDto, mpv: Mpv, siblings: List<BaseItemDto>, o
             }
         }
     }
-    // The connection counts as back once playback moves past the reload point, or, if the user paused, once the file is loaded.
     LaunchedEffect(mpv) {
         snapshotFlow {
             val movedOn = lastPositionMs > reloadAtMs + 1_000
@@ -502,7 +477,6 @@ private fun Playback(item: BaseItemDto, mpv: Mpv, siblings: List<BaseItemDto>, o
         }
     }
     LaunchedEffect(mpv) { snapshotFlow { mpv.volume }.collect { if (mpv.loaded) sessionVolume = it } }
-    // Keep the screen on only while playing. When paused, ended or failed, it times out as usual.
     LaunchedEffect(mpv) {
         snapshotFlow { mpv.loaded && !mpv.paused && !mpv.eof && mpv.error == null }.collect { playing -> ScreenSaver.inhibit(playing) }
     }
@@ -572,7 +546,6 @@ private fun VideoSurface(
     val fullscreen = window?.fullscreen == true
     fun toggleFullscreen() { window?.toggleFullscreen() }
     var controls by remember { mutableStateOf(true) }
-    // While the ⋮ menu is open, it gets the keys: Esc closes it and the arrows move through it.
     var menu by remember { mutableStateOf(false) }
     var lastInteraction by remember { mutableLongStateOf(System.currentTimeMillis()) }
     var overlay by remember { mutableStateOf<String?>(null) }
@@ -620,7 +593,6 @@ private fun VideoSurface(
         }
     }
 
-    // Skipping is offered, never automatic. During the credits, the offer is the next episode in season order, if any.
     val ranges = remember(segments) {
         segments.map { segment ->
             val startMs = segment.startTicks / TICKS_PER_MS
@@ -628,7 +600,6 @@ private fun VideoSurface(
             segment.type to (startMs until endMs - 1_000)
         }
     }
-    // Derived state so the 4 Hz position tick never recomposes VideoSurface while controls are hidden (or even shown).
     val segmentNow by remember(ranges, mpv) {
         derivedStateOf {
             val pos = (mpv.position * 1000).toLong()
@@ -647,8 +618,6 @@ private fun VideoSurface(
         null
     }
 
-    // Keys are handled at the window rather than on a focused node, because covered screens stay composed and can keep
-    // focus, and menus take it.
     val keys by rememberUpdatedState { e: KeyEvent ->
         if (menu) false
         // Consume the key release too. Otherwise a focused button clicks on Space release, undoing the toggle.
@@ -690,7 +659,6 @@ private fun VideoSurface(
         window?.keys = handler
         onDispose { if (window?.keys === handler) window.keys = null }
     }
-    // Hide the cursor with the controls using the process-wide cached blank cursor.
     val cursor = if (controls) PointerIcon.Default else BlankCursor
     MaterialTheme(colorScheme = darkColorScheme()) {
         Box(
@@ -766,7 +734,6 @@ private fun VideoSurface(
                         .padding(12.dp),
                 )
             }
-            // While reconnecting, the last frame stays up with a note, instead of the error or the end screen.
             val error = if (reconnecting) null else failure
             val ended = ended && !reconnecting
             if (reconnecting) {
@@ -865,7 +832,6 @@ private fun Controls(
             delay(1_000)
         }
     }
-    // The end or error screen can replace the controls while the menu is open. Close the menu so it doesn't keep the keys.
     DisposableEffect(Unit) { onDispose { onMenu(false) } }
     LaunchedEffect(menu, mpv.tracksChanged) {
         if (menu) tracks = withContext(Dispatchers.IO) { mpv.tracks() }
@@ -1019,10 +985,6 @@ private fun Controls(
     }
 }
 
-/**
- * Bottom transport & seek bar isolated from [Controls] and [VideoSurface], so 4 Hz position updates only recompose
- * this bar and on-disk buffer lookups run off the UI thread.
- */
 @Composable
 private fun DesktopSeekBarSection(
     mpv: Mpv,
@@ -1046,7 +1008,6 @@ private fun DesktopSeekBarSection(
     val positionMs = (mpv.position * 1000).toLong()
     val durationMs = (mpv.duration * 1000).toLong()
     val shown = if (dragging >= 0) dragging.toLong() else positionMs
-    // Read on-disk contiguous buffer off the UI thread so Scratch's commit lock never stalls composition or scrubbing.
     LaunchedEffect(item, transcoding) {
         if (transcoding) {
             diskCachedMs = 0L
@@ -1198,7 +1159,6 @@ private fun Choice(label: String, selected: Boolean, onClick: () -> Unit) =
 
 private fun speedLabel(s: Double) = "${s.toString().removeSuffix(".0")}×"
 
-/** Builds a label like "English · 5.1", with the track's own title first. */
 private fun trackLabel(t: Mpv.Track): String {
     val code = t.language
     val language = if (code == null || code == "und") null else Locale.forLanguageTag(code).displayLanguage.ifBlank { code }
@@ -1210,7 +1170,6 @@ private fun trackLabel(t: Mpv.Track): String {
         8 -> "7.1"
         else -> "${t.channels} ch"
     }
-    // Skip the language when the title already names it.
     val titleNamesLanguage = language != null && t.title?.contains(language, ignoreCase = true) == true
     val shownLanguage = if (titleNamesLanguage) null else language
     return listOfNotNull(t.title, shownLanguage, channels).joinToString(" · ")

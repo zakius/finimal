@@ -63,7 +63,6 @@ class MainActivity : ComponentActivity() {
         // Remove the splash as soon as the first frame is ready, skipping Android's fade-out (about 130 ms).
         if (Build.VERSION.SDK_INT >= 31) splashScreen.setOnExitAnimationListener { it.remove() }
         enableEdgeToEdge()
-        // A recreated activity restores its back stack, so don't push Downloads again.
         if (savedInstanceState == null) openDownloadsFlag = intent.getBooleanExtra(EXTRA_DOWNLOADS, false)
 
         val count = if (savedInstanceState == null) App.prefs.accountCount else -1

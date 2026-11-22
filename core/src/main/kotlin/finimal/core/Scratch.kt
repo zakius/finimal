@@ -46,14 +46,12 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
         return entries.getOrPut(key) { Entry(key, File(dir, key)) }
     }
 
-    /** Keys with anything on disk. */
     fun keys(): List<String> = dir.list().orEmpty().filter { name -> File(dir, name).isDirectory }
 
     /** Removes [key]'s bytes and returns true, unless a reader, buffer or download has it open. */
     fun delete(key: String): Boolean {
         val e = synchronized(this) { entries[key] }
         if (e != null && !e.release()) return false
-        // Delete under the lock, so a concurrent entry() for this key can't count the chunks being deleted as present.
         synchronized(this) {
             entries.remove(key)
             File(dir, key).deleteRecursively()
@@ -89,7 +87,6 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
     }
 
     inner class Entry internal constructor(val key: String, private val folder: File) {
-        // Everything below is guarded by this entry's monitor.
         /** Total bytes; -1 until the server says. */
         var length: Long = run {
             val file = File(folder, "length")
@@ -98,7 +95,6 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
         }
             private set
         private val present = BitSet()
-        /** The chunk the filler is writing, and how many of its bytes are on disk. */
         private var writing = -1
         private var written = 0L
         private var url: (() -> String)? = null
@@ -107,14 +103,11 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
         private var seq = 0L
         private var filler: Thread? = null
         private var call: Call? = null
-        /** The last failure. [fatal] means retrying can't help: the server refused, the file is wrong, or the disk failed. */
         private var error: IOException? = null
         private var fatal = false
-        /** The disk filled up. Until the next demand, only chunks that readers wait for get written. */
         private var lowSpace = false
         private var gone = false
         private var touched = 0L
-        /** Cached result of [target], invalidated whenever demands, presence, length or error flags change. */
         private var targetDirty = true
         private var cachedTarget: Int? = null
         private var waiters = 0
@@ -176,7 +169,6 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
             return sum
         }
 
-        /** Last read or write, for eviction. */
         fun touched(): Long = folder.lastModified()
 
         /** How many bytes from [from] can be read without waiting for the network. */
@@ -218,7 +210,6 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
             wake()
         }
 
-        /** Called when the demands change. The filler picks its target again, and a fetch nobody wants any more is cancelled. */
         @Synchronized
         internal fun wake() {
             invalidateTarget()
@@ -226,7 +217,6 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
             if (writing >= 0 && target() != writing) call?.cancel()
         }
 
-        /** Closes the entry for good and returns true, unless something still has it open. */
         @Synchronized
         internal fun release(): Boolean {
             if (demands.isNotEmpty()) return false
@@ -298,8 +288,6 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
                             }
                             writing == i && written > inChunk -> return@synchronized partFile(i) to written - inChunk
                             fatal -> throw error!!
-                            // The filler's last try failed (no network, or the server is down). Fail now rather than at
-                            // the deadline, so the player reports it. The player's retry is a new demand, which wakes the filler.
                             error != null && writing != i -> throw InterruptedIOException("no data: ${error!!.message}")
                         }
                         val wait = deadline - System.currentTimeMillis()
@@ -382,14 +370,12 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
 
         private fun touch() {
             val now = System.currentTimeMillis()
-            // Update the folder's mtime at most once a minute, to keep disk writes rare.
             if (now - touched > 60_000) {
                 touched = now
                 folder.setLastModified(now)
             }
         }
 
-        /** The next chunk to fetch: the first missing one in the most pressing demand's range. Among readers, the newest goes first. */
         private fun target(): Int? {
             if (!targetDirty) return cachedTarget
             val result = computeTarget()
@@ -441,7 +427,6 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
                 } catch (e: StorageError) {
                     if (onStorageFull()) continue
                     synchronized(this) {
-                        // Buffering and downloading stop, but a reader still gets its chunks written while there is room.
                         if (lowSpace || demands.none { d -> d.priority == Priority.READ }) {
                             error = e
                             fatal = true
@@ -454,7 +439,6 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
                 } catch (e: WrongFile) {
                     fail(e)
                 } catch (e: HttpStatus) {
-                    // A 4xx stays refused. A 401 (stale token) and a 5xx (server trouble) are worth waiting out.
                     if (e.code in 400..499 && e.code != 401) {
                         fail(e)
                     } else {
@@ -467,7 +451,6 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
                 } finally {
                     synchronized(this) {
                         call = null
-                        // Once gone, the folder may belong to a new entry, so leave the part. That entry's init deletes leftovers.
                         if (writing >= 0) {
                             if (!gone) partFile(writing).delete()
                             writing = -1
@@ -488,14 +471,12 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
         private fun backOff(e: IOException, attempt: Int) = synchronized(this) {
             error = e
             notifyWaiters()
-            // A new demand, such as a seek or a retry, ends the wait early.
             if (!gone && demands.isNotEmpty()) {
                 val delays = longArrayOf(1_000, 2_000, 4_000, 8_000, 16_000, 30_000)
                 awaitSignal(delays[minOf(attempt, 5)])
             }
         }
 
-        /** Fetches from chunk [start] on while the demands want what comes next. Returns whether a chunk was stored. */
         private fun fetch(start: Int): Boolean {
             val from = start.toLong() * chunkSize
             val c = synchronized(this) {
@@ -584,7 +565,6 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
                             synchronized(this) {
                                 written += n
                                 notifyWaiters()
-                                // Nobody wants this chunk any more (a seek elsewhere, or everyone left).
                                 if (target() != i) return stored
                             }
                         }
@@ -595,7 +575,6 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
                         }
                     }
                     synchronized(this) {
-                        // Once gone, the folder may belong to a new entry, and this part to that entry's filler.
                         if (gone) return stored
                         if (!partFile(i).renameTo(chunkFile(i))) throw StorageError(IOException("rename failed"))
                         present.set(i)

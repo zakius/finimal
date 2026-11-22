@@ -77,7 +77,6 @@ class CoreTest {
     }
 
     @Test fun keepNextTiedTimestampsAnchorOnLatestEpisode() {
-        // Marking a season played on the server gives every episode the same LastPlayedDate.
         val eps = listOf(ep("1", true, 7), ep("2", true, 7), ep("3", true, 7), ep("4"), ep("5"))
         assertEquals(listOf("4", "5"), keepNextWindow(eps, 2))
     }
@@ -105,7 +104,6 @@ class CoreTest {
             CacheEntry("playing", 30, 2, false),
             CacheEntry("new", 30, 3, false),
         )
-        // Pinned bytes don't count: 90 buffered against 60 drops only the oldest.
         assertEquals(listOf("old"), evictionOrder(entries, 60, protectedKey = "playing"))
         assertEquals(listOf("old", "new"), evictionOrder(entries, 10, protectedKey = "playing"))
         assertEquals(emptyList(), evictionOrder(entries, 90))
@@ -114,7 +112,6 @@ class CoreTest {
     @Test fun bufferLimitKeepsReserveFree() {
         val gb = 1_000_000_000L
         assertEquals(5 * gb, bufferLimit(5 * gb, 1 * gb, 50 * gb, 64 * gb))
-        // 3 GB buffered, 1 GB free on 64 GB: keep 3.2 GB free, so the buffer may hold 0.8 GB.
         assertEquals(800_000_000L, bufferLimit(5 * gb, 3 * gb, 1 * gb, 64 * gb))
         assertEquals(0, bufferLimit(5 * gb, 0, 1 * gb, 16 * gb))
     }
@@ -146,7 +143,6 @@ class CoreTest {
         store.putAll(mapOf("a" to a, "b" to b))
         assertFalse(store.isEmpty())
         store.put("b", bNewer)
-        // Confirming stale b must leave bNewer intact while removing a.
         store.confirmAll(mapOf("a" to a, "b" to b))
         assertNull(store.get("a"))
         assertEquals(bNewer, store.get("b"))

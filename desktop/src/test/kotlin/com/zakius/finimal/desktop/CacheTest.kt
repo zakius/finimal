@@ -68,7 +68,6 @@ class CacheTest {
         val byReleased = AppCache.deriveLibraryList(base, user, libId, Sort.RELEASED, unplayed = false, query = "")
         assertEquals(listOf(b, a, c), byReleased)
 
-        // Prefix match ("Matrix Reloaded") comes before substring match ("Beta Matrix").
         val searched = AppCache.deriveLibraryList(base, user, libId, Sort.NAME, unplayed = false, query = "matrix")
         assertEquals(listOf(c, b), searched)
 

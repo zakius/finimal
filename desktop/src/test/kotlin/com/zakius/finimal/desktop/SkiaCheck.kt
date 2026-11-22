@@ -9,11 +9,6 @@ import org.jetbrains.skia.paragraph.TextStyle
 import java.io.File
 import java.security.MessageDigest
 
-// Run with ./gradlew :desktop:skiaCheck. Checks that Skia's library with its ICU data trimmed (trimSkiaIcu in
-// desktop/build.gradle.kts) breaks text the same way as the original. Each library runs in its own JVM. For each
-// script, words of assigned code points are laid out at several widths to exercise line breaks, then walked with the
-// line and character break iterators, and the results are digested for comparison. Word breaking isn't compared,
-// because without the Chinese/Japanese dictionary it splits those languages per character.
 fun main(args: Array<String>) {
     if (args[0] == "run") {
         println(digests())

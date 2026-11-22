@@ -99,7 +99,6 @@ class Mpv(options: Map<String, String>) {
     private val lib = Lib.mpv
     private val ctx: Pointer = lib.mpv_create() ?: error("mpv_create failed")
 
-    // Observed state, written from the event thread.
     var position by mutableDoubleStateOf(0.0); private set
     var duration by mutableDoubleStateOf(0.0); private set
     var cachedUntil by mutableDoubleStateOf(0.0); private set
@@ -122,7 +121,6 @@ class Mpv(options: Map<String, String>) {
     private var render: Pointer? = null
     private val renderThread: Thread
     private val eventThread: Thread
-    /** Calls into the handle hold this lock shared, and destroying the handle takes it exclusively, so no call ever runs on a freed handle. */
     private val handle = ReentrantReadWriteLock()
     private val renderSignal = Any()
     @Volatile private var dirty = false
@@ -149,7 +147,6 @@ class Mpv(options: Map<String, String>) {
         // extension-less http URLs like the scratch proxy's.
         val defaults = mapOf("config" to "no", "input-default-bindings" to "no", "osc" to "no", "load-scripts" to "no", "ytdl" to "no",
             "vo" to "libmpv", "keep-open" to "yes", "hwdec" to "auto-copy", "idle" to "yes", "terminal" to "no")
-        // FINIMAL_MPV_LOG=<file> keeps mpv's own log, for bug reports.
         val logFile = System.getenv("FINIMAL_MPV_LOG")
         val log = if (logFile != null) mapOf("log-file" to logFile, "msg-level" to "all=v") else emptyMap()
         (defaults + options + log).forEach { (k, v) -> lib.mpv_set_option_string(ctx, k, v) }
@@ -176,7 +173,6 @@ class Mpv(options: Map<String, String>) {
     private fun events() {
         while (true) {
             val e = lib.mpv_wait_event(ctx, -1.0)
-            // close() wakes this thread with an empty event. The handle is destroyed only after this thread exits.
             if (closed) return
             when (e.getInt(0)) {
                 EVENT_SHUTDOWN -> return
@@ -188,7 +184,6 @@ class Mpv(options: Map<String, String>) {
                 EVENT_END_FILE -> {
                     val d = e.getPointer(16)
                     if (d != null) {
-                        // The file stopped or failed, so there is no position left to report.
                         loaded = false
                         if (d.getInt(0) == END_FILE_REASON_ERROR) error = "Playback failed (mpv error ${d.getInt(4)})."
                     }
@@ -201,7 +196,6 @@ class Mpv(options: Map<String, String>) {
                     val d = if (format == FORMAT_DOUBLE && data != null) data.getDouble(0) else null
                     val f = if (format == FORMAT_FLAG && data != null) data.getInt(0) != 0 else null
                     when (name) {
-                        // Updating on every frame would recompose the player. A quarter second is enough for the clock and reports.
                         "time-pos" -> {
                             val seconds = d ?: 0.0
                             if (kotlin.math.abs(seconds - position) >= 0.25 || seconds == 0.0) position = seconds
@@ -240,7 +234,6 @@ class Mpv(options: Map<String, String>) {
 
     private fun renderLoop() {
         var current: Bitmap? = null
-        // Pre-allocate native render parameter buffers once instead of 5 JNA malloc/Cleaner cycles on every video frame.
         val sizeMem = Memory(8)
         val formatMem = Memory(5).apply { setString(0, "bgr0") }
         val strideMem = Memory(8)
@@ -268,7 +261,6 @@ class Mpv(options: Map<String, String>) {
             // mpv only announces new frames, so after a resize, redraw the last frame at the new size.
             val newFrame = (flags and RENDER_UPDATE_FRAME) != 0L
             if (!newFrame && current != null && current.width == w && current.height == h) continue
-            // Reuse the oldest spare bitmap if it has the right size. One of another size is dropped.
             val spare = bitmaps.removeFirstOrNull()
             val bitmap = if (spare != null && spare.width == w && spare.height == h) {
                 spare
@@ -366,7 +358,7 @@ class Mpv(options: Map<String, String>) {
         closed = true
         synchronized(renderSignal) { signalRender() }
         closer.execute {
-            renderThread.join() // it may be inside a render call
+            renderThread.join()
             lib.mpv_wakeup(ctx)
             eventThread.join()
             handle.write {
@@ -383,7 +375,6 @@ class Mpv(options: Map<String, String>) {
 
     companion object {
         private val closer = Executors.newSingleThreadExecutor { task -> Thread(task, "mpv-close").apply { isDaemon = true } }
-        /** Preloads the native libmpv library off the UI thread so the first Play doesn't stall on JNA loading. */
         fun warmLibrary() {
             runCatching { Lib.mpv }
         }

@@ -79,12 +79,6 @@ private fun View.applySafeInsets(overscanH: Int, overscanV: Int) {
     }
 }
 
-/**
- * Native Android fast-path for the initial Libraries screen. Renders Frame 1 with zero Compose, Material3,
- * Jellyfin SDK, or kotlinx.serialization classes loaded, and batches every visual element into a single
- * Skia A8 AtlasTextOp shader (with window background via glClear). Hands off seamlessly to Compose Root
- * on the first navigation.
- */
 class LibrariesFastView(
     context: Context,
     private val onNavigate: (Screen) -> Unit,
@@ -365,7 +359,6 @@ class LibrariesFastView(
             val key = listOf(App.prefs.baseUrl, App.prefs.userId)
             val currentEntries = entries
             if (currentEntries != null) {
-                // Seed Libraries into AppCache and speculatively warm every library's disk snapshot + top posters off-main.
                 val placeholders = currentEntries.map { e ->
                     org.jellyfin.sdk.model.api.BaseItemDto(
                         id = java.util.UUID.fromString(e.id),
@@ -433,10 +426,6 @@ class LibrariesFastView(
     }
 }
 
-/**
- * Native Android fast-path for the initial Login screen (when logged out with no saved accounts).
- * Renders Frame 1 with zero Compose/Material3 classes and a single AtlasTextOp GPU shader.
- */
 class LoginFastView(
     context: Context,
     private val onLoggedIn: () -> Unit,
@@ -479,7 +468,6 @@ class LoginFastView(
             setPadding(pad, pad, pad, pad)
         }
 
-        // Title
         col.addView(TextView(context).apply {
             text = "finimal"
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 28f)
@@ -496,7 +484,6 @@ class LoginFastView(
             })
         }
 
-        // Server + Port row
         val serverRow = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
         urlField = makeEditText(saved.first, "jellyfin.example.com", InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI, EditorInfo.IME_ACTION_NEXT)
         val urlBox = OutlinedGlyphBox(context, dp(16).toFloat(), colors.outline, colors.primary, colors.error).apply {
@@ -521,7 +508,6 @@ class LoginFastView(
         }
         col.addView(portErrorText, LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(12) })
 
-        // Username
         userField = makeEditText("", "", InputType.TYPE_CLASS_TEXT, EditorInfo.IME_ACTION_NEXT).apply {
             if (Build.VERSION.SDK_INT >= 26) setAutofillHints(View.AUTOFILL_HINT_USERNAME)
         }
@@ -530,7 +516,6 @@ class LoginFastView(
         }
         col.addView(userBox, LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(12) })
 
-        // Password with Show/Hide toggle
         passField = makeEditText("", "", InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD, EditorInfo.IME_ACTION_DONE).apply {
             transformationMethod = PasswordTransformationMethod.getInstance()
             if (Build.VERSION.SDK_INT >= 26) setAutofillHints(View.AUTOFILL_HINT_PASSWORD)
@@ -590,7 +575,6 @@ class LoginFastView(
         }
         col.addView(submitBtn, LinearLayout.LayoutParams(LayoutParams.WRAP_CONTENT, dp(40)))
 
-        // Wire focus border indicators and input watchers
         fun bindBox(edit: EditText, box: OutlinedGlyphBox) {
             edit.setOnFocusChangeListener { _, focused -> box.setFieldFocused(focused) }
         }
@@ -719,7 +703,6 @@ private class SimpleWatcher(private val onChanged: (String) -> Unit) : TextWatch
     override fun afterTextChanged(s: Editable?) = onChanged(s?.toString().orEmpty())
 }
 
-/** Draws a single icon glyph via Canvas.drawText (no StaticLayout, no accessibility text leak, single AtlasTextOp). */
 private class GlyphDrawView(context: Context, private val glyph: String, private val sizePx: Float, color: Int) : View(context) {
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         typeface = iconTypeface
@@ -728,12 +711,10 @@ private class GlyphDrawView(context: Context, private val glyph: String, private
     }
     init { importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO }
     override fun onDraw(canvas: Canvas) {
-        // UPM=1024, ascent=1024, descent=0, so baseline at y = sizePx aligns the glyph cleanly inside [0, sizePx].
         canvas.drawText(glyph, (width - sizePx) / 2f, (height + sizePx) / 2f, paint)
     }
 }
 
-/** Draws the 32dp circular avatar backdrop using 4x16dp quarter-circle glyphs (batches into the single A8 AtlasTextOp). */
 private class AvatarCircleDrawView(context: Context, private val halfPx: Float, color: Int) : View(context) {
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         typeface = iconTypeface
@@ -749,7 +730,6 @@ private class AvatarCircleDrawView(context: Context, private val halfPx: Float, 
     }
 }
 
-/** Draws a full-width 1dp horizontal divider via repeating HLINE glyphs (edge-to-edge, zero StaticLayout, single AtlasTextOp). */
 private class DividerDrawView(context: Context, private val tilePx: Float, color: Int) : View(context) {
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         typeface = iconTypeface
@@ -770,7 +750,6 @@ private class DividerDrawView(context: Context, private val tilePx: Float, color
     }
 }
 
-/** FrameLayout with a 1dp outlined border rendered via HLINE/VLINE glyphs (stays inside the single A8 AtlasTextOp). */
 private class OutlinedGlyphBox(
     context: Context,
     private val tilePx: Float,
@@ -823,10 +802,8 @@ private class OutlinedGlyphBox(
             hText = AppIcons.HLINE.repeat(neededH)
         }
         val stroke = (tilePx / 16f).coerceAtLeast(1f)
-        // Top and bottom borders
         canvas.drawText(hText, 0f, tilePx, paint)
         canvas.drawText(hText, 0f, h - stroke + tilePx, paint)
-        // Left and right borders
         var y = tilePx
         val rightX = w - stroke
         while (y < h + tilePx) {
@@ -837,7 +814,6 @@ private class OutlinedGlyphBox(
     }
 }
 
-/** Solid Material3 pill button rendered via quarter-circle + opaque BLOCK glyphs (stays inside the single A8 AtlasTextOp). */
 private class GlyphButtonView(
     context: Context,
     initialLabel: String,
@@ -890,14 +866,11 @@ private class GlyphButtonView(
         if (w <= 0f || h <= 0f) return
         val r = h / 2f
         bgPaint.textSize = r
-        // Left semicircle cap
         canvas.drawText("\uE008", 0f, r, bgPaint)
         canvas.drawText("\uE00A", 0f, h, bgPaint)
-        // Right semicircle cap
         val rightCapX = (w - r).coerceAtLeast(r)
         canvas.drawText("\uE009", rightCapX, r, bgPaint)
         canvas.drawText("\uE00B", rightCapX, h, bgPaint)
-        // Opaque center fill overlapping the caps by 1px to avoid any antialiasing seam
         val fillStart = (r - 1f).coerceAtLeast(0f)
         val fillEnd = (rightCapX + 1f).coerceAtMost(w)
         if (fillEnd > fillStart) {
@@ -938,7 +911,6 @@ private class FastColors(
             val err = if (dark) 0xFFF2B8B5.toInt() else 0xFFB3261E.toInt()
             fun c(id: Int) = context.resources.getColor(id, context.theme)
             fun withAlpha(color: Int, alpha: Int) = (alpha shl 24) or (color and 0x00FFFFFF)
-            /** Pre-blend translucent fg over opaque bg so overlapping fill glyphs have zero alpha seams. */
             fun blendOver(fg: Int, alpha: Int, bg: Int): Int {
                 val inv = 255 - alpha
                 val r = (((fg shr 16) and 0xFF) * alpha + ((bg shr 16) and 0xFF) * inv + 127) / 255

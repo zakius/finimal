@@ -13,7 +13,6 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
 
-/** A transcode drops embedded subtitles: text ones come as files, a picture one is burned in. */
 class SubtitlesTest {
     private fun sub(index: Int, lang: String, text: Boolean, external: Boolean = false, forced: Boolean = false) = MediaStream(
         type = MediaStreamType.SUBTITLE, index = index, language = lang, isTextSubtitleStream = text, isExternal = external,
@@ -42,7 +41,6 @@ class SubtitlesTest {
         assertNull(burnInIndex(source, null))
     }
 
-    // A forced (signs only) English track before the full one, as some releases have it.
     private val signsFirst = source.copy(mediaStreams = listOf(sub(3, "eng", text = true, forced = true), sub(4, "eng", text = true),
         sub(5, "jpn", text = true)))
 

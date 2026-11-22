@@ -24,7 +24,6 @@ data class Download(
 )
 
 val queueOrder = compareBy<Download>({ it.queuedAt }, { it.item.parentIndexNumber }, { it.item.indexNumber })
-/** Orders finished downloads by series and then season order, with movies last. */
 val shelfOrder = compareBy<Download>({ it.item.seriesId == null }, { it.item.seriesName }, { it.item.seriesId },
     { it.item.parentIndexNumber }, { it.item.indexNumber }, { it.item.name })
 

@@ -6,7 +6,6 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class DirectPlayTest {
-    /** A box with 8-bit H.264 and HEVC up to 1080p60. */
     private val box = object : Decoders {
         override fun hasCodec(codec: String, tenBit: Boolean) = codec in setOf("h264", "hevc") && !tenBit
         override fun fits(codec: String, width: Int, height: Int, fps: Float) = hasCodec(codec, false) && height <= 1080 && fps <= 60
@@ -36,7 +35,7 @@ class DirectPlayTest {
     @Test fun allLeavesUnknownCodecsToThePlayer() {
         val limits = auto.copy(codecs = Codecs.ALL)
         assertTrue(playsDirectly(hevc1080.copy(codec = "av1", tenBit = true), limits, box))
-        assertFalse(playsDirectly(hevc4k, limits, box)) // a hardware decoder exists and says no
+        assertFalse(playsDirectly(hevc4k, limits, box))
     }
 
     @Test fun learnedLimitTranscodesThatLoadAndAbove() {

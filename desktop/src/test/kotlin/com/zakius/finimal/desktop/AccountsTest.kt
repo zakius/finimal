@@ -8,7 +8,6 @@ import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
-/** Accounts on one server: settings follow the account, a PIN guards switching to it, another server starts over. */
 class AccountsTest {
     private class Store(val m: MutableMap<String, Any?> = mutableMapOf()) : KeyValueStore {
         override fun get(key: String) = m[key]

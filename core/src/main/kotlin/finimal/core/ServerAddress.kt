@@ -1,6 +1,5 @@
 package finimal.core
 
-/** Jellyfin's HTTP port out of the box. */
 const val DEFAULT_JELLYFIN_PORT = "8096"
 
 /**
@@ -64,7 +63,6 @@ fun isValidPort(port: String): Boolean {
     return number in 1..65535
 }
 
-/** An IPv6 literal needs brackets before a port can follow it. */
 private fun bracketIpv6(authority: String): String {
     val colons = authority.count { it == ':' }
     return if (colons > 1 && !authority.startsWith("[")) "[$authority]" else authority

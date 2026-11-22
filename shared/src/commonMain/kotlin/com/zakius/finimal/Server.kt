@@ -84,7 +84,6 @@ class Server {
     private val jellyfin = createJellyfin {
         clientInfo = ClientInfo("finimal", App.platform.versionName)
         App.platform.configure(this)
-        // One connection pool for API, images and streams. Every API response also updates the server clock offset.
         apiClientFactory = OkHttpFactory(App.http.newBuilder().addNetworkInterceptor { chain ->
             val response = chain.proceed(chain.request())
             val date = response.headers.getDate("Date")
@@ -94,16 +93,10 @@ class Server {
     }
     val api = jellyfin.createApi(prefs.baseUrl, prefs.token)
 
-    /**
-     * The account a play state was recorded for. Its reports, flush and confirm use this account's
-     * own client, user and pending file, so a switch while they are in flight can't send its
-     * progress as another user or confirm it in another account's file.
-     */
     private class Owner(val userId: UUID, val api: ApiClient, val pending: PendingStore)
 
     private val playApis = java.util.concurrent.ConcurrentHashMap<Pair<String, String>, ApiClient>()
 
-    /** The current account, read under the lock [switchTo], [login] and [logout] change it under; null when logged out. */
     private fun owner(): Owner? = synchronized(App) {
         val base = prefs.baseUrl ?: return null
         val token = prefs.token ?: return null
@@ -131,11 +124,9 @@ class Server {
      */
     fun now() = System.currentTimeMillis() + clockOffsetMs
 
-    /** Keeps reports per item in order, so a slow progress report can't land after the stop while allowing bulk flushes to run in parallel. */
     private val itemLocks = java.util.concurrent.ConcurrentHashMap<String, Mutex>()
     private fun itemLock(id: String) = itemLocks.computeIfAbsent(id) { Mutex() }
 
-    /** Counts play-state writes queued for [App.disk], so [flush] knows not to skip while a stop is still landing. */
     private val inFlightRecords = AtomicInteger(0)
     private val recordVersion = AtomicLong(0)
 
@@ -157,7 +148,6 @@ class Server {
             try {
                 return login(base, credentials)
             } catch (e: Exception) {
-                // A certificate problem does not mean the server lacks https. Falling back to http would send the password in clear text.
                 if (i == tries.lastIndex || !unreachable(e) || untrustedCertificate(e)) throw e
             }
         }
@@ -165,7 +155,6 @@ class Server {
 
     private suspend fun login(base: String, credentials: AuthenticateUserByName) {
         api.update(baseUrl = base, accessToken = null)
-        // If adding an account fails, restore the current account's client so it keeps working.
         val auth = try {
             io { api.authenticationApi.authenticateUserByName(credentials).content }
         } catch (e: Exception) {
@@ -200,7 +189,7 @@ class Server {
     fun logout(keepAccount: Boolean = false) {
         recorded.clear()
         AppCache.clear()
-        ListSnapshots.clear() // Another account's lists must not show, even briefly.
+        ListSnapshots.clear()
         synchronized(App) { if (keepAccount) prefs.endSession() else prefs.logout() }
         api.update(accessToken = null)
         App.downloads?.accountChanged()
@@ -233,7 +222,6 @@ class Server {
             isPlayed = if (unplayedOnly) false else null,
             searchTerm = search.ifBlank { null },
             enableUserData = true,
-            // The grid shows one poster and never a count; whole libraries come back in one response.
             enableTotalRecordCount = false,
             enableImageTypes = listOf(ImageType.PRIMARY),
             imageTypeLimit = 1,
@@ -257,7 +245,6 @@ class Server {
             async { userData(uuid) }.await()
         }
         val full = dto.await().copy(userData = data)
-        // The server has caught up with our recorded state, or another device changed it since. Either way the server's state wins.
         val server = data.toPlayState()?.lastPlayedMs
         if (server != null) {
             val local = recorded[id]?.lastPlayedMs ?: Long.MAX_VALUE
@@ -402,7 +389,6 @@ class Server {
                 inFlightRecords.decrementAndGet()
             }
             io {
-                // Skipped when superseded, as in reportProgress. The server then ends the playback session on its own.
                 if (owner != null) {
                     itemLock(id).withLock {
                         if (owner.pending.get(id) == state) {
@@ -423,10 +409,6 @@ class Server {
     var localChanges by mutableIntStateOf(0)
         private set
 
-    /**
-     * The last state recorded this session, kept even after the server confirms it. Otherwise a player loaded
-     * before "Mark played" would report its stale load-time flag and un-mark the item.
-     */
     private val recorded = java.util.concurrent.ConcurrentHashMap<String, PlayState>()
 
     private fun knownPlayed(id: String, serverPlayed: Boolean): Boolean {
@@ -445,11 +427,6 @@ class Server {
         return owner
     }
 
-    /**
-     * Every local play-state change goes through here: it is queued for the server and kept with the download
-     * for offline resume. Returns the account [state] was queued for, or null when logged out, in which case
-     * the state waits in the last account's file.
-     */
     private suspend fun record(id: String, state: PlayState): Owner? {
         inFlightRecords.incrementAndGet()
         return try {
@@ -459,7 +436,6 @@ class Server {
         }
     }
 
-    /** Records many states in one atomic disk write and one Compose invalidation. */
     private suspend fun recordAll(entries: Map<String, PlayState>): Owner? {
         if (entries.isEmpty()) return owner()
         inFlightRecords.incrementAndGet()
@@ -490,7 +466,6 @@ class Server {
         record(id, PlayState(0, played, now()))
     }
 
-    /** Marks [state] as stored on the server. Bumping [localChanges] makes rows drop their "not synced" mark at once. */
     private fun confirm(owner: Owner, id: String, state: PlayState) {
         owner.pending.confirm(id, state)
         localChanges++
@@ -556,11 +531,9 @@ class Server {
         if (snapshot == null) return@withLock null
         val (owner, pending) = snapshot
         if (pending.isEmpty()) return@withLock null
-        // A 401 for an account we have switched away from must not end the session of the account switched to.
         fun expireOwner() {
             if (owner()?.api === owner.api) expire()
         }
-        // One request fetches every item's server state. An item the server lacks is absent here, and its push returns 404.
         val serverStates = try {
             userData(owner.api, owner.userId, pending.keys.map(UUID::fromString))
         } catch (e: Exception) {
@@ -628,7 +601,6 @@ class Server {
         abortError.get() ?: firstFailure.get()
     }
 
-    /** One flush at a time, because two overlapping ones could push an older state after a newer one. */
     private val flushing = Mutex()
 
     private companion object {

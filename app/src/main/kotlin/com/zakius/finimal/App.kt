@@ -33,9 +33,8 @@ import kotlin.concurrent.thread
 import org.jellyfin.sdk.JellyfinOptions
 import org.jellyfin.sdk.model.api.BaseItemDto
 
-/** The Android app as the shared code's [Platform]; the shared singletons are in [App]. */
 class AndroidApp : Application(), Platform, SingletonImageLoader.Factory, Configuration.Provider {
-    @android.annotation.SuppressLint("MissingSuperCall") // called on the fonts thread on ASUS
+    @android.annotation.SuppressLint("MissingSuperCall")
     override fun onCreate() {
         // Stock Android's Application.onCreate is empty, but ASUS's applies its FlipFont theme and rebuilds the system
         // font map, which costs 31 ms of main thread on every cold start on a Zenfone 10. Overlap it on ASUS only.
@@ -53,7 +52,7 @@ class AndroidApp : Application(), Platform, SingletonImageLoader.Factory, Config
             // This avoids laying out text, which would race the font swap above.
             val lineBreakTag = java.util.Locale.getDefault().toLanguageTag() + "-u-lb-normal"
             java.util.Locale.forLanguageTag(lineBreakTag).displayName
-            iconTypeface // Preload the 1.6 KB icon font off the main thread.
+            iconTypeface
             if (App.prefs.loggedIn) ListSnapshots.prefetchFastLibraries()
         }
     }
@@ -68,11 +67,11 @@ class AndroidApp : Application(), Platform, SingletonImageLoader.Factory, Config
         if (startedUp) return
         startedUp = true
         thread(name = "after-first-frame") {
-            App.server // Warm the API client now that Frame 1 is on screen.
-            SingletonImageLoader.get(this) // Warm Coil's memory/disk caches and image dispatcher before first tap.
+            App.server
+            SingletonImageLoader.get(this)
             Media.afterFirstFrame(this)
             warmDecoders()
-            HardwareDecoders.summary() // Pre-cache decoder summary & h264 height off the main thread.
+            HardwareDecoders.summary()
             HardwareDecoders.h264Height
             // Android 15+ compiles assets/art-profile/baseline.prof at install time; older versions use ProfileInstaller.
             if (Build.VERSION.SDK_INT < 35) runCatching { ProfileInstaller.writeProfile(this) }
@@ -163,7 +162,6 @@ class AndroidApp : Application(), Platform, SingletonImageLoader.Factory, Config
         Media.fetchSubtitles(item, transcode = !playsDirectly(item))
     }
 
-    /** The activity on screen, for the notification permission prompt. */
     var activity: MainActivity? = null
 
     companion object {

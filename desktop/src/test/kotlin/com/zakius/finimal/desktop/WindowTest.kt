@@ -5,7 +5,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 
 class WindowTest {
-    private val laptop = Rectangle(0, 0, 1366, 728) // 768 px less a 40 px taskbar
+    private val laptop = Rectangle(0, 0, 1366, 728)
     private val right = Rectangle(1366, 0, 1920, 1040)
 
     @Test fun theDefaultSizeFitsASmallScreen() =
