@@ -1,0 +1,4 @@
+c67bf49b2bfe4f818d9602021f6efd8e8ab125065ddd6c828e54fead10efd169  core/src/main/kotlin/finimal/core/PendingStore.kt
+a119f8dae29061cd97c604ebe521452d29f843754cc38af23a8efa8861c2c850  core/src/main/kotlin/finimal/core/PlayState.kt
+694a75ea17fed8fa75208218f8a6057c766c32d705802ca691c1d4e46aaab263  shared/src/commonMain/kotlin/com/zakius/finimal/Platform.kt
+ca8fb8fd0b235b1681e54d7aa299082740a6a48a75b662665083f7d43be7423a  shared/src/commonMain/kotlin/com/zakius/finimal/Server.kt
