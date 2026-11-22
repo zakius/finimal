@@ -96,6 +96,12 @@ fun Theme(content: @Composable () -> Unit) {
  * The screen stack. [player] is the platform's own player for an item. [openDownloads] pushes Downloads once, when the
  * download notification is tapped.
  */
+/**
+ * Whether the download notification may push Downloads onto [stack]. Never over "Who's watching?": the account still
+ * loaded behind it may have a PIN.
+ */
+fun opensDownloadsOver(stack: List<Screen>) = stack.first() != Screen.Accounts && stack.last() != Screen.Downloads
+
 @Composable
 fun Root(
     openDownloads: Boolean,
@@ -161,7 +167,7 @@ fun Root(
 
     NavigationBackHandler(rememberNavigationEventState(NavigationEventInfo.None), isBackEnabled = stack.size > 1, onBackCompleted = pop)
     LaunchedEffect(openDownloads) {
-        if (openDownloads && App.prefs.loggedIn && stack.first() != Screen.Accounts && stack.last() != Screen.Downloads) {
+        if (openDownloads && App.prefs.loggedIn && opensDownloadsOver(stack)) {
             if (stack.last() is Screen.Play) pop()
             push(Screen.Downloads)
         }

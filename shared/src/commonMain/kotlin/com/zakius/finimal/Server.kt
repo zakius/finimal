@@ -68,6 +68,7 @@ import finimal.core.PlayState
 import finimal.core.ResumeRules
 import finimal.core.shouldPush
 import finimal.core.serverCandidates
+import finimal.core.triesNextCandidate
 
 enum class Sort(val label: String, val by: ItemSortBy, val order: SortOrder) {
     NAME("Name", ItemSortBy.SORT_NAME, SortOrder.ASCENDING),
@@ -148,7 +149,7 @@ class Server {
             try {
                 return login(base, credentials)
             } catch (e: Exception) {
-                if (i == tries.lastIndex || !unreachable(e) || untrustedCertificate(e)) throw e
+                if (i == tries.lastIndex || !triesNextCandidate(e, noAnswer = unreachable(e))) throw e
             }
         }
     }
@@ -632,10 +633,6 @@ fun subtitleExt(stream: MediaStream) = when (val c = stream.codec?.lowercase()) 
     "webvtt" -> "vtt"
     else -> c
 }
-
-/** An https server whose certificate isn't trusted, has expired, or is for another name. */
-fun untrustedCertificate(e: Throwable) = generateSequence(e) { it.cause }
-    .any { it is java.security.cert.CertificateException || it is java.security.cert.CertPathValidatorException || it is javax.net.ssl.SSLPeerUnverifiedException }
 
 /** No HTTP answer: a timeout, unknown host, refused connection or failed TLS. */
 fun unreachable(e: Throwable) = e is TimeoutException || generateSequence(e) { it.cause }.any { it is IOException }

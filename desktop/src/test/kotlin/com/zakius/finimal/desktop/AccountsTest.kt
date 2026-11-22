@@ -2,6 +2,8 @@ package com.zakius.finimal.desktop
 
 import com.zakius.finimal.KeyValueStore
 import com.zakius.finimal.Prefs
+import com.zakius.finimal.Screen
+import com.zakius.finimal.opensDownloadsOver
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -73,5 +75,13 @@ class AccountsTest {
         assertFalse(p.loggedIn)
         p.login("https://other", "tc", "c", "Cy")
         assertEquals(listOf("c"), p.accounts().map { it.userId })
+    }
+
+    @Test fun theDownloadNotificationNeverOpensOverWhosWatching() {
+        assertFalse(opensDownloadsOver(listOf(Screen.Accounts)))
+        assertFalse(opensDownloadsOver(listOf(Screen.Accounts, Screen.ResetPin("b"))))
+        assertTrue(opensDownloadsOver(listOf(Screen.Libraries, Screen.Accounts)))
+        assertTrue(opensDownloadsOver(listOf(Screen.Libraries, Screen.Play("x"))))
+        assertFalse(opensDownloadsOver(listOf(Screen.Libraries, Screen.Downloads)))
     }
 }

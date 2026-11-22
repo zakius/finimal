@@ -13,6 +13,7 @@ import finimal.core.defaultPortFor
 import finimal.core.isValidPort
 import finimal.core.splitServerAddress
 import finimal.core.serverCandidates
+import finimal.core.untrustedCertificate
 import androidx.compose.ui.input.pointer.isSecondaryPressed
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.pointerInput
