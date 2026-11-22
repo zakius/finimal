@@ -1,6 +1,5 @@
 package finimal.core
 
-/** How long playback keeps reconnecting after a network failure before it shows the error. */
 const val RECONNECT_WINDOW_MS = 60_000L
 
 /**
@@ -14,8 +13,7 @@ fun reconnectDelayMs(attempt: Int, firstFailureMs: Long, nowMs: Long): Long? {
 }
 
 /**
- * Where a player stands with a dropped connection. Both players keep one of these instead of separate flags, so the
- * start time and attempt count exist only while retrying, and nothing from one outage carries into the next.
+ * Where a player stands with a dropped connection.
  *
  * Idle → (network failure) → Retrying → (loaded with the server answering) → Idle
  *                                     → (window ran out) → GaveUp → (Retry, then loaded) → Idle

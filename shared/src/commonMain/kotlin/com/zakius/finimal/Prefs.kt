@@ -34,7 +34,6 @@ class Prefs(private val p: KeyValueStore) {
         return parsed
     }
 
-    /** Number of saved accounts, read without parsing JSON on cold start. */
     val accountCount: Int
         get() {
             val saved = (p["accountCount"] as Number?)?.toInt()
@@ -195,11 +194,9 @@ class Prefs(private val p: KeyValueStore) {
         put("userName", null)
     }
 
-    /** The key for a setting that follows the account rather than the device. */
     private fun u(key: String) = "$userId/$key"
 
     init {
-        // Versions without multiple accounts stored one login and its settings without a user prefix. Move them to the first account.
         val user = userId
         val token = token
         if (p["accounts"] == null && user != null && token != null) {

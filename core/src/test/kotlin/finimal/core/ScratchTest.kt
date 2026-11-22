@@ -21,10 +21,8 @@ import okhttp3.Response
 
 class ScratchTest {
     private val chunk = 64 * 1024
-    /** Not a multiple of the chunk size, so the last chunk is short. */
     private val content = ByteArray(16 * chunk + 1234) { (it * 31 % 251).toByte() }
 
-    // How the test origin server behaves. Each test sets what it needs.
     @Volatile private var honorRange = true
     @Volatile private var status = 200
     @Volatile private var failFirst = 0
@@ -63,7 +61,7 @@ class ScratchTest {
                 val began = System.nanoTime()
                 while (pos < content.size) {
                     val n = minOf(8192, content.size - pos)
-                    if (drop >= 0 && pos - start >= drop) { // cut mid-body
+                    if (drop >= 0 && pos - start >= drop) {
                         ex.close()
                         return@createContext
                     }
@@ -76,7 +74,6 @@ class ScratchTest {
                     }
                 }
             } catch (e: IOException) {
-                // The client went away: a seek, or a cancelled fetch.
             } finally {
                 ex.close()
             }
@@ -110,7 +107,6 @@ class ScratchTest {
 
     private fun slice(from: Int, to: Int = content.size) = content.copyOfRange(from, to)
 
-    /** Leaves whole chunks on disk for [key], as an earlier run would have. */
     private fun onDisk(vararg chunks: Int, key: String = "k"): File {
         val folder = File(dir, key)
         folder.mkdirs()
@@ -142,7 +138,7 @@ class ScratchTest {
             assertEquals("bytes 500000-${content.size - 1}/${content.size}", r.header("Content-Range"))
             assertContentEquals(slice(500000), r.body.bytes())
         }
-        assertEquals(7L * chunk, starts.first()) // byte 500000 is in chunk 7
+        assertEquals(7L * chunk, starts.first())
     }
 
     @Test fun closedRangeReturnsJustThoseBytes() {
@@ -165,7 +161,7 @@ class ScratchTest {
     }
 
     @Test fun readerGetsBytesBeforeTheirChunkIsWhole() {
-        bytesPerSecond = 32 * 1024 // a chunk takes 2 s
+        bytesPerSecond = 32 * 1024
         entry()
         val began = System.currentTimeMillis()
         get().use { r ->
@@ -177,10 +173,10 @@ class ScratchTest {
     }
 
     @Test fun seekElsewherePreemptsTheFill() {
-        bytesPerSecond = 64 * 1024 // a chunk a second
+        bytesPerSecond = 64 * 1024
         entry()
         val slow = get()
-        slow.body.byteStream().read(ByteArray(10)) // a reader at the start keeps its demand open
+        slow.body.byteStream().read(ByteArray(10))
         val began = System.currentTimeMillis()
         get(range = "bytes=${12 * chunk}-").use { r ->
             val first = ByteArray(1000)
@@ -284,12 +280,11 @@ class ScratchTest {
         server.close()
         server = ScratchServer({ scratch }, ahead = 4L * chunk, waitMs = 20_000)
         val port = origin.address.port
-        origin.stop(0) // connections refused, as with no network
+        origin.stop(0)
         entry()
         val began = System.currentTimeMillis()
         get().use { r -> assertEquals(504, r.code) }
         assertTrue(System.currentTimeMillis() - began < 3_000, "took ${System.currentTimeMillis() - began} ms")
-        // The network comes back: the player's next request gets the file.
         val back = HttpServer.create(InetSocketAddress("127.0.0.1", port), 0).apply {
             createContext("/f") { ex ->
                 val rangeHeader = ex.requestHeaders.getFirst("Range")
@@ -325,7 +320,7 @@ class ScratchTest {
             bytesPerSecond = 256 * 1024
             entry()
             repeat(3) {
-                get().use { r -> r.body.byteStream().read(ByteArray(1000)) } // closes with most of the body unsent
+                get().use { r -> r.body.byteStream().read(ByteArray(1000)) }
             }
             Thread.sleep(500)
             bytesPerSecond = Long.MAX_VALUE

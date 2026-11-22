@@ -22,7 +22,6 @@ class PendingStore(private val file: File) {
             val saved: Map<String, PlayState> = try {
                 json.decodeFromString<Map<String, PlayState>>(file.readText())
             } catch (e: Throwable) {
-                // Kept aside rather than overwritten by the next save: it may be the only copy of offline progress.
                 file.renameTo(File(file.path + ".corrupt"))
                 emptyMap()
             }
@@ -75,7 +74,6 @@ class PendingStore(private val file: File) {
         }
     }
 
-    // On a full disk the states stay in memory, and the next put writes them all.
     private fun save() {
         try {
             file.writeAtomically(json.encodeToString(states.toMap()))

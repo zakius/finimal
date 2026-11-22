@@ -1,4 +1,3 @@
-// Plain JVM module with no Android imports, so the desktop client can share it.
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
@@ -14,7 +13,7 @@ kotlin { compilerOptions { jvmTarget = JvmTarget.JVM_21 } }
 
 dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")
-    implementation("com.squareup.okhttp3:okhttp:5.5.1") // Matches the version the app's libraries already pull in.
+    implementation("com.squareup.okhttp3:okhttp:5.5.1")
     testImplementation(kotlin("test"))
 }
 

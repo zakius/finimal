@@ -1,13 +1,11 @@
 package finimal.core
 
-/** Jellyfin's HTTP port out of the box. */
 const val DEFAULT_JELLYFIN_PORT = "8096"
 
 /**
  * Base URLs to try, in order, for what the login form says. A scheme is used as written. Without one, try https and
  * then http on the port, except that port 443 means https only. A port written in [server] overrides [port], and an
- * empty [port] means the scheme's default. The caller must stop at a certificate problem, because falling back to
- * http would send the password in clear text.
+ * empty [port] means the scheme's default. Move on to the next one only when [triesNextCandidate] says so.
  */
 fun serverCandidates(server: String, port: String): List<String> {
     val input = server.trim().trimEnd('/')
@@ -64,7 +62,6 @@ fun isValidPort(port: String): Boolean {
     return number in 1..65535
 }
 
-/** An IPv6 literal needs brackets before a port can follow it. */
 private fun bracketIpv6(authority: String): String {
     val colons = authority.count { it == ':' }
     return if (colons > 1 && !authority.startsWith("[")) "[$authority]" else authority
@@ -72,3 +69,13 @@ private fun bracketIpv6(authority: String): String {
 
 private fun hasPort(authority: String) =
     if (authority.startsWith("[")) authority.substringAfter(']').startsWith(":") else ':' in authority
+
+/** A certificate the device doesn't trust, anywhere in [e]'s causes. */
+fun untrustedCertificate(e: Throwable) = generateSequence(e) { it.cause }
+    .any { it is java.security.cert.CertificateException || it is java.security.cert.CertPathValidatorException || it is javax.net.ssl.SSLPeerUnverifiedException }
+
+/**
+ * Whether login tries the next of [serverCandidates] after a failure [e], given whether the server gave [noAnswer] at
+ * all. Never after a certificate problem: the next candidate may be http, which would send the password in clear text.
+ */
+fun triesNextCandidate(e: Throwable, noAnswer: Boolean) = noAnswer && !untrustedCertificate(e)

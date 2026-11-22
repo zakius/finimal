@@ -6,10 +6,6 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
-/**
- * Tests the libmpv binding against the real library on a clip mpv generates itself: frames render, properties arrive,
- * the end is detected, and closing doesn't crash. CI runs it on Linux and Windows, where nobody watches the window.
- */
 class MpvTest {
     private fun waitFor(timeoutMs: Long = 15_000, what: String, check: () -> Boolean) {
         val deadline = System.currentTimeMillis() + timeoutMs
@@ -38,7 +34,6 @@ class MpvTest {
         }
     }
 
-    /** Closes while the event, render and caller threads are busy. A crash here aborts the JVM on a corrupt heap. */
     @Test fun closingUnderLoadIsSafe() {
         repeat(15) { round ->
             val mpv = Mpv(mapOf("ao" to "null"))
@@ -57,10 +52,9 @@ class MpvTest {
             mpv.close()
             callers.forEach { it.join() }
         }
-        Thread.sleep(500) // the closes finish on their own thread
+        Thread.sleep(500)
     }
 
-    /** The resume point is set before loadfile, which works on every libmpv 2.x (0.37 rejected loadfile's per-file options). */
     @Test fun startsAtTheGivenPosition() {
         val mpv = Mpv(mapOf("ao" to "null"))
         try {

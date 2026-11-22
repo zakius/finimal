@@ -16,7 +16,6 @@ import org.jellyfin.sdk.model.api.MediaStreamType
  * frames, which is how a file ends up choppy instead of transcoded.
  */
 object HardwareDecoders : Decoders {
-    /** Maps the server's codec name to the decoder MIME type and the profiles that mean the decoder supports 10-bit. */
     private val codecs = mapOf(
         "h264" to Pair("video/avc", setOf(CodecProfileLevel.AVCProfileHigh10)),
         "hevc" to Pair("video/hevc", setOf(CodecProfileLevel.HEVCProfileMain10, CodecProfileLevel.HEVCProfileMain10HDR10)),
@@ -67,7 +66,6 @@ object HardwareDecoders : Decoders {
     /** The tallest common 16:9 height [codec] plays at 30 fps, or null below 720p. */
     fun tallest(codec: String) = listOf(2160, 1440, 1080, 720).firstOrNull { height -> fits(codec, height * 16 / 9, height, 30f) }
 
-    /** The transcode height used when the quality setting is Auto. */
     val h264Height by lazy { tallest("h264") ?: 480 }
 
     private val cachedSummary by lazy {
@@ -86,7 +84,6 @@ object HardwareDecoders : Decoders {
         if (text.isEmpty()) "none found" else text
     }
 
-    /** The decoder summary shown in Settings, such as "H.264 1080p, HEVC 10-bit 4K". Cached per process. */
     fun summary(): String = cachedSummary
 }
 

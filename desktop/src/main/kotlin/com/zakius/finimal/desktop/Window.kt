@@ -17,7 +17,6 @@ import kotlinx.coroutines.launch
 import java.awt.Rectangle
 import java.awt.Toolkit
 
-/** Gives the player control of the window: its title, and fullscreen that restores the previous placement on exit. */
 val LocalWindow = compositionLocalOf<WindowControl?> { null }
 
 class WindowControl(val state: WindowState) {

@@ -10,7 +10,6 @@ import finimal.core.evictionOrder
 import java.io.File
 import org.jellyfin.sdk.model.api.BaseItemDto
 
-/** The desktop's use of the scratch: playback streams through it and buffers to the end of the file. No downloads yet. */
 object DesktopMedia {
     val scratch: Scratch by lazy {
         Scratch(File(App.platform.appFiles, "scratch"), App.http).apply {
@@ -33,7 +32,6 @@ object DesktopMedia {
         return entry
     }
 
-    /** A URL for mpv that serves the item's file through the scratch. */
     fun streamUrl(item: BaseItemDto): String {
         entry(item)
         return proxy.url(scratchKey(item))
@@ -78,7 +76,6 @@ object DesktopMedia {
         return dir.usableSpace
     }
 
-    /** Bytes currently stored in the scratch buffer. */
     fun bufferBytes(): Long = scratch.keys().sumOf { scratch.entry(it).bytes() }
 
     /** Deletes every non-playing scratch entry. */

@@ -5,7 +5,6 @@ import kotlinx.serialization.Serializable
 const val TICKS_PER_SECOND = 10_000_000L
 const val TICKS_PER_MS = TICKS_PER_SECOND / 1000
 
-/** What the server stores per user and item. */
 @Serializable
 data class PlayState(
     val positionTicks: Long,

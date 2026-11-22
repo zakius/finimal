@@ -64,7 +64,6 @@ import org.jellyfin.sdk.model.api.MediaStreamType
 @Serializable
 sealed interface Screen {
     @Serializable data object Login : Screen
-    /** Logs another user of the same server in. */
     @Serializable data object AddAccount : Screen
     /** Re-authenticates an account with its password to clear a forgotten PIN. */
     @Serializable data class ResetPin(val username: String) : Screen
@@ -86,7 +85,6 @@ private val FocusRipple = RippleConfiguration(
 @Composable
 fun Theme(content: @Composable () -> Unit) {
     val colors = platformColors(isSystemInDarkTheme())
-    // Material's default 10% focus highlight can't be seen from a sofa, and it is the only sign of where D-pad focus is.
     MaterialTheme(colorScheme = colors) {
         CompositionLocalProvider(LocalRippleConfiguration provides FocusRipple) {
             Surface(Modifier.fillMaxSize(), content = content)
@@ -98,6 +96,12 @@ fun Theme(content: @Composable () -> Unit) {
  * The screen stack. [player] is the platform's own player for an item. [openDownloads] pushes Downloads once, when the
  * download notification is tapped.
  */
+/**
+ * Whether the download notification may push Downloads onto [stack]. Never over "Who's watching?": the account still
+ * loaded behind it may have a PIN.
+ */
+fun opensDownloadsOver(stack: List<Screen>) = stack.first() != Screen.Accounts && stack.last() != Screen.Downloads
+
 @Composable
 fun Root(
     openDownloads: Boolean,
@@ -112,12 +116,8 @@ fun Root(
         )
     ) { (initialStack ?: listOf(startScreen())).toMutableStateList() }
 
-    // Each stack entry keeps its UI state (scroll, sort, search) while covered; leaving the stack drops it.
     val saved = rememberSaveableStateHolder()
-    // Bumped by reset, so a fresh Libraries screen after switching accounts doesn't reuse the old account's composition.
     var epoch by rememberSaveable { mutableIntStateOf(0) }
-    // Entries that have been shown at least once stay composed when covered; entries below the initial top
-    // (such as Libraries on an Android FastStart handoff) defer composition until the user actually pops back to them.
     val everShown = remember { HashSet<String>() }
     fun keyOf(i: Int) = "$epoch:$i:${stack[i]}"
     val push: (Screen) -> Unit = remember(stack) { { s -> stack.add(s) } }
@@ -167,9 +167,7 @@ fun Root(
 
     NavigationBackHandler(rememberNavigationEventState(NavigationEventInfo.None), isBackEnabled = stack.size > 1, onBackCompleted = pop)
     LaunchedEffect(openDownloads) {
-        // Never open over "Who's watching?", because the account still loaded there may be protected by a PIN.
-        if (openDownloads && App.prefs.loggedIn && stack.first() != Screen.Accounts && stack.last() != Screen.Downloads) {
-            // Close the player first: covered, it would keep playing unseen, and opening a download from the list would start a second one.
+        if (openDownloads && App.prefs.loggedIn && opensDownloadsOver(stack)) {
             if (stack.last() is Screen.Play) pop()
             push(Screen.Downloads)
         }
@@ -178,7 +176,6 @@ fun Root(
     LaunchedEffect(App.sessionExpired) { if (App.sessionExpired) reset(Screen.Login) }
     val topKey = keyOf(stack.lastIndex)
     everShown.add(topKey)
-    // Otherwise D-pad focus would stay on an item of the covered screen. A screen coming back on top restores its own focus.
     val focus = LocalFocusManager.current
     LaunchedEffect(topKey) { focus.clearFocus(force = true) }
     // TVs may crop the picture's edges (overscan). These are Android TV's recommended margins, which keep the UI inside.
@@ -187,15 +184,11 @@ fun Root(
         val overscan = if (tv) Modifier.padding(horizontal = 48.dp, vertical = 27.dp) else Modifier
         Modifier.safeDrawingPadding().then(overscan)
     }
-    // Covered screens stay composed so that going back only lays out and draws. Rebuilding the poster grid cost about
-    // 13 ms of main-thread time on a phone. Screens read LocalShown to pause their own work while covered.
-    // key() gives each entry its own state, so the next episode never inherits the previous player's state.
     stack.forEachIndexed { i, screen ->
         val entryKey = keyOf(i)
         val shown = i == stack.lastIndex
         if (!shown && entryKey !in everShown) return@forEachIndexed
         key(entryKey) {
-            // Passed as a State rather than a value: screens watch it from their effects, so covering or uncovering a screen recomposes nothing.
             val shownState = rememberUpdatedState(shown)
             Box(if (shown) Modifier.fillMaxSize() else HiddenModifier, propagateMinConstraints = true) {
                 CompositionLocalProvider(LocalShown provides shownState) {
@@ -229,7 +222,6 @@ fun Root(
                                 is Screen.Library -> LibraryScreen(padded, screen, push, pop)
                                 is Screen.Series -> SeriesScreen(padded, screen, push, pop)
                                 is Screen.Season -> SeasonScreen(padded, screen, push, pop)
-                                // "Play next" replaces the player instead of stacking players.
                                 is Screen.Play -> player(screen.itemId, pop, onPlayNext)
                             }
                         }
@@ -240,10 +232,6 @@ fun Root(
     }
 }
 
-/**
- * At a cold start with several accounts, the first screen asks who is watching; a single account opens at once. When
- * logged out with saved accounts left, the picker shows too, because one of them may have a PIN.
- */
 private fun startScreen(): Screen {
     val count = App.prefs.accountCount
     return when {
@@ -320,7 +308,6 @@ internal expect fun iconFontFamily(): FontFamily
 /** False while another screen covers this one (see Root). Read it in effects through snapshotFlow, not in composition. */
 val LocalShown = staticCompositionLocalOf<State<Boolean>> { mutableStateOf(true) }
 
-// Composed but laid out at zero size and never placed, so it is not drawn, gets no touches, and exposes no semantics to accessibility services.
 private val HiddenModifier: Modifier = Modifier.clearAndSetSemantics {}.layout { _, constraints ->
     layout(constraints.minWidth, constraints.minHeight) {}
 }
@@ -384,7 +371,6 @@ fun startSubtitle(source: MediaSourceInfo, lang: String?): MediaStream? {
 
 /** For a transcode: a picture subtitle (PGS, VobSub) in [lang] to burn into the video, when no text one is in that language. */
 fun burnInIndex(source: MediaSourceInfo, lang: String?): Int? {
-    // "" means subtitles off. Without this check it would match streams of undetermined language ("und").
     if (lang.isNullOrEmpty()) return null
     val subs = source.mediaStreams.orEmpty().filter { it.type == MediaStreamType.SUBTITLE && sameLanguage(it.language, lang) }
     if (subs.any { it.isTextSubtitleStream }) return null

@@ -37,10 +37,6 @@ internal actual fun smallestWidthDp(): Int {
     return with(density) { smallestPx.toDp().value.toInt() }
 }
 
-/**
- * The latest [toast], which the window shows for a few seconds. The sequence number lets the window
- * tell a repeated toast with the same text apart from the one already showing.
- */
 object Toasts {
     var current by mutableStateOf<Pair<Int, String>?>(null)
         private set

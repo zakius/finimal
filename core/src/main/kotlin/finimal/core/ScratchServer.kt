@@ -90,7 +90,7 @@ class ScratchServer(private val scratch: () -> Scratch, private val ahead: Long 
         val demand = try {
             entry.demand(from, ahead, Scratch.Priority.READ)
         } catch (e: IllegalStateException) {
-            return respond("404 Not Found", "Content-Length: 0") // No source, so this app never opened it.
+            return respond("404 Not Found", "Content-Length: 0")
         }
         demand.use {
             val length = try {
@@ -114,7 +114,6 @@ class ScratchServer(private val scratch: () -> Scratch, private val ahead: Long 
             if (method == "HEAD") return
             val buf = ByteArray(256 * 1024)
             var pos = from
-            // A failure after the headers can only cut the body short; the player sees that and reconnects.
             entry.reader().use { reader ->
                 while (pos <= to) {
                     val len = minOf(buf.size.toLong(), to - pos + 1).toInt()

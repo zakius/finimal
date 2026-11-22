@@ -2,6 +2,8 @@ package finimal.core
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
 
 class ServerAddressTest {
     @Test fun hostTriesHttpsThenHttpOnThePort() = assertEquals(
@@ -53,5 +55,13 @@ class ServerAddressTest {
         assertEquals(false, isValidPort("0"))
         assertEquals(false, isValidPort("70000"))
         assertEquals(false, isValidPort("80a"))
+    }
+
+    @Test fun anUntrustedCertificateNeverFallsBackToHttp() {
+        val handshake = javax.net.ssl.SSLHandshakeException("PKIX path validation failed")
+        handshake.initCause(java.security.cert.CertPathValidatorException("untrusted root"))
+        assertFalse(triesNextCandidate(handshake, noAnswer = true))
+        assertTrue(triesNextCandidate(java.net.ConnectException("Connection refused"), noAnswer = true))
+        assertFalse(triesNextCandidate(IllegalStateException("401"), noAnswer = false))
     }
 }

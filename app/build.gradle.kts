@@ -19,7 +19,6 @@ android {
 
     buildTypes {
         debug { applicationIdSuffix = ".debug" }
-        // Left unsigned: tools/release.sh embeds the baseline profile first and signs afterwards.
         release {
             isMinifyEnabled = true
             isShrinkResources = true
@@ -30,8 +29,6 @@ android {
         }
     }
 
-    // Native libraries (libass, ffmpeg) make up most of the APK, so build one APK per ABI and compress the libraries
-    // for a smaller download.
     splits.abi {
         isEnable = true
         reset()
@@ -44,10 +41,8 @@ android {
     packaging.jniLibs.excludes += "**/libc++_shared.so"
     // Only kotlin-reflect (not a dependency) and the coroutines debug agent read these.
     packaging.resources.excludes += listOf("kotlin/**", "DebugProbesKt.bin")
-    // The UI is English only, so library translations for ~80 locales would ship unused.
     // OkHttp reads its public suffix list only to parse cookies, and no client here has a cookie jar.
     androidResources { localeFilters += "en"; ignoreAssetsPatterns += "PublicSuffixDatabase.list" }
-    // The app is distributed through GitHub, so the Play-only dependency metadata blob is useless.
     dependenciesInfo { includeInApk = false; includeInBundle = false }
 
     compileOptions {
@@ -98,7 +93,7 @@ tasks.matching { it.name == "mergeReleaseArtProfile" }.configureEach {
             val desc = t.substring(classStart)
             val isStartup = keepStartupPrefixes.any { desc.startsWith(it) }
             if (isStartup) return@mapNotNull t
-            if (classStart == 0) return@mapNotNull null // Drop non-startup AppImage class entry (L...;)
+            if (classStart == 0) return@mapNotNull null
             val flags = t.substring(0, classStart).replace("S", "")
             if (flags.isEmpty()) null else flags + desc
         }

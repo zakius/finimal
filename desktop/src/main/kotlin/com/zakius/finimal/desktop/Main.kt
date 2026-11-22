@@ -65,7 +65,6 @@ fun main(args: Array<String>) {
     Toolkit.getDefaultToolkit().addAWTEventListener({ e ->
         if (e.id == MouseEvent.MOUSE_PRESSED && (e as MouseEvent).button == backButton) pressEscape()
     }, AWTEvent.MOUSE_EVENT_MASK)
-    // Warm libmpv (JNA native load) and the saved Libraries snapshot off the UI thread so the first play and first frame are fast.
     thread(name = "desktop-warm-up", isDaemon = true) {
         if (App.prefs.loggedIn) ListSnapshots.prefetchFastLibraries()
         Mpv.warmLibrary()
@@ -73,7 +72,6 @@ fun main(args: Array<String>) {
     application {
         val control = remember { WindowControl.restore() }
         LaunchedEffect(control) {
-            // Save a moment after the window settles, not on every pixel of a drag.
             snapshotFlow { Triple(control.state.placement, control.state.position, control.state.size) }.collectLatest {
                 delay(500)
                 control.save()
@@ -157,7 +155,6 @@ private fun imageLoader(ctx: PlatformContext) = ImageLoader.Builder(ctx)
     }
     .build()
 
-/** On the desktop, Esc acts as Back. The player handles it first (leaving fullscreen, then the player), then the screens. */
 private fun pressEscape() {
     val target = KeyboardFocusManager.getCurrentKeyboardFocusManager().focusOwner ?: return
     val now = System.currentTimeMillis()
@@ -165,7 +162,6 @@ private fun pressEscape() {
         target.dispatchEvent(KeyEvent(target, id, now, 0, KeyEvent.VK_ESCAPE, KeyEvent.CHAR_UNDEFINED))
 }
 
-/** Shows each [com.zakius.finimal.toast] for 3 s. */
 @Composable
 private fun ToastHost(modifier: Modifier) {
     val toast = Toasts.current
@@ -189,16 +185,11 @@ private fun ToastHost(modifier: Modifier) {
     }
 }
 
-/**
- * Checks a packaged build without a screen. Loads libmpv, renders a frame of a clip mpv generates, and plays it to
- * the end. Prints the outcome and returns exit code 0 on success.
- */
 private fun checkPlayer(): Int = try {
     // Load one class from each runtime module added beyond the defaults in desktop/build.gradle.kts. A trimmed runtime
     // can lack one while the Gradle run on the full JDK works, as happened when dbus-java needed jdk.security.auth.
     listOf("com.sun.security.auth.module.UnixSystem", "javax.naming.directory.InitialDirContext", "sun.misc.Unsafe",
         "sun.security.ec.ECKeyFactory").forEach { Class.forName(it) }
-    // Build the image loader as the app does and decode the bundled icon. In a ProGuard build it once loaded nothing.
     val icon = File.createTempFile("finimal-check", ".png")
     icon.deleteOnExit()
     icon.writeBytes(object {}.javaClass.getResource("/finimal.png")!!.readBytes())
