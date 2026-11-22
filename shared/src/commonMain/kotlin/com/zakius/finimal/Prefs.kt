@@ -168,7 +168,7 @@ class Prefs(private val p: KeyValueStore) {
         val stored = when (sub) {
             null -> null
             SubtitleChoice.Off -> ""
-            is SubtitleChoice.Language -> sub.code
+            is SubtitleChoice.Language -> sub.code.ifBlank { null }
         }
         put(u("sub.$seriesId"), stored)
     }
