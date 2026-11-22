@@ -1,8 +1,10 @@
 package finimal.core
 
 import java.io.File
+import java.util.concurrent.CancellationException
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -163,5 +165,10 @@ class CoreTest {
         assertEquals("first", f.readText())
         f.writeAtomically("second", sync = false)
         assertEquals("second", f.readText())
+    }
+
+    @Test fun catchingLetsACancellationThroughAndCatchesTheRest() {
+        assertFailsWith<CancellationException> { catching { throw CancellationException("left the screen") } }
+        assertTrue(catching { error("server down") }.isFailure)
     }
 }

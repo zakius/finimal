@@ -4,6 +4,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import finimal.core.catching
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Deferred
@@ -310,7 +311,7 @@ class Server {
 
     /** True when the server answers at all. If it does, a playback failure lies with the file, not the network. */
     suspend fun reachable(): Boolean = io {
-        val error = runCatching { api.systemApi.getPublicSystemInfo() }.exceptionOrNull()
+        val error = catching { api.systemApi.getPublicSystemInfo() }.exceptionOrNull()
         if (error == null) true else !transient(error)
     }
 
@@ -347,7 +348,7 @@ class Server {
 
     suspend fun reportStart(id: String, mediaSourceId: String, positionTicks: Long, transcoding: Boolean, playSession: String) = io {
         itemLock(id).withLock {
-            runCatching {
+            catching {
                 api.sessionApi.reportPlaybackStart(
                     PlaybackStartInfo(
                         itemId = UUID.fromString(id), mediaSourceId = mediaSourceId, positionTicks = positionTicks,
@@ -371,7 +372,7 @@ class Server {
         val owner = record(id, state) ?: return@io
         itemLock(id).withLock {
             if (owner.pending.get(id) == state) {
-                runCatching {
+                catching {
                     owner.api.sessionApi.reportPlaybackProgress(
                         PlaybackProgressInfo(
                             itemId = UUID.fromString(id), mediaSourceId = mediaSourceId, positionTicks = positionTicks,
@@ -406,7 +407,7 @@ class Server {
                 if (owner != null) {
                     itemLock(id).withLock {
                         if (owner.pending.get(id) == state) {
-                            runCatching {
+                            catching {
                                 owner.api.sessionApi.reportPlaybackStopped(
                                     PlaybackStopInfo(itemId = UUID.fromString(id), mediaSourceId = mediaSourceId, positionTicks = positionTicks, playSessionId = playSession, failed = false)
                                 )
@@ -579,7 +580,7 @@ class Server {
                         if (aborted.get()) return@async
                         semaphore.withPermit {
                             if (aborted.get()) return@withPermit
-                            runCatching {
+                            catching {
                                 itemLock(id).withLock {
                                     val uuid = UUID.fromString(id)
                                     if (owner.pending.get(id) == local && shouldPush(local, serverStates[uuid].toPlayState())) {

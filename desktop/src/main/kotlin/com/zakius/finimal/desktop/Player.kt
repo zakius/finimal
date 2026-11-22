@@ -40,6 +40,7 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import finimal.core.RECONNECT_WINDOW_MS
 import finimal.core.Reconnect
+import finimal.core.catching
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.first
@@ -167,7 +168,7 @@ fun PlayerScreen(itemId: String, onBack: () -> Unit, onPlay: (String) -> Unit) {
     // Construct libmpv on Dispatchers.IO so opening a video never freezes the UI thread and overlaps the API fetch.
     LaunchedEffect(Unit) {
         val created = withContext(Dispatchers.IO) {
-            runCatching {
+            catching {
                 Mpv(mapOf(
                     // When the server drops and the scratch proxy cuts the connection, mpv resumes at the same byte.
                     "stream-lavf-o" to "reconnect=1,reconnect_streamed=1,reconnect_on_network_error=1,reconnect_delay_max=10",
@@ -203,7 +204,7 @@ fun PlayerScreen(itemId: String, onBack: () -> Unit, onPlay: (String) -> Unit) {
         // Only this item's unsynced state must reach the server before the item is fetched. Other items sync in the background.
         val pending = withContext(App.disk) { App.pending.get(itemId) != null }
         if (!pending) App.platform.scope.launch { server.flush() }
-        runCatching { AppCache.fetchOrJoinItem(itemId, flushFirst = pending) }
+        catching { AppCache.fetchOrJoinItem(itemId, flushFirst = pending) }
             .onSuccess { loaded ->
                 if (loaded.mediaSources.isNullOrEmpty()) error = java.io.FileNotFoundException("This item has no file on the server")
                 else item = loaded
@@ -221,7 +222,7 @@ fun PlayerScreen(itemId: String, onBack: () -> Unit, onPlay: (String) -> Unit) {
             val cachedEntry = AppCache.getList(cacheKey)
             if (cachedEntry != null && siblings.isEmpty()) siblings = cachedEntry.items
             if (cachedEntry != null && AppCache.isListFresh(cachedEntry, maxAgeMs = 15_000L)) return@LaunchedEffect
-            val fromServer = runCatching { App.server.episodes(seriesId) }.getOrNull()
+            val fromServer = catching { App.server.episodes(seriesId) }.getOrNull()
             if (fromServer != null) {
                 AppCache.putList(cacheKey, fromServer, fromNetwork = true)
                 siblings = fromServer
@@ -360,7 +361,7 @@ private fun Playback(item: BaseItemDto, mpv: Mpv, siblings: List<BaseItemDto>, o
     LaunchedEffect(mpv) {
         DesktopMedia.playing = scratchKey(item)
         if (segments.isEmpty()) {
-            launch { segments = runCatching { AppCache.fetchOrJoinSegments(id) }.getOrDefault(emptyList()) }
+            launch { segments = catching { AppCache.fetchOrJoinSegments(id) }.getOrDefault(emptyList()) }
         }
         val resumeMs = (item.localState().first?.positionTicks ?: 0) / TICKS_PER_MS
         val startMs = (resumeMs - RESUME_REWIND_MS).coerceAtLeast(0)

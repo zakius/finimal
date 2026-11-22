@@ -32,6 +32,7 @@ import android.widget.ScrollView
 import android.widget.TextView
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
+import finimal.core.catching
 import finimal.core.defaultPortFor
 import finimal.core.isValidPort
 import finimal.core.serverCandidates
@@ -347,13 +348,13 @@ class LibrariesFastView(
             }
         }
         networkCallback = cb
-        runCatching { cm.registerDefaultNetworkCallback(cb) }
+        catching { cm.registerDefaultNetworkCallback(cb) }
     }
 
     private fun unregisterNetworkCallback() {
         val cb = networkCallback ?: return
         networkCallback = null
-        runCatching { context.getSystemService(ConnectivityManager::class.java)?.unregisterNetworkCallback(cb) }
+        catching { context.getSystemService(ConnectivityManager::class.java)?.unregisterNetworkCallback(cb) }
     }
 
     fun startRefresh() {
@@ -386,7 +387,7 @@ class LibrariesFastView(
             val uid = App.prefs.userId
             if (uid != null && App.prefs.currentUserName().isNullOrEmpty()) {
                 launch {
-                    val name = runCatching { App.server.userName() }.getOrNull()
+                    val name = catching { App.server.userName() }.getOrNull()
                     if (!name.isNullOrEmpty()) {
                         App.prefs.setName(uid, name)
                         if (!disposed) avatarLetter.text = name.first().uppercase()
@@ -397,7 +398,7 @@ class LibrariesFastView(
             val result = if (pushed != null && unreachable(pushed)) {
                 Result.failure(pushed)
             } else {
-                runCatching { App.server.libraries() }.onFailure { e ->
+                catching { App.server.libraries() }.onFailure { e ->
                     if (e is InvalidStatusException && e.status == 401) App.server.expire()
                 }
             }
@@ -678,7 +679,7 @@ class LoginFastView(
         clearError()
         updateState()
         loginJob = App.platform.scope.launch {
-            runCatching { App.server.login(url, port, user, pass) }
+            catching { App.server.login(url, port, user, pass) }
                 .onSuccess {
                     if (!disposed) onLoggedIn()
                 }

@@ -1,5 +1,6 @@
 package com.zakius.finimal.desktop
 
+import finimal.core.catching
 import java.util.concurrent.Executors
 import org.freedesktop.dbus.DBusPath
 import org.freedesktop.dbus.annotations.DBusInterfaceName
@@ -45,11 +46,11 @@ object ScreenSaver {
     fun inhibit(on: Boolean) = worker.execute {
         if (on == (release != null)) return@execute
         if (!on) {
-            runCatching { release?.invoke() }
+            catching { release?.invoke() }
             release = null
             return@execute
         }
-        val held = runCatching { hold() }
+        val held = catching { hold() }
         held.onFailure { e -> System.err.println("finimal: can't keep the screen on: $e") }
         release = held.getOrNull()
     }
@@ -69,7 +70,7 @@ object ScreenSaver {
         }
         val conn = bus ?: DBusConnectionBuilder.forSessionBus().build()
         bus = conn
-        return runCatching {
+        return catching {
             val portal = conn.getRemoteObject("org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop", PortalInhibit::class.java)
             // The inhibition lasts until its request object is closed.
             val request = portal.Inhibit("", UInt32(INHIBIT_IDLE), mapOf("reason" to Variant("Playing a video")))

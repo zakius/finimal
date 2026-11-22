@@ -10,6 +10,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.WindowPlacement
 import androidx.compose.ui.window.WindowPosition
 import androidx.compose.ui.window.WindowState
+import finimal.core.catching
 import java.awt.GraphicsEnvironment
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.delay
@@ -55,7 +56,7 @@ class WindowControl(val state: WindowState) {
         fun restore(): WindowControl {
             fun int(key: String) = (store[key] as Number?)?.toInt()
             val saved = Rectangle(int("window.x") ?: 0, int("window.y") ?: 0, int("window.width") ?: 1280, int("window.height") ?: 800)
-            val bounds = runCatching {
+            val bounds = catching {
                 val ge = GraphicsEnvironment.getLocalGraphicsEnvironment()
                 val screens = ge.screenDevices.map { it.defaultConfiguration }.map { c ->
                     val i = Toolkit.getDefaultToolkit().getScreenInsets(c)

@@ -51,6 +51,7 @@ import androidx.compose.ui.unit.dp
 import androidx.navigationevent.NavigationEventInfo
 import androidx.navigationevent.compose.NavigationBackHandler
 import androidx.navigationevent.compose.rememberNavigationEventState
+import finimal.core.catching
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import java.util.Locale
@@ -352,7 +353,7 @@ fun audioIndex(source: MediaSourceInfo, lang: String) =
 fun sameLanguage(a: String?, b: String?): Boolean {
     if (a == null || b == null) return false
     // isO3Language throws for a code it doesn't know; then only the same text counts as the same language.
-    val sameCode = runCatching { Locale.forLanguageTag(a).isO3Language == Locale.forLanguageTag(b).isO3Language }
+    val sameCode = catching { Locale.forLanguageTag(a).isO3Language == Locale.forLanguageTag(b).isO3Language }
     return sameCode.getOrDefault(a == b)
 }
 

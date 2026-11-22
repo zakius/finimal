@@ -25,6 +25,7 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
+import finimal.core.catching
 import java.io.File
 import java.io.IOException
 import java.util.UUID
@@ -121,7 +122,7 @@ object Media : Downloads {
      * Starts fetching chunk 0 (container header / cues) in the background while subtitles are being fetched,
      * overlapping media probing with subtitle extraction. Caller must close the returned demand.
      */
-    fun prewarmRead(item: BaseItemDto): Scratch.Demand? = runCatching {
+    fun prewarmRead(item: BaseItemDto): Scratch.Demand? = catching {
         val e = entry(item)
         if (e.complete) null else e.demand(0L, scratch.chunkSize.toLong(), Scratch.Priority.READ)
     }.getOrNull()
@@ -261,7 +262,7 @@ object Media : Downloads {
         val id = d.item.id.toString()
         val f = File(dir, "$id.json")
         if (f.exists()) {
-            runCatching { json.decodeFromString<Download>(f.readText()).transcoded == d.transcoded }.getOrDefault(true)
+            catching { json.decodeFromString<Download>(f.readText()).transcoded == d.transcoded }.getOrDefault(true)
         } else {
             dir.list().orEmpty().any { name -> name.substringBefore('.') == id }
         }
@@ -320,7 +321,7 @@ object Media : Downloads {
         if (cached != null) return cached
         val files = downloadsDir.listFiles { f -> f.extension == "json" }.orEmpty()
         val decoded = files.mapNotNull { f ->
-            runCatching { json.decodeFromString<Download>(f.readText()) }
+            catching { json.decodeFromString<Download>(f.readText()) }
                 // A record that no longer decodes (for example after an SDK schema change) is renamed aside.
                 // Its bytes stay pinned through [pinnedIds].
                 .onFailure { error -> if (error is IllegalArgumentException) f.renameTo(File(f.path + ".corrupt")) }
@@ -741,7 +742,7 @@ object Media : Downloads {
                 async(Dispatchers.IO) {
                     val file = File(dir, "${stream.index}.${subtitleExt(stream)}")
                     if (!file.exists()) {
-                        runCatching {
+                        catching {
                             val url = App.server.subtitleUrl(id, source.id!!, stream)
                             http.newCall(Request.Builder().url(url).build()).execute().use { r ->
                                 if (!r.isSuccessful) throw IOException("HTTP ${r.code}")
@@ -799,7 +800,7 @@ class DownloadWorker(context: Context, params: WorkerParameters) : CoroutineWork
                     Media.failDownload(id)
                     continue
                 }
-                runCatching { setForeground(foregroundInfo(d, null)) }
+                catching { setForeground(foregroundInfo(d, null)) }
                 withContext(Dispatchers.IO) { Media.fetchSubtitles(d.item, d.transcoded) }
                 var lastUpdate = 0L
                 var lastPercent = -1
@@ -885,7 +886,7 @@ class Housekeeping(context: Context, params: WorkerParameters) : CoroutineWorker
         if (!server.loggedIn) return Result.success() // The token was rejected; the next login pushes again.
         if (unsynced != null && transient(unsynced)) return Result.retry()
         // Progress made on other devices reaches offline playback through the stored downloads.
-        runCatching {
+        catching {
             val ids = Media.downloads().map { it.item.id }
             // An item still pending has newer local state than the server; the push that failed will retry.
             if (ids.isNotEmpty()) {
@@ -897,7 +898,7 @@ class Housekeeping(context: Context, params: WorkerParameters) : CoroutineWorker
         }
         var retry = false
         for ((seriesId, n) in App.prefs.keepNextSeries()) {
-            runCatching {
+            catching {
                 if (switched()) return Result.success()
                 val episodes = server.episodes(seriesId).filter { it.parentIndexNumber != 0 }
                 val refs = episodes.map { episode -> EpisodeRef(episode.id.toString(), episode.localState().first) }

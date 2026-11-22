@@ -1,5 +1,6 @@
 package com.zakius.finimal
 
+import finimal.core.catching
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import java.security.MessageDigest
@@ -29,7 +30,7 @@ class Prefs(private val p: KeyValueStore) {
             accountsCache = emptyList()
             return emptyList()
         }
-        val parsed = runCatching { json.decodeFromString<List<Account>>(saved) }.getOrNull().orEmpty()
+        val parsed = catching { json.decodeFromString<List<Account>>(saved) }.getOrNull().orEmpty()
         accountsCache = parsed
         return parsed
     }

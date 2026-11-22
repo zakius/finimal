@@ -22,6 +22,7 @@ import androidx.work.Configuration
 import coil3.network.okhttp.OkHttpNetworkFetcherFactory
 import androidx.media3.common.MimeTypes
 import androidx.media3.exoplayer.mediacodec.MediaCodecUtil
+import finimal.core.catching
 import java.io.File
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -75,7 +76,7 @@ class AndroidApp : Application(), Platform, SingletonImageLoader.Factory, Config
             HardwareDecoders.summary() // Pre-cache decoder summary & h264 height off the main thread.
             HardwareDecoders.h264Height
             // Android 15+ compiles assets/art-profile/baseline.prof at install time; older versions use ProfileInstaller.
-            if (Build.VERSION.SDK_INT < 35) runCatching { ProfileInstaller.writeProfile(this) }
+            if (Build.VERSION.SDK_INT < 35) catching { ProfileInstaller.writeProfile(this) }
         }
     }
     private var startedUp = false
@@ -115,7 +116,7 @@ class AndroidApp : Application(), Platform, SingletonImageLoader.Factory, Config
     private fun warmDecoders() {
         val mimeTypes = listOf(MimeTypes.VIDEO_H264, MimeTypes.VIDEO_H265, MimeTypes.VIDEO_AV1, MimeTypes.AUDIO_AAC)
         for (mimeType in mimeTypes) {
-            runCatching { MediaCodecUtil.getDecoderInfos(mimeType, false, false) }
+            catching { MediaCodecUtil.getDecoderInfos(mimeType, false, false) }
         }
     }
 
@@ -145,7 +146,7 @@ class AndroidApp : Application(), Platform, SingletonImageLoader.Factory, Config
     override fun evictBuffer() = Media.evict()
     override fun clearBuffer() = Media.clearBuffer()
     override val isMetered: Boolean
-        get() = runCatching { getSystemService(ConnectivityManager::class.java)?.isActiveNetworkMetered == true }.getOrDefault(false)
+        get() = catching { getSystemService(ConnectivityManager::class.java)?.isActiveNetworkMetered == true }.getOrDefault(false)
     override fun prefetchImages(urls: List<String>, diskOnly: Boolean) {
         val loader = SingletonImageLoader.get(this)
         val networkPolicy = if (diskOnly) CachePolicy.DISABLED else CachePolicy.ENABLED

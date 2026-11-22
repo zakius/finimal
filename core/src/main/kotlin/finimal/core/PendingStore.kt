@@ -23,7 +23,7 @@ class PendingStore(private val file: File) {
                 json.decodeFromString<Map<String, PlayState>>(file.readText())
             } catch (e: Throwable) {
                 // Kept aside rather than overwritten by the next save: it may be the only copy of offline progress.
-                file.renameTo(File(file.path + ".corrupt"))
+                catching { file.moveOver(File(file.path + ".corrupt")) }
                 emptyMap()
             }
             saved.toMutableMap()
@@ -86,8 +86,7 @@ class PendingStore(private val file: File) {
 
 /**
  * Writes through a temp file and an atomic rename, so a crash or power loss leaves the old or the new file, never half
- * of one. Pass [sync] = false for disposable caches that don't need an fsync stall. Uses [Files.move] because
- * [File.renameTo] refuses to replace an existing file on Windows.
+ * of one. Pass [sync] = false for disposable caches that don't need an fsync stall.
  */
 fun File.writeAtomically(text: String, sync: Boolean = true) {
     val tmp = File("$path.tmp")
@@ -95,5 +94,10 @@ fun File.writeAtomically(text: String, sync: Boolean = true) {
         out.write(text.toByteArray())
         if (sync) out.fd.sync()
     }
-    Files.move(tmp.toPath(), toPath(), REPLACE_EXISTING, ATOMIC_MOVE)
+    tmp.moveOver(this)
+}
+
+/** Renames this file to [target], replacing it if it exists, on every platform. Throws when the move fails. */
+fun File.moveOver(target: File) {
+    Files.move(toPath(), target.toPath(), REPLACE_EXISTING, ATOMIC_MOVE)
 }
