@@ -2,6 +2,7 @@ package com.zakius.finimal.desktop
 
 import com.zakius.finimal.KeyValueStore
 import com.zakius.finimal.Prefs
+import com.zakius.finimal.SubtitleChoice
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -24,7 +25,7 @@ class AccountsTest {
         val p = Prefs(store)
         assertEquals(listOf("a"), p.accounts().map { it.userId })
         assertEquals(720, p.maxHeight)
-        assertEquals("eng", p.subLang("series"))
+        assertEquals(SubtitleChoice.Language("eng"), p.subtitle("series"))
         assertNull(store["maxHeight"])
     }
 
@@ -32,13 +33,13 @@ class AccountsTest {
         val p = Prefs(Store())
         p.login("https://s", "ta", "a", "Ann")
         p.maxHeight = 720
-        p.setTracks("series", "jpn", "eng")
+        p.setTracks("series", "jpn", SubtitleChoice.Language("eng"))
         p.login("https://s", "tb", "b", "Bob")
         assertEquals(0, p.maxHeight)
-        assertNull(p.subLang("series"))
+        assertNull(p.subtitle("series"))
         p.switchTo(p.accounts().first { it.userId == "a" })
         assertEquals(720, p.maxHeight)
-        assertEquals("eng", p.subLang("series"))
+        assertEquals(SubtitleChoice.Language("eng"), p.subtitle("series"))
         assertEquals("ta", p.token)
     }
 

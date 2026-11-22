@@ -156,12 +156,21 @@ class Prefs(private val p: KeyValueStore) {
             .filterValues { n -> n > 0 }
     }
 
-    /** Per-series track choice as language codes; "" means subtitles off. */
+    /** Per-series track choice. Subtitles are stored as a language code, or "" for off. */
     fun audioLang(seriesId: String): String? = p[u("audio.$seriesId")] as String?
-    fun subLang(seriesId: String): String? = p[u("sub.$seriesId")] as String?
-    fun setTracks(seriesId: String, audio: String?, sub: String?) = p.edit {
+    fun subtitle(seriesId: String): SubtitleChoice? = when (val stored = p[u("sub.$seriesId")] as String?) {
+        null -> null
+        "" -> SubtitleChoice.Off
+        else -> SubtitleChoice.Language(stored)
+    }
+    fun setTracks(seriesId: String, audio: String?, sub: SubtitleChoice?) = p.edit {
         put(u("audio.$seriesId"), audio)
-        put(u("sub.$seriesId"), sub)
+        val stored = when (sub) {
+            null -> null
+            SubtitleChoice.Off -> ""
+            is SubtitleChoice.Language -> sub.code.ifBlank { null }
+        }
+        put(u("sub.$seriesId"), stored)
     }
 
     /** Per-library sort and unplayed filter, kept per account. */
