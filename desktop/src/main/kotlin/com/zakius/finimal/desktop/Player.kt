@@ -965,8 +965,10 @@ private fun Controls(
                             } else {
                                 val matching = loaded.filter { it.type == type }
                                 fun selectedLanguage(t: String) = loaded.firstOrNull { it.type == t && it.selected }?.language
-                                fun selectedSubtitle(): SubtitleChoice =
-                                    selectedLanguage("sub")?.let(SubtitleChoice::Language) ?: SubtitleChoice.Off
+                                fun selectedSubtitle(): SubtitleChoice? {
+                                    val track = loaded.firstOrNull { it.type == "sub" && it.selected } ?: return SubtitleChoice.Off
+                                    return track.language?.let(SubtitleChoice::Language)
+                                }
                                 if (matching.isEmpty()) {
                                     DropdownMenuItem({ Text("No tracks") }, {}, enabled = false)
                                 } else {
