@@ -548,7 +548,7 @@ object Media : Downloads {
             val source = d.item.mediaSources!!.first()
             val audioLang = App.prefs.audioLang(seriesKey)
             val audio = if (audioLang == null) null else audioIndex(source, audioLang)
-            val burnIn = burnInIndex(source, App.prefs.subLang(seriesKey))
+            val burnIn = burnInIndex(source, App.prefs.subtitle(seriesKey))
             val masterUrl = App.server.transcodeUrl(id, sourceId, audio, burnIn, UUID.randomUUID().toString())
             val master = fetchText(masterUrl)
             val variant = master.lines().first(::isSegment)

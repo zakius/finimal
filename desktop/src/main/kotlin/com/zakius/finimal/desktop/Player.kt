@@ -93,6 +93,7 @@ import com.zakius.finimal.loadError
 import com.zakius.finimal.localState
 import com.zakius.finimal.nextEpisode
 import com.zakius.finimal.playerTitle
+import com.zakius.finimal.SubtitleChoice
 import com.zakius.finimal.sameLanguage
 import com.zakius.finimal.scratchKey
 import com.zakius.finimal.startSubtitle
@@ -319,12 +320,12 @@ private fun Playback(item: BaseItemDto, mpv: Mpv, siblings: List<BaseItemDto>, o
         if (!transcoding) return DesktopMedia.streamUrl(item)
         val audioLang = prefs.audioLang(seriesKey)
         val audioIndex = if (audioLang != null) com.zakius.finimal.audioIndex(source, audioLang) else null
-        val burnIn = burnInIndex(source, prefs.subLang(seriesKey))
+        val burnIn = burnInIndex(source, prefs.subtitle(seriesKey))
         return App.server.transcodeUrl(id, sourceId, audioIndex, burnIn, playSession)
     }
 
     mpv.onLoaded = {
-        val sub = prefs.subLang(seriesKey)
+        val sub = prefs.subtitle(seriesKey)
         val start = startSubtitle(source, sub)
         val sideloaded = sideloadedSubs(item, transcoding)
         sideloaded.forEach { stream ->
@@ -340,7 +341,7 @@ private fun Playback(item: BaseItemDto, mpv: Mpv, siblings: List<BaseItemDto>, o
             val audio = tracks.firstOrNull { it.type == "audio" && sameLanguage(it.language, audioLang) }
             if (audio != null) mpv.set("aid", audio.id)
         }
-        if (sub == "") {
+        if (sub == SubtitleChoice.Off) {
             mpv.set("sid", "no")
         } else if (start != null && start !in sideloaded) {
             // An embedded track, found by its index in the file. Language and title can't tell a release's full and
@@ -565,7 +566,7 @@ private fun VideoSurface(
     onPlay: (String) -> Unit,
     onCreditsNext: (String) -> Unit,
     onRetry: () -> Unit,
-    onTracksChosen: (audio: String?, sub: String?) -> Unit,
+    onTracksChosen: (audio: String?, sub: SubtitleChoice?) -> Unit,
 ) {
     val prefs = App.prefs
     val window = LocalWindow.current
@@ -849,7 +850,7 @@ private fun Controls(
     onSeek: (Long, Boolean) -> Unit,
     onSeekBy: (Long) -> Unit,
     onPlay: (String) -> Unit,
-    onTracksChosen: (String?, String?) -> Unit,
+    onTracksChosen: (String?, SubtitleChoice?) -> Unit,
     onInteraction: () -> Unit,
 ) {
     var sub by remember { mutableStateOf<String?>(null) }
@@ -963,18 +964,16 @@ private fun Controls(
                                 DropdownMenuItem({ Text("Loading…") }, {}, enabled = false)
                             } else {
                                 val matching = loaded.filter { it.type == type }
-                                fun selectedLanguage(t: String): String? {
-                                    val language = loaded.firstOrNull { it.type == t && it.selected }?.language
-                                    if (language != null) return language
-                                    return if (t == "sub") "" else null
-                                }
+                                fun selectedLanguage(t: String) = loaded.firstOrNull { it.type == t && it.selected }?.language
+                                fun selectedSubtitle(): SubtitleChoice =
+                                    selectedLanguage("sub")?.let(SubtitleChoice::Language) ?: SubtitleChoice.Off
                                 if (matching.isEmpty()) {
                                     DropdownMenuItem({ Text("No tracks") }, {}, enabled = false)
                                 } else {
                                     if (type == "sub") {
                                         Choice("Off", matching.none { it.selected }) {
                                             mpv.set("sid", "no")
-                                            onTracksChosen(selectedLanguage("audio"), "")
+                                            onTracksChosen(selectedLanguage("audio"), SubtitleChoice.Off)
                                             close()
                                         }
                                     }
@@ -982,7 +981,7 @@ private fun Controls(
                                         Choice(trackLabel(t).ifEmpty { "Track ${i + 1}" }, t.selected) {
                                             mpv.set(if (type == "audio") "aid" else "sid", t.id)
                                             val audio = if (type == "audio") t.language else selectedLanguage("audio")
-                                            val subtitle = if (type == "sub") t.language else selectedLanguage("sub")
+                                            val subtitle = if (type == "sub") t.language?.let(SubtitleChoice::Language) else selectedSubtitle()
                                             onTracksChosen(audio, subtitle)
                                             close()
                                         }

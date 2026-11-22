@@ -349,8 +349,8 @@ fun audioIndex(source: MediaSourceInfo, lang: String) =
     source.mediaStreams?.firstOrNull { it.type == MediaStreamType.AUDIO && sameLanguage(it.language, lang) }?.index
 
 /** Players use short codes ("ja") while the server keeps three letters ("jpn"). */
-fun sameLanguage(a: String?, b: String?): Boolean {
-    if (a == null || b == null) return false
+fun sameLanguage(a: String?, b: String): Boolean {
+    if (a == null) return false
     // isO3Language throws for a code it doesn't know; then only the same text counts as the same language.
     val sameCode = runCatching { Locale.forLanguageTag(a).isO3Language == Locale.forLanguageTag(b).isO3Language }
     return sameCode.getOrDefault(a == b)
@@ -365,16 +365,25 @@ fun sideloadedSubs(item: BaseItemDto, transcode: Boolean): List<MediaStream> {
     return streams.filter { it.type == MediaStreamType.SUBTITLE && (it.isExternal || (transcode && it.isTextSubtitleStream)) }
 }
 
+/** The subtitles remembered for a series. Null, nothing remembered, means the server's default. */
+sealed interface SubtitleChoice {
+    data object Off : SubtitleChoice
+    data class Language(val code: String) : SubtitleChoice
+}
+
 /**
  * The subtitle stream to start with. With nothing remembered for the series, the server's default, which follows the
- * account's subtitle settings in Jellyfin. With a remembered language ([lang]), a stream in it: the server's default
- * when it is one, else the first that isn't forced, since a forced track carries only signs and songs. "" means off.
+ * account's subtitle settings in Jellyfin. With a remembered language, a stream in it: the server's default when it is
+ * one, else the first that isn't forced, since a forced track carries only signs and songs.
  */
-fun startSubtitle(source: MediaSourceInfo, lang: String?): MediaStream? {
-    if (lang == "") return null
+fun startSubtitle(source: MediaSourceInfo, choice: SubtitleChoice?): MediaStream? {
     val subs = source.mediaStreams.orEmpty().filter { it.type == MediaStreamType.SUBTITLE }
     val serverDefault = subs.firstOrNull { it.index == source.defaultSubtitleStreamIndex }
-    if (lang == null) return serverDefault
+    val lang = when (choice) {
+        null -> return serverDefault
+        SubtitleChoice.Off -> return null
+        is SubtitleChoice.Language -> choice.code
+    }
     val inLanguage = subs.filter { sameLanguage(it.language, lang) }
     if (serverDefault != null && serverDefault in inLanguage) return serverDefault
     val full = inLanguage.firstOrNull { !it.isForced }
@@ -382,11 +391,10 @@ fun startSubtitle(source: MediaSourceInfo, lang: String?): MediaStream? {
     return inLanguage.firstOrNull()
 }
 
-/** For a transcode: a picture subtitle (PGS, VobSub) in [lang] to burn into the video, when no text one is in that language. */
-fun burnInIndex(source: MediaSourceInfo, lang: String?): Int? {
-    // "" means subtitles off. Without this check it would match streams of undetermined language ("und").
-    if (lang.isNullOrEmpty()) return null
-    val subs = source.mediaStreams.orEmpty().filter { it.type == MediaStreamType.SUBTITLE && sameLanguage(it.language, lang) }
+/** For a transcode: a picture subtitle (PGS, VobSub) in the chosen language to burn into the video, when no text one is in it. */
+fun burnInIndex(source: MediaSourceInfo, choice: SubtitleChoice?): Int? {
+    if (choice !is SubtitleChoice.Language) return null
+    val subs = source.mediaStreams.orEmpty().filter { it.type == MediaStreamType.SUBTITLE && sameLanguage(it.language, choice.code) }
     if (subs.any { it.isTextSubtitleStream }) return null
     return subs.firstOrNull()?.index
 }

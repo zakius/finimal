@@ -414,10 +414,10 @@ private fun Playback(
                 withTimeoutOrNull(SUBTITLE_WAIT_MS) { fetch.await() } ?: emptyMap()
             }
             val streams = sideloadStreams.associateBy { it.index }
-            val startSub = startSubtitle(source, prefs.subLang(seriesKey))?.index
+            val startSub = startSubtitle(source, prefs.subtitle(seriesKey))?.index
             val audioIndex = prefs.audioLang(seriesKey)?.let { audioIndex(source, it) }
             val url = if (transcoding) {
-                val burnIn = burnInIndex(source, prefs.subLang(seriesKey))
+                val burnIn = burnInIndex(source, prefs.subtitle(seriesKey))
                 App.server.transcodeUrl(id, sourceId, audioIndex, burnIn, playSession)
             } else if (localPlaylist != null) {
                 Uri.fromFile(localPlaylist).toString()
@@ -455,12 +455,12 @@ private fun Playback(
             val trackParams = player.trackSelectionParameters.buildUpon()
             val audioLang = prefs.audioLang(seriesKey)
             if (audioLang != null) trackParams.setPreferredAudioLanguage(audioLang)
-            when (val sub = prefs.subLang(seriesKey)) {
+            when (val sub = prefs.subtitle(seriesKey)) {
                 null -> {}
-                "" -> trackParams.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
-                else -> {
+                SubtitleChoice.Off -> trackParams.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
+                is SubtitleChoice.Language -> {
                     trackParams.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
-                    trackParams.setPreferredTextLanguage(sub)
+                    trackParams.setPreferredTextLanguage(sub.code)
                 }
             }
             player.trackSelectionParameters = trackParams.build()
@@ -829,7 +829,7 @@ private fun VideoSurface(
     onRetry: () -> Unit,
     rotationLocked: Boolean,
     onRotationLock: () -> Unit,
-    onTracksChosen: (audio: String?, sub: String?) -> Unit,
+    onTracksChosen: (audio: String?, sub: SubtitleChoice?) -> Unit,
 ) {
     val prefs = App.prefs
     val activity = LocalActivity.current!!
@@ -1193,7 +1193,7 @@ private fun Controls(
     onBack: () -> Unit,
     onToggleFullscreen: () -> Unit,
     onRotationLock: () -> Unit,
-    onTracksChosen: (String?, String?) -> Unit,
+    onTracksChosen: (String?, SubtitleChoice?) -> Unit,
     onSeek: (Long) -> Unit,
     onNext: (() -> Unit)?,
     skip: Skip?,
@@ -1315,7 +1315,7 @@ private fun Controls(
                                 player.currentTracks.groups.none { it.type == C.TRACK_TYPE_TEXT && it.isSelected }
                             if (type == C.TRACK_TYPE_TEXT && groups.isNotEmpty()) Choice("Off", textOff) {
                                 player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true).build()
-                                onTracksChosen(selectedLanguage(player, C.TRACK_TYPE_AUDIO), "")
+                                onTracksChosen(selectedLanguage(player, C.TRACK_TYPE_AUDIO), SubtitleChoice.Off)
                                 menu = false
                                 sub = null
                             }
@@ -1332,8 +1332,8 @@ private fun Controls(
                                                 .setOverrideForType(TrackSelectionOverride(group.mediaTrackGroup, i))
                                                 .build()
                                             val audioLang = if (type == C.TRACK_TYPE_AUDIO) f.language else selectedLanguage(player, C.TRACK_TYPE_AUDIO)
-                                            val subLang = if (type == C.TRACK_TYPE_TEXT) f.language else selectedLanguage(player, C.TRACK_TYPE_TEXT)
-                                            onTracksChosen(audioLang, subLang)
+                                            val subtitle = if (type == C.TRACK_TYPE_TEXT) f.language?.let(SubtitleChoice::Language) else selectedSubtitle(player)
+                                            onTracksChosen(audioLang, subtitle)
                                             // Seek in place so the current subtitle line shows now, not at the next cue.
                                             if (type == C.TRACK_TYPE_TEXT) player.seekTo(player.currentPosition)
                                             menu = false
@@ -1556,9 +1556,13 @@ private fun selectedTrackLabel(player: ExoPlayer, type: Int): String? {
     return trackLabel(group.getTrackFormat(index)).ifEmpty { "Track ${index + 1}" }
 }
 
-/** Language of the selected track, "" when that type is off, null when unknown. */
+private fun selectedSubtitle(player: ExoPlayer): SubtitleChoice? {
+    if (C.TRACK_TYPE_TEXT in player.trackSelectionParameters.disabledTrackTypes) return SubtitleChoice.Off
+    return selectedLanguage(player, C.TRACK_TYPE_TEXT)?.let(SubtitleChoice::Language)
+}
+
+/** Language of the selected track, null when unknown. */
 private fun selectedLanguage(player: ExoPlayer, type: Int): String? {
-    if (player.trackSelectionParameters.disabledTrackTypes.contains(type)) return ""
     val selectedGroups = player.currentTracks.groups.filter { it.type == type && it.isSelected }
     for (group in selectedGroups) {
         val index = (0 until group.length).firstOrNull { i -> group.isTrackSelected(i) }

@@ -1,5 +1,6 @@
 package com.zakius.finimal.desktop
 
+import com.zakius.finimal.SubtitleChoice
 import com.zakius.finimal.burnInIndex
 import com.zakius.finimal.sideloadedSubs
 import com.zakius.finimal.startSubtitle
@@ -35,10 +36,10 @@ class SubtitlesTest {
     @Test fun transcodeAlsoLoadsEmbeddedText() = assertEquals(listOf(2, 4), sideloadedSubs(item, transcode = true).map { it.index })
 
     @Test fun burnsInOnlyAPictureSubtitleInTheChosenLanguage() {
-        assertEquals(3, burnInIndex(source, "ja"))
-        assertNull(burnInIndex(source, "en"))
-        assertNull(burnInIndex(source, ""))
-        assertNull(burnInIndex(source.copy(mediaStreams = listOf(sub(5, "und", text = false))), ""), "off never burns in")
+        assertEquals(3, burnInIndex(source, SubtitleChoice.Language("ja")))
+        assertNull(burnInIndex(source, SubtitleChoice.Language("en")))
+        assertNull(burnInIndex(source, SubtitleChoice.Off))
+        assertNull(burnInIndex(source.copy(mediaStreams = listOf(sub(5, "und", text = false))), SubtitleChoice.Off), "off never burns in")
         assertNull(burnInIndex(source, null))
     }
 
@@ -52,10 +53,10 @@ class SubtitlesTest {
     }
 
     @Test fun aRememberedLanguageTakesTheServerDefaultInIt() =
-        assertEquals(4, startSubtitle(signsFirst.copy(defaultSubtitleStreamIndex = 4), "en")?.index)
+        assertEquals(4, startSubtitle(signsFirst.copy(defaultSubtitleStreamIndex = 4), SubtitleChoice.Language("en"))?.index)
 
     @Test fun aRememberedLanguageSkipsForcedTracks() =
-        assertEquals(4, startSubtitle(signsFirst.copy(defaultSubtitleStreamIndex = 5), "en")?.index)
+        assertEquals(4, startSubtitle(signsFirst.copy(defaultSubtitleStreamIndex = 5), SubtitleChoice.Language("en"))?.index)
 
-    @Test fun offStartsWithNone() = assertNull(startSubtitle(signsFirst.copy(defaultSubtitleStreamIndex = 4), ""))
+    @Test fun offStartsWithNone() = assertNull(startSubtitle(signsFirst.copy(defaultSubtitleStreamIndex = 4), SubtitleChoice.Off))
 }
