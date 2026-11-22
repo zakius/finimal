@@ -239,7 +239,8 @@ jobs:
         with:
           path: ${{ env.GRADLE_USER_HOME }}/compose-jb/wix311.zip
           key: wix311
-      - run: ./gradlew :desktop:packageReleaseMsi :desktop:createReleaseDistributable :desktop:skiaCheck
+      # The tests run here too: file replacement and locking differ on Windows (5beae1e), and so does libmpv.
+      - run: ./gradlew --continue :core:test :desktop:test :desktop:packageReleaseMsi :desktop:createReleaseDistributable :desktop:skiaCheck
       # The launcher is a windowed (GUI subsystem) program, so bash neither waits for it nor gets its exit code.
       # Start-Process -Wait does both and captures its output.
       - name: Check the player
