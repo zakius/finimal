@@ -40,7 +40,11 @@ dependencies {
     testImplementation(kotlin("test"))
 }
 
-tasks.test { useJUnitPlatform() }
+tasks.test {
+    useJUnitPlatform()
+    // Windows has no system libmpv, so the tests load the DLL tools/fetch-libmpv-windows.sh puts in the app's resources.
+    if (System.getProperty("os.name").startsWith("Windows")) systemProperty("compose.application.resources.dir", file("resources/windows").path)
+}
 
 val versionName = providers.gradleProperty("finimal.versionName").get()
 
