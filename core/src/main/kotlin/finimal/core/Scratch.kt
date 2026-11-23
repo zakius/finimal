@@ -55,6 +55,8 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
         if (e != null && !e.release()) return false
         // Delete under the lock, so a concurrent entry() for this key can't count the chunks being deleted as present.
         synchronized(this) {
+            // An entry() since the lookup above may have opened the key.
+            if (entries[key] !== e) return false
             entries.remove(key)
             File(dir, key).deleteRecursively()
         }
@@ -522,6 +524,8 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
                     r.body.contentLength()
                 }
                 synchronized(this) {
+                    // Once gone, the folder may belong to a new entry, and so may its length file.
+                    if (gone) return stored
                     val expected = if (length >= 0) length else expectedSize
                     if (total < 0 || expected != null && total != expected) throw WrongFile("$total bytes, expected $expected")
                     if (length < 0) {
@@ -542,21 +546,26 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
                 while (pos < length) {
                     val i = (pos / chunkSize).toInt()
                     val end = i.toLong() * chunkSize + chunkLength(i)
-                    val have = synchronized(this) {
+                    // Opened under the lock while the target is i, so the entry is not gone and the part is its own.
+                    val out: FileOutputStream? = synchronized(this) {
                         val next = target()
                         when {
-                            present[i] -> true
+                            present[i] -> null
                             next == i -> {
                                 writing = i
                                 written = 0
-                                false
+                                try {
+                                    FileOutputStream(partFile(i))
+                                } catch (e: IOException) {
+                                    throw StorageError(e)
+                                }
                             }
                             // A server that ignores the range sends from byte 0. Skip ahead to the wanted chunk rather than request again at once.
-                            !ranged && next != null && i < next -> true
+                            !ranged && next != null && i < next -> null
                             else -> return stored
                         }
                     }
-                    if (have) {
+                    if (out == null) {
                         // Only a server that ignores the range sends a chunk that is already here or not wanted. Skip it, since later ones may be wanted.
                         if (ranged) return stored
                         while (pos < end) {
@@ -565,11 +574,6 @@ class Scratch(val dir: File, private val http: OkHttpClient, val chunkSize: Int 
                             pos += n
                         }
                         continue
-                    }
-                    val out = try {
-                        FileOutputStream(partFile(i))
-                    } catch (e: IOException) {
-                        throw StorageError(e)
                     }
                     out.use {
                         while (pos < end) {
