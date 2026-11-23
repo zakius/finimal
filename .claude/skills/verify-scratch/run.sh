@@ -19,23 +19,26 @@ JAR="${FINIMAL_FORMAL_CACHE:-$HOME/.cache/finimal-formal}/$TLA_VERSION/tla2tools
 # One TLC run per line: name | check | constants that differ from Scratch.cfg | baseline. The
 # baseline is "pass", or the action sequence of TLC's counterexample (shortest for an invariant;
 # for ReadsReturn a loop, "Action->N" going back to state N): a known finding (SKILL.md "Known
-# findings") or a 5beae1e replay, which must keep failing.
+# findings") or a replay of a fixed race, which must keep failing.
 RUNS='
 types                  | TypeOK                  |                                                                       | pass
-older-keeps-out        | OlderEntryKeepsOut      |                                                                       | Init DelLookup Lookup DelRemove
-delete-open            | DeleteSparesOpen        |                                                                       | Init DelLookup Lookup Demand DelRemove
-old-filler-parts-all   | OldFillerLeavesParts    |                                                                       | Init DelLookup Lookup Demand Pick HeaderArrives DelRemove StartChunk OpenPart ReadFail Close Lookup Demand Pick HeaderArrives StartChunk OpenPart Finally
+older-keeps-out        | OlderEntryKeepsOut      |                                                                       | pass
+delete-open            | DeleteSparesOpen        |                                                                       | pass
+old-filler-parts-all   | OldFillerLeavesParts    |                                                                       | pass
 reads-return           | ReadsReturn             |                                                                       | pass
-older-keeps-out-evict  | OlderEntryKeepsOut      | DeleteFindsEntry=TRUE                                                 | Init Lookup DelLookup Demand Tick ReadFail Pick Close DelRelease DelRemove Lookup Demand Pick HeaderArrives HeaderArrives
-old-filler-truncate    | OldFillerNeverTruncates | DeleteFindsEntry=TRUE                                                 | Init Lookup DelLookup Demand Tick ReadFail Pick HeaderArrives StartChunk Close DelRelease DelRemove Lookup Demand Pick HeaderArrives StartChunk OpenPart OpenPart
+older-keeps-out-evict  | OlderEntryKeepsOut      | DeleteFindsEntry=TRUE                                                 | pass
+old-filler-truncate    | OldFillerNeverTruncates | DeleteFindsEntry=TRUE                                                 | pass
 old-filler-parts       | OldFillerLeavesParts    | DeleteFindsEntry=TRUE                                                 | pass
 delete-open-evict      | DeleteSparesOpen        | DeleteFindsEntry=TRUE                                                 | pass
 range-ignored          | NoRequestLoop           | NChunks=2 MaxEntries=1 IgnoresRange=TRUE                              | pass
 5beae1e-delete-race    | DeleteSparesOpen        | DeleteFindsEntry=TRUE PreFixDeleteUnlocked=TRUE                       | Init Lookup DelLookup DelRelease Demand DelRemove Lookup Demand DelFiles
-5beae1e-busy-loop      | ReadsReturn             | DeleteFindsEntry=TRUE PreFixDeleteUnlocked=TRUE PreFixNoDeadline=TRUE | Init Lookup DelLookup DelRelease Demand DelRemove Lookup Demand Pick HeaderArrives Tick StartChunk OpenPart WriteChunk Commit ReadFind DelFiles DelLookup DelRefused ReadRetry ReadFind->19
-5beae1e-old-filler     | OldFillerLeavesParts    | DeleteFindsEntry=TRUE PreFixNoGoneCheck=TRUE                          | Init Lookup DelLookup Demand Tick ReadFail Pick HeaderArrives StartChunk Close DelRelease DelRemove Lookup Demand OpenPart Pick HeaderArrives StartChunk OpenPart Finally
-5beae1e-retry-deadline | ReadsReturn             | MaxEntries=1 PreFixNoDeadline=TRUE                                    | Init DelLookup Lookup Demand Tick Pick HeaderArrives StartChunk OpenPart WriteChunk Commit DelRemove DelLookup DelRemove ReadFind ReadRetry DelLookup->13
+5beae1e-busy-loop      | ReadsReturn             | DeleteFindsEntry=TRUE PreFixDeleteUnlocked=TRUE PreFixNoDeadline=TRUE | Init Lookup DelLookup DelRelease Demand DelRemove Lookup Demand Pick HeaderArrives Tick StartChunk WriteChunk Commit ReadFind DelFiles DelLookup DelRefused ReadRetry ReadFind->18
+5beae1e-old-filler     | OldFillerLeavesParts    | DeleteFindsEntry=TRUE PreFixNoGoneCheck=TRUE                          | Init Lookup DelLookup Demand Tick ReadFail Pick HeaderArrives StartChunk Close DelRelease DelRemove Lookup Demand BodyFails Pick HeaderArrives StartChunk Finally
+5beae1e-retry-deadline | ReadsReturn             | MaxEntries=1 PreFixNoDeadline=TRUE PreFixDeleteNoRecheck=TRUE         | Init DelLookup Lookup Demand Tick Pick HeaderArrives StartChunk WriteChunk Commit DelRemove DelLookup DelRemove ReadFind ReadRetry DelLookup->12
 5beae1e-range-loop     | NoRequestLoop           | NChunks=2 MaxEntries=1 IgnoresRange=TRUE PreFixNoSkip=TRUE            | Init Lookup Demand Pick HeaderArrives StopFetch
+delete-recheck         | DeleteSparesOpen        | PreFixDeleteNoRecheck=TRUE                                            | Init DelLookup Lookup Demand DelRemove
+open-unlocked          | OldFillerNeverTruncates | DeleteFindsEntry=TRUE PreFixOpenUnlocked=TRUE                         | Init Lookup DelLookup Demand Tick ReadFail Pick HeaderArrives StartChunk Close DelRelease DelRemove Lookup Demand Pick HeaderArrives StartChunk OpenPart OpenPart
+length-no-gone         | OlderEntryKeepsOut      | DeleteFindsEntry=TRUE PreFixLengthNoGone=TRUE                         | Init Lookup DelLookup Demand Tick ReadFail Pick Close DelRelease DelRemove Lookup Demand Pick HeaderArrives HeaderArrives
 '
 PROPERTIES=" ReadsReturn "
 
