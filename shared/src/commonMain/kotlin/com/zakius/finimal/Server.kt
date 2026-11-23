@@ -360,27 +360,38 @@ class Server {
         }
     }
 
-    /**
-     * Saves locally first, then tells the server. A failed report leaves the local entry for [flush].
-     * If a newer local change replaced this state while the report waited for [itemLock], the report is
-     * skipped: the server dates a report on arrival, so the stale report would beat that newer change.
-     */
+    /** Saves locally first, then tells the server. A failed report leaves the local entry for [flush]. */
     suspend fun reportProgress(id: String, mediaSourceId: String, positionTicks: Long, paused: Boolean, transcoding: Boolean, serverPlayed: Boolean, playSession: String) = io {
-        val played = knownPlayed(id, serverPlayed)
-        val state = PlayState(positionTicks, played, now())
-        val owner = record(id, state) ?: return@io
+        val (owner, state) = record(id) { PlayState(positionTicks, knownPlayed(id, serverPlayed), now()) }
+        if (owner == null) return@io
+        report(owner, id, state) {
+            owner.api.sessionApi.reportPlaybackProgress(
+                PlaybackProgressInfo(
+                    itemId = UUID.fromString(id), mediaSourceId = mediaSourceId, positionTicks = positionTicks,
+                    canSeek = true, isPaused = paused, isMuted = false,
+                    playMethod = if (transcoding) PlayMethod.TRANSCODE else PlayMethod.DIRECT_PLAY,
+                    repeatMode = RepeatMode.REPEAT_NONE, playbackOrder = PlaybackOrder.DEFAULT, playSessionId = playSession,
+                )
+            )
+        }
+    }
+
+    /**
+     * Sends the report of [state] unless a newer local change replaced it while this waited for [itemLock].
+     * The server dates a report on arrival, so a change recorded while the request was out would look older
+     * than the report and never be pushed. That change is dated again once the request returns.
+     */
+    private suspend fun report(owner: Owner, id: String, state: PlayState, send: suspend () -> Unit) {
         itemLock(id).withLock {
-            if (owner.pending.get(id) == state) {
-                runCatching {
-                    owner.api.sessionApi.reportPlaybackProgress(
-                        PlaybackProgressInfo(
-                            itemId = UUID.fromString(id), mediaSourceId = mediaSourceId, positionTicks = positionTicks,
-                            canSeek = true, isPaused = paused, isMuted = false,
-                            playMethod = if (transcoding) PlayMethod.TRANSCODE else PlayMethod.DIRECT_PLAY,
-                            repeatMode = RepeatMode.REPEAT_NONE, playbackOrder = PlaybackOrder.DEFAULT, playSessionId = playSession,
-                        )
-                    )
-                }.onSuccess { confirm(owner, id, state) }
+            if (owner.pending.get(id) != state) return@withLock
+            runCatching { send() }.onSuccess { confirm(owner, id, state) }
+            withContext(App.disk) {
+                val newer = owner.pending.get(id)
+                if (newer != null && newer != state) {
+                    // The arrival date is on the server's clock, which now() tracks only to within CLOCK_NOISE_MS.
+                    owner.pending.replace(id, newer, newer.copy(lastPlayedMs = now() + CLOCK_NOISE_MS))
+                    recordVersion.incrementAndGet()
+                }
             }
         }
     }
@@ -402,16 +413,12 @@ class Server {
                 inFlightRecords.decrementAndGet()
             }
             io {
-                // Skipped when superseded, as in reportProgress. The server then ends the playback session on its own.
+                // Skipped when superseded. The server then ends the playback session on its own.
                 if (owner != null) {
-                    itemLock(id).withLock {
-                        if (owner.pending.get(id) == state) {
-                            runCatching {
-                                owner.api.sessionApi.reportPlaybackStopped(
-                                    PlaybackStopInfo(itemId = UUID.fromString(id), mediaSourceId = mediaSourceId, positionTicks = positionTicks, playSessionId = playSession, failed = false)
-                                )
-                            }.onSuccess { confirm(owner, id, state) }
-                        }
+                    report(owner, id, state) {
+                        owner.api.sessionApi.reportPlaybackStopped(
+                            PlaybackStopInfo(itemId = UUID.fromString(id), mediaSourceId = mediaSourceId, positionTicks = positionTicks, playSessionId = playSession, failed = false)
+                        )
                     }
                 }
                 App.platform.scheduleHousekeeping()
@@ -447,24 +454,28 @@ class Server {
 
     /**
      * Every local play-state change goes through here: it is queued for the server and kept with the download
-     * for offline resume. Returns the account [state] was queued for, or null when logged out, in which case
-     * the state waits in the last account's file.
+     * for offline resume. [newState] runs on [App.disk], so it reads now() and the played flag in the order
+     * changes are recorded, and a later change always has the later date. Returns the account the state was
+     * queued for, or null when logged out, in which case the state waits in the last account's file.
      */
-    private suspend fun record(id: String, state: PlayState): Owner? {
+    private suspend fun record(id: String, newState: () -> PlayState): Pair<Owner?, PlayState> {
         inFlightRecords.incrementAndGet()
         return try {
-            withContext(App.disk) { recordOnDisk(id, state) }
+            withContext(App.disk) {
+                val state = newState()
+                recordOnDisk(id, state) to state
+            }
         } finally {
             inFlightRecords.decrementAndGet()
         }
     }
 
-    /** Records many states in one atomic disk write and one Compose invalidation. */
-    private suspend fun recordAll(entries: Map<String, PlayState>): Owner? {
-        if (entries.isEmpty()) return owner()
+    /** Records many states in one atomic disk write and one Compose invalidation. [newStates] runs on [App.disk], as in [record]. */
+    private suspend fun recordAll(newStates: () -> Map<String, PlayState>): Owner? {
         inFlightRecords.incrementAndGet()
         return try {
             withContext(App.disk) {
+                val entries = newStates()
                 val owner = owner()
                 recorded.putAll(entries)
                 val pending = owner?.pending ?: App.pending
@@ -486,8 +497,7 @@ class Server {
     suspend fun startOver(item: BaseItemDto) {
         val id = item.id.toString()
         val serverPlayed = item.userData?.played ?: false
-        val played = knownPlayed(id, serverPlayed)
-        record(id, PlayState(0, played, now()))
+        record(id) { PlayState(0, knownPlayed(id, serverPlayed), now()) }
     }
 
     /** Marks [state] as stored on the server. Bumping [localChanges] makes rows drop their "not synced" mark at once. */
@@ -502,13 +512,15 @@ class Server {
      */
     suspend fun setPlayed(ids: List<String>, played: Boolean) {
         if (ids.isEmpty()) return
-        val now = now()
-        val entries = LinkedHashMap<String, PlayState>(ids.size)
-        ids.forEachIndexed { i, id ->
-            val stepsBack = if (played) ids.lastIndex - i else i
-            entries[id] = PlayState(0, played, now - stepsBack)
+        recordAll {
+            val now = now()
+            val entries = LinkedHashMap<String, PlayState>(ids.size)
+            ids.forEachIndexed { i, id ->
+                val stepsBack = if (played) ids.lastIndex - i else i
+                entries[id] = PlayState(0, played, now - stepsBack)
+            }
+            entries
         }
-        recordAll(entries)
         flush()
     }
 
