@@ -24,16 +24,17 @@ RUNS='
 types               | TypeOK         |                                                               | pass
 flush-only          | NoLostProgress | Accounts={"a"} Reports=FALSE                                  | pass
 reports-only        | NoLostProgress | Edits=FALSE                                                   | pass
-one-account         | NoLostProgress | Accounts={"a"}                                                | Init ReportStamp EditStamp EditRecord ReportRecord ReportCheck ReportSend ReportConfirm
-two-accounts        | NoLostProgress |                                                               | Init ReportStamp EditStamp EditRecord ReportRecord ReportCheck ReportSend ReportConfirm
-report-in-flight    | NoLostProgress | OutOfOrderRecords=FALSE                                       | Init ReportStamp EditStamp ReportRecord ReportCheck EditRecord ReportSend ReportConfirm FlushSnapshot FlushFetch FlushCheck FlushConfirm
+one-account         | NoLostProgress | Accounts={"a"}                                                | pass
+two-accounts        | NoLostProgress |                                                               | pass
 own-account         | OwnAccountOnly |                                                               | pass
 own-account-flush   | OwnAccountOnly | Reports=FALSE                                                 | pass
-7639821-flush       | NoLostProgress | Accounts={"a"} Edits=FALSE FlushRecheck=FALSE FlushLock=FALSE | Init ReportStamp ReportRecord ReportCheck ReportSend ReportStamp FlushSnapshot ReportRecord ReportCheck FlushFetch ReportSend ReportConfirm FlushCheck FlushSend
-7639821-owner       | OwnAccountOnly | UsesOwner=FALSE                                               | Init ReportStamp ReportRecord ReportCheck Switch ReportSend
-7639821-owner-flush | OwnAccountOnly | UsesOwner=FALSE Reports=FALSE                                 | Init EditStamp EditRecord FlushSnapshot FlushFetch FlushCheck Switch FlushSend
-7639821-report      | NoLostProgress | Accounts={"a"} OutOfOrderRecords=FALSE ReportRecheck=FALSE    | Init ReportStamp EditStamp ReportRecord EditRecord ReportCheck ReportSend ReportConfirm FlushSnapshot FlushFetch FlushCheck FlushConfirm
-7cbbb32-item-lock   | NoLostProgress | Accounts={"a"} Edits=FALSE FlushLock=FALSE                    | Init ReportStamp ReportRecord ReportCheck ReportSend ReportStamp FlushSnapshot FlushFetch FlushCheck ReportRecord ReportCheck ReportSend ReportConfirm FlushSend
+7639821-flush       | NoLostProgress | Accounts={"a"} Edits=FALSE FlushRecheck=FALSE FlushLock=FALSE | Init ReportStamp ReportCheck ReportSend ReportConfirm ReportRedate FlushSnapshot ReportStamp ReportCheck FlushFetch ReportSend ReportConfirm FlushCheck FlushSend
+7639821-owner       | OwnAccountOnly | UsesOwner=FALSE                                               | Init ReportStamp ReportCheck Switch ReportSend
+7639821-owner-flush | OwnAccountOnly | UsesOwner=FALSE Reports=FALSE                                 | Init EditStamp FlushSnapshot FlushFetch FlushCheck Switch FlushSend
+7639821-report      | NoLostProgress | Accounts={"a"} ReportRecheck=FALSE RedateNewer=FALSE          | Init ReportStamp EditStamp ReportCheck ReportSend ReportConfirm FlushSnapshot FlushFetch FlushCheck FlushConfirm
+7cbbb32-item-lock   | NoLostProgress | Accounts={"a"} Edits=FALSE FlushLock=FALSE                    | Init ReportStamp ReportCheck ReportSend ReportConfirm ReportRedate FlushSnapshot FlushFetch FlushCheck ReportStamp ReportCheck ReportSend ReportConfirm FlushSend
+fix-stamp-on-disk   | NoLostProgress | Accounts={"a"} StampOnDisk=FALSE                              | Init ReportStamp EditStamp EditRecord ReportRecord ReportCheck ReportSend ReportConfirm
+fix-redate          | NoLostProgress | Accounts={"a"} RedateNewer=FALSE                              | Init ReportStamp ReportCheck EditStamp ReportSend ReportConfirm FlushSnapshot FlushFetch FlushCheck FlushConfirm
 '
 
 COVERED=($(awk '/^## Coverage/{on=1;next} /^## /{on=0} on && /^\|/' "$HERE/SKILL.md" | grep -o '`[a-z][^`.]*/[^`]*\.kt`' | tr -d '`' | sort -u))
@@ -112,7 +113,7 @@ while IFS='|' read -r run inv consts expected; do
   states="$(grep -oE '[0-9]+ distinct states found' "$OUT/$run.log" | tail -1)"
   if [[ "$got" == "$expected" && "$got" == pass ]]; then
     echo "ok     $run: $inv holds ($states)"
-  elif [[ "$got" == "$expected" && "$run" =~ ^[0-9a-f]{7}- ]]; then
+  elif [[ "$got" == "$expected" && "$run" =~ ^([0-9a-f]{7}|fix)- ]]; then
     echo "caught $run: $inv broken with its guard removed, as expected ($states)"
   elif [[ "$got" == "$expected" ]]; then
     echo "known  $run: $inv broken by the known finding, unchanged ($states)"

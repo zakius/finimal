@@ -62,6 +62,14 @@ class PendingStore(private val file: File) {
         }
     }
 
+    /** Replaces the entry only if it is still [expected]. */
+    @Synchronized
+    fun replace(itemId: String, expected: PlayState, state: PlayState) {
+        if (states[itemId] != expected) return
+        states[itemId] = state
+        save()
+    }
+
     /** Removes every entry whose value still matches [entries] in one atomic write. */
     @Synchronized
     fun confirmAll(entries: Map<String, PlayState>) {

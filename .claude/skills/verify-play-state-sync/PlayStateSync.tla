@@ -8,7 +8,7 @@
 (* the server's clock; 0 is never played), the LastPlayedDate the server   *)
 (* keeps for it (d), and the account it was recorded for (by). Each change *)
 (* reads a new now(), so a newer t is a newer state, and locally d = t.    *)
-(* The server dates a progress or stop report on arrival (Server.kt:366),  *)
+(* The server dates a progress or stop report on arrival (Server.kt:381),  *)
 (* so a report it stores keeps its t but gets a later d.                   *)
 (***************************************************************************)
 EXTENDS Naturals
@@ -17,8 +17,9 @@ CONSTANTS Accounts,          \* accounts saved on the device, all on one server
           MaxClock,          \* bound on now() reads and report arrivals
           Reports,           \* FALSE: no player reports in this run
           Edits,             \* FALSE: no startOver or setPlayed in this run
-          OutOfOrderRecords, \* FALSE: no change is recorded after one that read now() later (leaves out finding 2)
           \* TRUE is the code as it is. FALSE puts back the bug a fix removed (run.sh, replay rows).
+          StampOnDisk,       \* a change reads now() inside the App.disk task that records it
+          RedateNewer,       \* a change recorded while a report was out is dated again when it returns
           UsesOwner,         \* 7639821: reports, flush and confirms use the Owner recorded with the state
           ReportRecheck,     \* 7639821: a report is sent only while its state is still pending
           FlushRecheck,      \* 7639821: a flush pushes only while its snapshot is still pending
@@ -35,12 +36,12 @@ VARIABLES
     server,   \* server[u]: the server's UserData for account u
     ed,       \* the one startOver or setPlayed between its now() and its record
     rep,      \* the one report (reportProgress / reportStop), with its Owner u once recorded
-    fl        \* the one flush (the flushing Mutex, Server.kt:632), with its Owner u
+    fl        \* the one flush (the flushing Mutex, Server.kt:644), with its Owner u
 
 vars == <<clock, cur, pending, latest, server, ed, rep, fl>>
 
 EdIdle == [pc |-> "idle", t |-> 0]
-RepIdle == [pc |-> "idle", st |-> None, u |-> "none"]
+RepIdle == [pc |-> "idle", st |-> None, u |-> "none", ok |-> FALSE]
 FlIdle == [pc |-> "idle", snap |-> None, view |-> None, u |-> "none"]
 
 Init ==
@@ -57,104 +58,118 @@ Init ==
 RepAcct == IF UsesOwner THEN rep.u ELSE cur
 FlAcct == IF UsesOwner THEN fl.u ELSE cur
 
-\* itemLock(id) (Server.kt:136): a report holds it from its check until its confirm, a flush from
-\* its check until its push returns.
-ReportHoldsLock == rep.pc \in {"send", "confirm"}
+\* itemLock(id) (Server.kt:136): a report holds it from its check until it is dated again, a flush
+\* from its check until its push returns.
+ReportHoldsLock == rep.pc \in {"send", "confirm", "redate"}
 FlushHoldsLock == FlushLock /\ fl.pc = "send"
 
-InOrder(t) ==
-    \/ OutOfOrderRecords
-    \/ /\ ed.pc = "stamped" => ed.t >= t
-       /\ rep.pc = "stamped" => rep.st.t >= t
-
-\* recordOnDisk (Server.kt:437), one App.disk task: owner() and a put into its pending file
-\* (Server.kt:438-441), whichever change it holds.
+\* recordOnDisk (Server.kt:444), one App.disk task: owner() and a put into its pending file
+\* (Server.kt:445-448), whichever change it holds.
 Record(st) ==
     /\ pending' = [pending EXCEPT ![cur] = st]
     /\ latest' = [latest EXCEPT ![cur] = IF st.t > @ THEN st.t ELSE @]
 
-\* PendingStore.confirm and confirmAll (PendingStore.kt:59, :70): remove the entry only if it is still that state.
+\* PendingStore.confirm and confirmAll (PendingStore.kt:59, :78): remove the entry only if it is still that state.
 Confirm(p, u, st) == IF p[u] = st THEN [p EXCEPT ![u] = None] ELSE p
 
 \* shouldPush (PlayState.kt:52): newer LastPlayedDate wins; a server state without a date never wins.
 ShouldPush(local, view) == view.d = 0 \/ local.d >= view.d   \* PlayState.kt:53, :55
 
 -----------------------------------------------------------------------------
-\* startOver (Server.kt:490) and setPlayed (Server.kt:505) read now() on the caller's thread, then
-\* hop to App.disk to record it (record, recordAll: Server.kt:456, :467). No report follows.
+\* startOver (Server.kt:497) and setPlayed (Server.kt:513) read now() inside the App.disk task
+\* that records the change (record, recordAll: Server.kt:464, :477). No report follows.
+\* Without StampOnDisk, now() is read on the caller's thread before the hop (EditStamp, then EditRecord).
 EditStamp ==
     /\ Edits
     /\ ed.pc = "idle"
     /\ clock < MaxClock
     /\ clock' = clock + 1
-    /\ ed' = [pc |-> "stamped", t |-> clock + 1]
-    /\ UNCHANGED <<cur, pending, latest, server, rep, fl>>
+    /\ IF StampOnDisk
+       THEN /\ Record(Local(clock + 1, cur))
+            /\ UNCHANGED ed
+       ELSE /\ ed' = [pc |-> "stamped", t |-> clock + 1]
+            /\ UNCHANGED <<pending, latest>>
+    /\ UNCHANGED <<cur, server, rep, fl>>
 
 EditRecord ==
     /\ ed.pc = "stamped"
-    /\ InOrder(ed.t)
     /\ Record(Local(ed.t, cur))
     /\ ed' = EdIdle
     /\ UNCHANGED <<clock, cur, server, rep, fl>>
 
-\* reportProgress reads now() on Dispatchers.IO (Server.kt:370), then records on App.disk and keeps
-\* the Owner (Server.kt:371). reportStop reads now() inside its App.disk task (Server.kt:399-400),
-\* the case with no step in between.
+\* reportProgress (Server.kt:365) and reportStop (Server.kt:408-411) read now() inside the App.disk
+\* task that records the report's state, and keep the Owner. Without StampOnDisk, reportProgress read
+\* now() on Dispatchers.IO first (ReportStamp, then ReportRecord).
 ReportStamp ==
     /\ Reports
     /\ rep.pc = "idle"
     /\ clock < MaxClock
     /\ clock' = clock + 1
-    /\ rep' = [pc |-> "stamped", st |-> Local(clock + 1, "none"), u |-> "none"]
-    /\ UNCHANGED <<cur, pending, latest, server, ed, fl>>
+    /\ IF StampOnDisk
+       THEN /\ Record(Local(clock + 1, cur))
+            /\ rep' = [pc |-> "wait", st |-> Local(clock + 1, cur), u |-> cur, ok |-> FALSE]
+       ELSE /\ rep' = [pc |-> "stamped", st |-> Local(clock + 1, "none"), u |-> "none", ok |-> FALSE]
+            /\ UNCHANGED <<pending, latest>>
+    /\ UNCHANGED <<cur, server, ed, fl>>
 
 ReportRecord ==
     /\ rep.pc = "stamped"
-    /\ InOrder(rep.st.t)
     /\ Record(Local(rep.st.t, cur))
-    /\ rep' = [pc |-> "wait", st |-> Local(rep.st.t, cur), u |-> cur]
+    /\ rep' = [pc |-> "wait", st |-> Local(rep.st.t, cur), u |-> cur, ok |-> FALSE]
     /\ UNCHANGED <<clock, cur, server, ed, fl>>
 
-\* Takes itemLock and, unless a newer local change replaced the entry, starts the request with the
-\* Owner's client (Server.kt:372-375, :407-410). Nothing holds a record back until the server answers.
+\* report() takes itemLock and, unless a newer local change replaced the entry, starts the request
+\* with the Owner's client (Server.kt:385-387). Nothing holds a record back until the server answers.
 ReportCheck ==
     /\ rep.pc = "wait"
     /\ ~FlushHoldsLock
-    /\ rep' = IF ~ReportRecheck \/ pending[RepAcct] = rep.st   \* Server.kt:373, :408
+    /\ rep' = IF ~ReportRecheck \/ pending[RepAcct] = rep.st   \* Server.kt:386
               THEN [rep EXCEPT !.pc = "send"]
               ELSE RepIdle
     /\ UNCHANGED <<clock, cur, pending, latest, server, ed, fl>>
 
-\* The server stores the reported position dated on arrival (Server.kt:366), or the request fails
-\* and runCatching swallows it, leaving the entry for a flush (Server.kt:374, :409).
+\* The server stores the reported position dated on arrival, or the request fails and runCatching
+\* swallows it, leaving the entry for a flush (Server.kt:387). A failed request that the server
+\* stored anyway is left out.
 ReportSend ==
     /\ rep.pc = "send"
     /\ \/ /\ clock < MaxClock
           /\ clock' = clock + 1
           /\ server' = [server EXCEPT ![RepAcct] = [rep.st EXCEPT !.d = clock + 1]]
-          /\ rep' = [rep EXCEPT !.pc = "confirm"]
-       \/ /\ rep' = RepIdle
+          /\ rep' = [rep EXCEPT !.pc = "confirm", !.ok = TRUE]
+       \/ /\ rep' = [rep EXCEPT !.pc = "confirm", !.ok = FALSE]
           /\ UNCHANGED <<clock, server>>
     /\ UNCHANGED <<cur, pending, latest, ed, fl>>
 
-\* .onSuccess { confirm(owner, id, state) } (Server.kt:383, :413, :494), then itemLock is released.
+\* .onSuccess { confirm(owner, id, state) } (Server.kt:387, :504).
 ReportConfirm ==
     /\ rep.pc = "confirm"
-    /\ pending' = Confirm(pending, RepAcct, rep.st)
+    /\ pending' = IF rep.ok THEN Confirm(pending, RepAcct, rep.st) ELSE pending
+    /\ rep' = IF RedateNewer THEN [rep EXCEPT !.pc = "redate"] ELSE RepIdle
+    /\ UNCHANGED <<clock, cur, latest, server, ed, fl>>
+
+\* An App.disk task, still under itemLock (Server.kt:388-394): a change recorded since the check gets the
+\* date now() + CLOCK_NOISE_MS, later than any arrival date so far. Then itemLock is released.
+ReportRedate ==
+    /\ rep.pc = "redate"
+    /\ LET p == pending[RepAcct] IN
+       pending' = IF p # None /\ p # rep.st
+                  THEN [pending EXCEPT ![RepAcct] = [p EXCEPT !.d = clock + 1]]
+                  ELSE pending
     /\ rep' = RepIdle
     /\ UNCHANGED <<clock, cur, latest, server, ed, fl>>
 
 -----------------------------------------------------------------------------
-\* runFlush under `flushing`: owner() and its pending file, read on App.disk (Server.kt:551-558).
-\* The hasPendingWork fast path and the recordVersion coalescing (Server.kt:528-547) only decide
+\* runFlush under `flushing`: owner() and its pending file, read on App.disk (Server.kt:563-570).
+\* The hasPendingWork fast path and the recordVersion coalescing (Server.kt:540-559) only decide
 \* whether a caller starts one; a flush may start whenever an entry is pending.
 FlushSnapshot ==
     /\ fl.pc = "idle"
-    /\ pending[cur] # None                                \* Server.kt:558
+    /\ pending[cur] # None                                \* Server.kt:570
     /\ fl' = [pc |-> "fetch", snap |-> pending[cur], view |-> None, u |-> cur]
     /\ UNCHANGED <<clock, cur, pending, latest, server, ed, rep>>
 
-\* One list request for server state, as the Owner; a failure ends the flush (Server.kt:564-569).
+\* One list request for server state, as the Owner; a failure ends the flush (Server.kt:576-581).
 FlushFetch ==
     /\ fl.pc = "fetch"
     /\ \/ fl' = [fl EXCEPT !.pc = "check", !.view = server[FlAcct]]
@@ -162,18 +177,18 @@ FlushFetch ==
     /\ UNCHANGED <<clock, cur, pending, latest, server, ed, rep>>
 
 \* A Semaphore(4) permit, then itemLock, then the still-pending check and shouldPush against the
-\* fetched view (Server.kt:580-585). Either way the item counts as confirmed unless the push fails
-\* (Server.kt:598-599).
+\* fetched view (Server.kt:592-597). Either way the item counts as confirmed unless the push fails
+\* (Server.kt:610-611).
 FlushCheck ==
     /\ fl.pc = "check"
-    /\ FlushLock => ~ReportHoldsLock                      \* Server.kt:583
-    /\ fl' = IF (~FlushRecheck \/ pending[FlAcct] = fl.snap) /\ ShouldPush(fl.snap, fl.view)   \* Server.kt:585
+    /\ FlushLock => ~ReportHoldsLock                      \* Server.kt:595
+    /\ fl' = IF (~FlushRecheck \/ pending[FlAcct] = fl.snap) /\ ShouldPush(fl.snap, fl.view)   \* Server.kt:597
              THEN [fl EXCEPT !.pc = "send"]
              ELSE [fl EXCEPT !.pc = "confirm"]
     /\ UNCHANGED <<clock, cur, pending, latest, server, ed, rep>>
 
-\* POST /UserItems/{id}/UserData as the Owner, with the local LastPlayedDate (Server.kt:586-595).
-\* A failure keeps the entry (Server.kt:609-615); 404 and 401 are not modeled.
+\* POST /UserItems/{id}/UserData as the Owner, with the local LastPlayedDate (Server.kt:598-607).
+\* A failure keeps the entry (Server.kt:621-627); 404 and 401 are not modeled.
 FlushSend ==
     /\ fl.pc = "send"
     /\ \/ /\ server' = [server EXCEPT ![FlAcct] = fl.snap]
@@ -182,7 +197,7 @@ FlushSend ==
           /\ UNCHANGED server
     /\ UNCHANGED <<clock, cur, pending, latest, ed, rep>>
 
-\* owner.pending.confirmAll(confirmed) once every item is done, outside itemLock (Server.kt:622-626).
+\* owner.pending.confirmAll(confirmed) once every item is done, outside itemLock (Server.kt:634-638).
 FlushConfirm ==
     /\ fl.pc = "confirm"
     /\ pending' = Confirm(pending, FlAcct, fl.snap)
@@ -204,7 +219,7 @@ Switch ==
 
 Next ==
     \/ EditStamp \/ EditRecord
-    \/ ReportStamp \/ ReportRecord \/ ReportCheck \/ ReportSend \/ ReportConfirm
+    \/ ReportStamp \/ ReportRecord \/ ReportCheck \/ ReportSend \/ ReportConfirm \/ ReportRedate
     \/ FlushSnapshot \/ FlushFetch \/ FlushCheck \/ FlushSend \/ FlushConfirm
     \/ \E u \in Accounts : OtherDevice(u)
     \/ Switch
@@ -216,7 +231,7 @@ TypeOK ==
     /\ clock \in 0..MaxClock
     /\ cur \in Accounts
     /\ ed.pc \in {"idle", "stamped"}
-    /\ rep.pc \in {"idle", "stamped", "wait", "send", "confirm"}
+    /\ rep.pc \in {"idle", "stamped", "wait", "send", "confirm", "redate"}
     /\ fl.pc \in {"idle", "fetch", "check", "send", "confirm"}
 
 \* Progress is never lost: once an account has no unsynced entry, the server holds a state at

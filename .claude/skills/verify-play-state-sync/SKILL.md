@@ -31,18 +31,19 @@ Each line of output is one TLC run (the table at the top of `run.sh`):
 | `types` | TypeOK, two accounts, player reports and local edits | holds |
 | `flush-only` | NoLostProgress, one account, no player reports | holds |
 | `reports-only` | NoLostProgress, two accounts, no startOver or setPlayed | holds |
-| `one-account` | NoLostProgress, one account | known finding 2 |
-| `two-accounts` | NoLostProgress, two accounts | known finding 2 |
-| `report-in-flight` | NoLostProgress, two accounts, changes recorded in the order they read `now()` | known finding 1 |
+| `one-account` | NoLostProgress, one account | holds |
+| `two-accounts` | NoLostProgress, two accounts | holds |
 | `own-account` | OwnAccountOnly, two accounts | holds |
 | `own-account-flush` | OwnAccountOnly, two accounts, no player reports | holds |
 | `7639821-flush` | `reports-only`, one account, the flush pushing outside the item lock and without its still-pending check | broken |
 | `7639821-owner` | `own-account` with every step using the account logged in when it runs, not the Owner | broken by a report |
 | `7639821-owner-flush` | the same, no player reports | broken by a flush |
-| `7639821-report` | `report-in-flight`, one account, reports sent without their still-pending check | broken: the edit is recorded before the report's check, which the check would catch |
+| `7639821-report` | `one-account`, reports sent without their still-pending check, and no re-dating | broken: the edit is recorded before the report's check, which the check would catch |
 | `7cbbb32-item-lock` | `reports-only`, one account, the flush pushing under its Semaphore permit only, not `itemLock` | broken |
+| `fix-stamp-on-disk` | `one-account`, `now()` read before the `App.disk` hop | broken: two changes recorded out of date order |
+| `fix-redate` | `one-account`, no re-dating after a report | broken: a change recorded while a report is out is dropped |
 
-The rows named after a commit are replays. Each sets one or two constants to FALSE to remove a guard that commit added, which puts back the bug it fixed or prevents (the constants are listed under Coverage), and its baseline is TLC's shortest counterexample. They prove that the model can still see each past bug. `reports-only` holds, so the replays run on it fail only through their removed guard. `report-in-flight` fails through finding 1, so `7639821-report` is pinned to a path that finding 1 cannot take.
+The rows named after a commit, or starting with `fix-`, are replays. Each sets one or two constants to FALSE to remove a guard a fix added, which puts back the bug it fixed or prevents (the constants are listed under Coverage), and its baseline is TLC's shortest counterexample. They prove that the model can still see each past bug. `7639821-report` also turns off re-dating, which did not exist at 7639821 and would hide that bug.
 
 - `ok`: the invariant holds in every reachable state within the bounds.
 - `known`: TLC's shortest counterexample is the known finding's path, step for step.
@@ -72,41 +73,29 @@ The content the model was last confirmed against is in `covered.sha256` (written
 | --- | --- |
 | `pending`, `Confirm` | `core/src/main/kotlin/finimal/core/PendingStore.kt`: `put`, `putAll`, `get`, `all`, `confirm` and `confirmAll` (lines 59, 70: remove only if still equal) |
 | `ShouldPush` | `core/src/main/kotlin/finimal/core/PlayState.kt`: `shouldPush` (lines 52-56) |
-| `Record`, `EditStamp`, `EditRecord` | `shared/src/commonMain/kotlin/com/zakius/finimal/Server.kt`: `recordOnDisk` (437), `record` (453), `recordAll` (463), `startOver` (486), `setPlayed` (503), `owner` (107), `now` (132) |
-| `ReportStamp`, `ReportRecord`, `ReportCheck`, `ReportSend`, `ReportConfirm` | `Server.kt`: `reportProgress` (368-386), `reportStop` (392-420), `confirm` (494), `itemLock` (135-136) |
-| `FlushSnapshot`, `FlushFetch`, `FlushCheck`, `FlushSend`, `FlushConfirm` | `Server.kt`: `flush` (527-549: the `hasPendingWork` fast path and `recordVersion` coalescing), `runFlush` (551-629), `userData` (280), the `flushing` Mutex (632) |
+| `Record`, `EditStamp`, `EditRecord` | `shared/src/commonMain/kotlin/com/zakius/finimal/Server.kt`: `recordOnDisk` (444), `record` (461), `recordAll` (474), `startOver` (497), `setPlayed` (513), `owner` (107), `now` (132) |
+| `ReportStamp`, `ReportRecord`, `ReportCheck`, `ReportSend`, `ReportConfirm`, `ReportRedate` | `Server.kt`: `reportProgress` (364-377), `report` (379-397), `reportStop` (403-427), `confirm` (504), `itemLock` (135-136); `PendingStore.kt`: `replace` (66-71) |
+| `FlushSnapshot`, `FlushFetch`, `FlushCheck`, `FlushSend`, `FlushConfirm` | `Server.kt`: `flush` (539-561: the `hasPendingWork` fast path and `recordVersion` coalescing), `runFlush` (563-641), `userData` (280), the `flushing` Mutex (644) |
 | `Switch`, `cur` | `Server.kt`: `switchTo` (189-197), `login` and `logout` (under `synchronized(App)`); `shared/src/commonMain/kotlin/com/zakius/finimal/Platform.kt`: `App.pending` (127-146), `pendingLoadedEmpty` (149), `App.disk` (163) |
-| `OutOfOrderRecords` | TRUE is the code: `reportProgress` (370), `startOver` (490) and `setPlayed` (505) read `now()` before their `App.disk` hop, so a change can be recorded after one that read `now()` later. FALSE keeps that order, to show finding 1 apart from finding 2. |
+| `StampOnDisk` | `record` and `recordAll` (464, 477) build the state inside their `App.disk` task, and `reportStop` (408-411) reads `now()` in its own, so a change recorded later always has the later date. FALSE: `reportProgress`, `startOver` and `setPlayed` read `now()` before the hop. |
+| `RedateNewer` | `report` (388-394): once the request returns, still under `itemLock`, a change recorded since the check is dated `now() + CLOCK_NOISE_MS` on `App.disk`. FALSE: it keeps its date, older than the report's arrival date. |
 | `UsesOwner` | `Owner` (`Server.kt` 102) in every report, flush and confirm (7639821). FALSE: `api`, `userId` and `App.pending` as they are at each step. |
-| `ReportRecheck` | `owner.pending.get(id) == state` in `reportProgress` (373) and `reportStop` (408) (7639821) |
-| `FlushRecheck` | `owner.pending.get(id) == local` in `runFlush` (585) (7639821) |
-| `FlushLock` | the flush's push under `itemLock(id)` (583), `reports` at 7639821, per item since 7cbbb32 |
+| `ReportRecheck` | `owner.pending.get(id) != state` in `report` (386) (7639821) |
+| `FlushRecheck` | `owner.pending.get(id) == local` in `runFlush` (597) (7639821) |
+| `FlushLock` | the flush's push under `itemLock(id)` (595), `reports` at 7639821, per item since 7cbbb32 |
 
-The server dates a progress or stop report on arrival (the comment at `Server.kt` 366), and the model gives each stored report a new date. Checked against Jellyfin 12.4.0 on the local test server: a progress report and a stop report each set LastPlayedDate to the time they arrived, replacing a date set before. A flush's push keeps the local LastPlayedDate.
+The server dates a progress or stop report on arrival (the comment at `Server.kt` 381), and the model gives each stored report a new date. Checked against Jellyfin 12.4.0 on the local test server: a progress report and a stop report each set LastPlayedDate to the time they arrived, replacing a date set before. A flush's push keeps the local LastPlayedDate.
 
 Callers of `flush` that make it run at any time (not modeled one by one; the model lets a flush start whenever an entry is pending): list loads in `Screens.kt` (`loadFresh`), "Sync now", `setPlayed`, `Server.item(flushFirst)`, the players on open (`app/.../Player.kt`, `desktop/.../Player.kt`), Android `Housekeeping` in `app/.../Media.kt` and `FastStart.kt`, and the desktop's `scheduleHousekeeping`.
 
 ## Known findings
 
-Both were already in the code at 7639821. The model at 7639821 missed them, because it recorded a change in the same step as its `now()`, and stored a report on the server in the same step as the report's still-pending check, dated at the record time.
+None. Two findings from the 7cbbb32 model are fixed, and the `fix-` rows replay them:
 
-1. **A local change made while an older report is in flight can be dropped** (row `report-in-flight`). The window is the report's network round trip.
-   1. `reportProgress` (or `reportStop`) records #1, takes `itemLock`, finds #1 still pending, and sends the report.
-   2. While the request is in flight, Mark played or Start over records #2 on `App.disk`, which does not take `itemLock`.
-   3. The server stores #1's position, dated on arrival, which is later than #2.
-   4. The report confirms #1 (a no-op, #2 is pending) and releases `itemLock`.
-   5. The next flush (`setPlayed` starts one at once) reads #2 and fetches the server's state.
-   6. Under `itemLock`, `shouldPush(#2, server)` is false because the server's date is newer, so nothing is pushed and #2 counts as confirmed.
-   7. `confirmAll` removes #2. The server keeps #1: the item shows unplayed or at the older position everywhere, and nothing pending corrects it.
+1. **A local change made while an older report was in flight could be dropped** (`fix-redate`). The report sent #1. While its request was out, Mark played recorded #2. The server dated #1 on arrival, later than #2, so the next flush found `shouldPush(#2, server)` false, counted #2 as confirmed, and removed it. Now `report` dates #2 again once the request returns, so the flush pushes it.
+2. **Two changes could be recorded out of date order** (`fix-stamp-on-disk`). `reportProgress` read `now()` as #1 on Dispatchers.IO, and Mark played read a later `now()` as #2 and recorded it first. The report's `App.disk` task then replaced #2 with #1. Now every change reads `now()` and its played flag inside the `App.disk` task that records it.
 
-   This is the 7639821 report finding narrowed, not closed: the still-pending check runs before the request is sent, not when the server stores it.
-2. **Two changes can be recorded out of date order** (rows `one-account`, `two-accounts`). The window is the few instructions between `now()` and the `App.disk` hop.
-   1. `reportProgress` reads `now()` as #1 on Dispatchers.IO.
-   2. Mark played or Start over reads `now()` as #2, and its `App.disk` task runs first: #2 is pending.
-   3. The report's `App.disk` task runs: #1 replaces #2 in the pending file.
-   4. The report finds #1 still pending, sends it, the server stores it dated on arrival, and the report confirms #1. #2 was never sent and nothing is pending.
-
-Fixed in the code this model describes, and replayed by the rows named after 7639821: a flush that posted an older state over a newer report, reports and flushes that crossed an account switch, and a report that waited for the lock while a newer local change was recorded and flushed, then posted its older position.
+Fixed earlier, and replayed by the rows named after 7639821: a flush that posted an older state over a newer report, reports and flushes that crossed an account switch, and a report that waited for the lock while a newer local change was recorded and flushed, then posted its older position.
 
 ## What the model leaves out
 
@@ -115,6 +104,6 @@ Fixed in the code this model describes, and replayed by the rows named after 763
 - The `hasPendingWork` fast path and the `recordVersion` coalescing only decide whether a `flush` call starts a run or joins one. The model checks no promise about what a caller sees when `flush` returns, such as "Sync now" saying Synced.
 - HTTP 404 (drop) and 401 (expire, log out) during a flush, `logout`, and `login` are not modeled. A switch is one step: `owner()` and the prefs writes in `switchTo`, `login` and `logout` share `synchronized(App)`.
 - A skipped stop report leaves the server's playback session open until the server times it out.
-- The played flag (`recorded`, `knownPlayed`, design rule 11), `ResumeRules`, `ResumeGuard` and the server clock offset are not modeled. A play state is its LastPlayedDate; the position and played flag ride along with it. All devices stamp dates on one exact server clock, so the 2 s noise in `setClock` is left out.
+- The played flag (`recorded`, `knownPlayed`, design rule 11), `ResumeRules`, `ResumeGuard` and the server clock offset are not modeled. A play state is its LastPlayedDate; the position and played flag ride along with it. All devices stamp dates on one exact server clock, so the 2 s noise in `setClock` is left out. In the code `now()` can lag the server's clock by that noise and the Date header's whole seconds, so a change made in the seconds after a report arrives can still date older than it; re-dating adds `CLOCK_NOISE_MS` for the in-flight case only.
 - Another device's write that lands between a flush's fetch and its post, or under a report in flight, is overwritten, because the Jellyfin API has no conditional update. The invariants do not check other devices' progress.
 - Download records (`rememberState`) and the list snapshots are not modeled.
