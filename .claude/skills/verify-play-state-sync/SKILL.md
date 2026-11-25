@@ -52,7 +52,7 @@ Read every trace with the pstack **statechart** skill (`/pstack:statechart`). It
 
 ## Coverage
 
-Sync commit: `1149340bab570193edfe4ca04229a3b8cb9bbcc8` (the model was last confirmed to describe these files at this commit).
+Sync commit: `6836a29bc99fcb7f3bc86d1084f0a31398ebfc0d` (the model was last confirmed to describe these files at this commit).
 
 | Model | Code |
 | --- | --- |
