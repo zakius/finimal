@@ -9,7 +9,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(git -C "$HERE" rev-parse --show-toplevel)"
 
 TLA_VERSION=v1.8.0
-TLA_SHA256=78f7e2c6bf9a8b65eda665a23e94431255587e0b43a834a4e2af1723562d9b4a
+TLA_SHA256=fdffef247f563ef6edbfd44958d2a82db79e7564e07cb673262d896353fa6713
 JAR="${FINIMAL_FORMAL_CACHE:-$HOME/.cache/finimal-formal}/$TLA_VERSION/tla2tools.jar"
 
 # One TLC run per line: name | invariant | Accounts | Reports | baseline. The baseline is "pass",

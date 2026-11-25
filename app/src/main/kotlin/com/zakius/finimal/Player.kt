@@ -364,6 +364,8 @@ private fun Playback(
     var startTicks by remember { mutableLongStateOf(0L) }
     var startedAt by remember { mutableLongStateOf(0L) }
     var seeked by remember { mutableStateOf(false) }
+    // What the last progress report sent. Leaving paused at that spot is an idle stop (Server.reportStop).
+    var reportedTicks by remember { mutableLongStateOf(-1L) }
     var resumedAt by remember { mutableStateOf<Long?>(null) }
     // Leaving through "Play next" in the credits counts as watched to the end.
     var creditsDone by remember { mutableStateOf(false) }
@@ -451,6 +453,7 @@ private fun Playback(
             val startMs = transcodeFromMs ?: (resumeMs - RESUME_REWIND_MS).coerceAtLeast(0)
             startTicks = startMs * TICKS_PER_MS
             startedAt = SystemClock.elapsedRealtime()
+            reportedTicks = -1L
             if (transcodeFromMs == null && startMs > 0) resumedAt = startMs
             val trackParams = player.trackSelectionParameters.buildUpon()
             val audioLang = prefs.audioLang(seriesKey)
@@ -483,8 +486,10 @@ private fun Playback(
     }
     fun positionTicks() = ResumeGuard.position(startTicks, player.currentPosition * TICKS_PER_MS, runtimeTicks(),
         SystemClock.elapsedRealtime() - startedAt, seeked)
-    fun report() = scope.launch {
-        App.server.reportProgress(id, sourceId, positionTicks(), !player.isPlaying, transcoding, serverPlayed, playSession)
+    fun report() {
+        val ticks = positionTicks()
+        reportedTicks = ticks
+        scope.launch { App.server.reportProgress(id, sourceId, ticks, !player.isPlaying, transcoding, serverPlayed, playSession) }
     }
     fun switchToTranscode() {
         transcodeFromMs = player.currentPosition
@@ -540,7 +545,7 @@ private fun Playback(
                 if (state == Player.STATE_ENDED && !ended) {
                     ended = true
                     val runtime = runtimeTicks()
-                    App.server.reportStop(id, sourceId, runtime ?: positionTicks(), runtime, serverPlayed, playSession)
+                    App.server.reportStop(id, sourceId, runtime ?: positionTicks(), runtime, serverPlayed, idle = false, playSession)
                 }
             }
 
@@ -600,7 +605,8 @@ private fun Playback(
             if (!ended && player.currentMediaItem != null) {
                 val runtime = runtimeTicks()
                 val stopTicks = if (creditsDone && runtime != null) runtime else positionTicks()
-                App.server.reportStop(id, sourceId, stopTicks, runtime, serverPlayed, playSession)
+                val idle = !player.isPlaying && stopTicks == reportedTicks
+                App.server.reportStop(id, sourceId, stopTicks, runtime, serverPlayed, idle, playSession)
             }
             App.platform.scope.launch(App.buffers) { Media.stopBuffer(id) }
             Media.playing = null

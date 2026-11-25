@@ -66,6 +66,7 @@ import org.jellyfin.sdk.model.api.UserItemDataDto
 import finimal.core.PendingStore
 import finimal.core.PlayState
 import finimal.core.ResumeRules
+import finimal.core.idleStop
 import finimal.core.shouldPush
 import finimal.core.serverCandidates
 
@@ -258,10 +259,12 @@ class Server {
         }
         val full = dto.await().copy(userData = data)
         // The server has caught up with our recorded state, or another device changed it since. Either way the server's state wins.
-        val server = data.toPlayState()?.lastPlayedMs
+        // A state without a date also wins: marking an item unplayed clears its date, and our own plays always carry one.
+        val server = data.toPlayState()
         if (server != null) {
-            val local = recorded[id]?.lastPlayedMs ?: Long.MAX_VALUE
-            if (server >= local) recorded.remove(id)
+            val serverMs = server.lastPlayedMs
+            val localMs = recorded[id]?.lastPlayedMs ?: Long.MAX_VALUE
+            if (serverMs == null || serverMs >= localMs) recorded.remove(id)
         }
         full
     }
@@ -388,29 +391,41 @@ class Server {
     /**
      * Queues the local save on [App.disk] before returning, so a list opened right after this flushes it,
      * then reports the stop. It always sends a position, because without one the server marks the item played at 0.
+     *
+     * [idle]: the player sat still since its last report (paused, no seek). That report already saved this
+     * position, and another device may have played on since, so the stop keeps the report's date ([idleStop])
+     * and ends the server's session as failed, which leaves the server's play state alone.
      */
-    fun reportStop(id: String, mediaSourceId: String, positionTicks: Long, runtimeTicks: Long?, serverPlayed: Boolean, playSession: String) {
+    fun reportStop(id: String, mediaSourceId: String, positionTicks: Long, runtimeTicks: Long?, serverPlayed: Boolean, idle: Boolean, playSession: String) {
         inFlightRecords.incrementAndGet()
         App.platform.scope.launch(App.disk) {
             val owner: Owner?
-            val state: PlayState
+            val state: PlayState?
             try {
-                val previous = knownPlayed(id, serverPlayed)
-                state = ResumeRules.onStop(PlayState(0, previous, null), positionTicks, runtimeTicks, now())
-                owner = recordOnDisk(id, state)
+                if (idle) {
+                    owner = owner()
+                    val pending = App.pending.get(id)
+                    state = idleStop(pending, positionTicks, runtimeTicks)
+                    if (state != null && state != pending) recordOnDisk(id, state)
+                } else {
+                    val previous = knownPlayed(id, serverPlayed)
+                    state = ResumeRules.onStop(PlayState(0, previous, null), positionTicks, runtimeTicks, now())
+                    owner = recordOnDisk(id, state)
+                }
             } finally {
                 inFlightRecords.decrementAndGet()
             }
             io {
                 // Skipped when superseded, as in reportProgress. The server then ends the playback session on its own.
+                // An idle stop confirms nothing: its pending state, if any, goes out with the next flush, which compares dates.
                 if (owner != null) {
                     itemLock(id).withLock {
-                        if (owner.pending.get(id) == state) {
+                        if (idle || owner.pending.get(id) == state) {
                             runCatching {
                                 owner.api.sessionApi.reportPlaybackStopped(
-                                    PlaybackStopInfo(itemId = UUID.fromString(id), mediaSourceId = mediaSourceId, positionTicks = positionTicks, playSessionId = playSession, failed = false)
+                                    PlaybackStopInfo(itemId = UUID.fromString(id), mediaSourceId = mediaSourceId, positionTicks = positionTicks, playSessionId = playSession, failed = idle)
                                 )
-                            }.onSuccess { confirm(owner, id, state) }
+                            }.onSuccess { if (!idle && state != null) confirm(owner, id, state) }
                         }
                     }
                 }
@@ -482,11 +497,15 @@ class Server {
         }
     }
 
-    /** "Start over" as a saved position of 0, so a restored back stack never restarts the item a second time. */
+    /**
+     * "Start over" as a saved position of 0, so a restored back stack never restarts the item a second time. [item]
+     * comes from a list fetched after the last push, or from a download refreshed the same way, so its played flag
+     * is newer than [recorded], which another device may have changed since.
+     */
     suspend fun startOver(item: BaseItemDto) {
         val id = item.id.toString()
         val serverPlayed = item.userData?.played ?: false
-        val played = knownPlayed(id, serverPlayed)
+        val played = withContext(App.disk) { App.pending.get(id)?.played } ?: serverPlayed
         record(id, PlayState(0, played, now()))
     }
 

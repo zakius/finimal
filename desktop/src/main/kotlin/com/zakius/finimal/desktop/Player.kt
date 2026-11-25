@@ -273,6 +273,8 @@ private fun Playback(item: BaseItemDto, mpv: Mpv, siblings: List<BaseItemDto>, o
     var startTicks by remember { mutableLongStateOf(0L) }
     var startedAt by remember { mutableLongStateOf(0L) }
     var seeked by remember { mutableStateOf(false) }
+    // What the last progress report sent. Leaving paused at that spot is an idle stop (Server.reportStop).
+    var reportedTicks by remember { mutableLongStateOf(-1L) }
     var resumedAt by remember { mutableStateOf<Long?>(null) }
     var creditsDone by remember { mutableStateOf(false) }
     var ended by remember { mutableStateOf(false) }
@@ -293,7 +295,11 @@ private fun Playback(item: BaseItemDto, mpv: Mpv, siblings: List<BaseItemDto>, o
         return if (durationMs > 0) durationMs * TICKS_PER_MS else null
     }
     fun positionTicks() = ResumeGuard.position(startTicks, positionMs() * TICKS_PER_MS, runtimeTicks(), System.currentTimeMillis() - startedAt, seeked)
-    fun report() = scope.launch { App.server.reportProgress(id, sourceId, positionTicks(), mpv.paused, transcoding, serverPlayed, playSession) }
+    fun report() {
+        val ticks = positionTicks()
+        reportedTicks = ticks
+        scope.launch { App.server.reportProgress(id, sourceId, ticks, mpv.paused, transcoding, serverPlayed, playSession) }
+    }
     fun seekTo(ms: Long, exact: Boolean = true) {
         seeked = true
         mpv.seek(ms / 1000.0, exact)
@@ -366,6 +372,7 @@ private fun Playback(item: BaseItemDto, mpv: Mpv, siblings: List<BaseItemDto>, o
         val startMs = (resumeMs - RESUME_REWIND_MS).coerceAtLeast(0)
         startTicks = startMs * TICKS_PER_MS
         startedAt = System.currentTimeMillis()
+        reportedTicks = -1L
         lastPositionMs = startMs
         if (startMs > 0) resumedAt = startMs
         val loadUrl = withContext(Dispatchers.IO) { url() }
@@ -390,7 +397,8 @@ private fun Playback(item: BaseItemDto, mpv: Mpv, siblings: List<BaseItemDto>, o
             if (!ended && mpv.loaded) {
                 val runtime = runtimeTicks()
                 val stopTicks = if (creditsDone && runtime != null) runtime else positionTicks()
-                App.server.reportStop(id, sourceId, stopTicks, runtime, serverPlayed, playSession)
+                val idle = mpv.paused && stopTicks == reportedTicks
+                App.server.reportStop(id, sourceId, stopTicks, runtime, serverPlayed, idle, playSession)
             }
             mpv.close()
             DesktopMedia.playing = null
@@ -413,7 +421,7 @@ private fun Playback(item: BaseItemDto, mpv: Mpv, siblings: List<BaseItemDto>, o
             if (eof && !ended && !early) {
                 ended = true
                 val runtime = runtimeTicks()
-                App.server.reportStop(id, sourceId, runtime ?: positionTicks(), runtime, serverPlayed, playSession)
+                App.server.reportStop(id, sourceId, runtime ?: positionTicks(), runtime, serverPlayed, idle = false, playSession)
             }
             // Seeking back from the end screen resumes playback.
             if (!eof) ended = false
