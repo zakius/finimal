@@ -158,8 +158,11 @@ Rules:
 8. The SDK's `LocalDateTime` is in the device's zone, not UTC.
 9. Unsynced state is kept per server and user, in its own file: progress kept over a logout waits for that account and never reaches another. One flush runs at a time.
 10. Resume guard: within 30 s of starting, without a seek, a report that would move a resume point back under 5 % reports the start position instead. A player leaving before it loaded reports nothing.
-11. The played flag a report carries is the latest this process recorded (until a newer server state is fetched), so "Mark played" during playback isn't undone by the player's load-time copy.
+11. The played flag a report carries is the latest this process recorded (until a newer server state is fetched), so "Mark played" during playback isn't undone by the player's load-time copy. A server state without a date counts as newer: marking an item unplayed in Jellyfin clears its date. "Start over" takes the flag from the list it was picked in.
 12. Every local play-state change is also written into the download's stored item, and housekeeping refreshes downloaded items from the server, so offline playback resumes from the latest position.
+13. The only local play state is what is not synced yet. An item with nothing pending shows and resumes from the server's state, so progress from another device or client carries over: position, played flag and the series' Continue button.
+14. Leaving a player that stayed paused since its last report, with no seek, records nothing new. Its stop keeps that report's date and ends the server's session as failed, which leaves the server's play state alone. Otherwise a phone left paused while the episode went on on the TV would set the TV's progress back when closed. Pressing play in that player plays on from where it paused, which the viewer sees.
+15. Newer wins also when the other device is behind: a rewatch of an earlier part elsewhere moves the resume point back, because finimal can't tell a rewatch from another client's mistake. Marking played or unplayed elsewhere doesn't set a newer date (unplayed clears it), so a pending offline play of the same item wins over it.
 
 ## Testing
 

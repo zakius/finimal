@@ -56,6 +56,16 @@ fun shouldPush(local: PlayState, server: PlayState?): Boolean {
 }
 
 /**
+ * What a stop records when the player sat still since its last report (paused, no seek): the unsynced [pending]
+ * state with the stop's rules applied, keeping its date. Dated now, the stop would beat progress made on another
+ * device while this player sat paused. Null when nothing is pending, because the server already has that report.
+ */
+fun idleStop(pending: PlayState?, positionTicks: Long, runtimeTicks: Long?): PlayState? {
+    if (pending?.lastPlayedMs == null) return pending
+    return ResumeRules.onStop(pending, positionTicks, runtimeTicks, pending.lastPlayedMs)
+}
+
+/**
  * The position to report. That is [positionTicks], unless in the first [GUARD_MS] after starting, with
  * no seek, it would move the resume point back below the resume minimum. A viewer never does that.
  * A player that reports before it has loaded does, as does a restored "start over", and then the

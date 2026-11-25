@@ -20,7 +20,7 @@ From the repo root:
 .claude/skills/verify-play-state-sync/run.sh
 ```
 
-About 5 s. It needs Java 11 or newer: `java` on PATH, `JAVA=/path/to/bin/java`, or `~/toolchain/jdk-*/bin/java`. The first run downloads tla2tools.jar v1.8.0 to `~/.cache/finimal-formal/` (override with `FINIMAL_FORMAL_CACHE`) and checks its pinned SHA-256. Each run writes TLC's full output to a fresh folder under `/tmp` and prints its path.
+About 5 s. It needs Java 11 or newer: `java` on PATH, `JAVA=/path/to/bin/java`, or `~/toolchain/jdk-*/bin/java`. The first run downloads tla2tools.jar v1.8.0 to `~/.cache/finimal-formal/` (override with `FINIMAL_FORMAL_CACHE`) and checks its pinned SHA-256. GitHub's v1.8.0 is a rolling pre-release, so the pin breaks when it is rebuilt; then download it again and update `TLA_SHA256` in `run.sh`. Each run writes TLC's full output to a fresh folder under `/tmp` and prints its path.
 
 Each line of output is one TLC run (the table at the top of `run.sh`):
 
@@ -52,18 +52,21 @@ Read every trace with the pstack **statechart** skill (`/pstack:statechart`). It
 
 ## Coverage
 
-Sync commit: `76398211e16f0e78f77292557669743f74b7e79a` (the model was last confirmed to describe these files at this commit).
+Sync commit: `1149340bab570193edfe4ca04229a3b8cb9bbcc8` (the model was last confirmed to describe these files at this commit).
 
 | Model | Code |
 | --- | --- |
-| `pending`, `Confirm` | `core/src/main/kotlin/finimal/core/PendingStore.kt`: `put`, `all`, `confirm` (line 36: removes only if still equal) |
+| `pending`, `Confirm` | `core/src/main/kotlin/finimal/core/PendingStore.kt`: `put`, `putAll`, `all`, `confirm`, `confirmAll` (lines 58, 67: remove only if still equal) |
 | `ShouldPush` | `core/src/main/kotlin/finimal/core/PlayState.kt`: `shouldPush` (lines 52-56) |
-| `Record`, `LocalEdit` | `shared/src/commonMain/kotlin/com/zakius/finimal/Server.kt`: `record` (339), `startOver` (349), `setPlayed` (364), `owner` (94) |
-| `ReportRecord`, `ReportSkip`, `ReportPost`, `ReportConfirm` | `Server.kt`: `reportProgress` (288-302), `reportStop` (308-323), `confirm` (355), the `reports` Mutex (116) |
-| `FlushSnapshot`, `FlushFetch`, `FlushPush`, `FlushConfirm` | `Server.kt`: `flush` (376-411), `userData` (222), the `flushing` Mutex (414) |
-| `Switch`, `cur` | `Server.kt`: `switchTo` (148-154), `login` and `logout` (under `synchronized(App)`); `shared/src/commonMain/kotlin/com/zakius/finimal/Platform.kt`: `App.pending` (70-83), `App.disk` (91) |
+| `Record`, `LocalEdit` | `shared/src/commonMain/kotlin/com/zakius/finimal/Server.kt`: `recordOnDisk` (452), `record` (468), `recordAll` (478), `startOver` (505), `setPlayed` (522), `owner` (108) |
+| `ReportRecord`, `ReportSkip`, `ReportPost`, `ReportConfirm` | `Server.kt`: `reportProgress` (371-389), `reportStop` (399-433), `confirm` (513), `itemLock` (137) |
+| `IdleStop` | `Server.kt`: `reportStop` with `idle` (405-409, failed stop at 423-428); `PlayState.kt`: `idleStop` (63-66) |
+| `FlushSnapshot`, `FlushFetch`, `FlushPush`, `FlushConfirm` | `Server.kt`: `flush` (546), `runFlush` (570-648), `userData` (283), the `flushing` Mutex (651) |
+| `Switch`, `cur` | `Server.kt`: `switchTo` (190-197), `login` and `logout` (under `synchronized(App)`); `shared/src/commonMain/kotlin/com/zakius/finimal/Platform.kt`: `App.pending` (127-146), `App.disk` (163) |
 
-Callers of `flush` that make it run at any time (not modeled one by one; the model lets a flush start whenever an entry is pending): list loads in `Screens.kt` (`loadFresh`), "Sync now", `setPlayed`, `Server.item(flushFirst)`, the players on open (`app/.../Player.kt`, `desktop/.../Player.kt`), Android `Housekeeping` in `app/.../Media.kt`, and the desktop's `scheduleHousekeeping`.
+Callers of `flush` that make it run at any time (not modeled one by one; the model lets a flush start whenever an entry is pending): list loads in `Screens.kt` (`loadFresh`), "Sync now", `setPlayed`, `Server.item(flushFirst)`, the players on open (`app/.../Player.kt`, `desktop/.../Player.kt`), Android `Housekeeping` in `app/.../Media.kt`, and the desktop's `scheduleHousekeeping`. `flush` lets a caller join a running flush when nothing was recorded since it started; that only skips runs, so it adds no step.
+
+The players decide `idle` (`app/.../Player.kt` and `desktop/.../Player.kt`, `reportedTicks`): paused, at the position their last progress report sent.
 
 ## Known findings
 
@@ -75,6 +78,7 @@ None. Three findings at `96575ed` are fixed in the code this model describes: a 
 - Several items are not modeled. `flush` handles each item on its own, except that an unreachable server stops it, which only delays pushes.
 - HTTP 404 (drop) and 401 (expire, log out) during a flush, `logout`, and `login` are not modeled. A switch is one step: `owner()` and the prefs writes in `switchTo`, `login` and `logout` share `synchronized(App)`.
 - A skipped stop report leaves the server's playback session open until the server times it out.
+- What `IdleStop` fixes is outside the invariants: a stop dated now for a player that sat paused while another device played on. In the model that stop is an ordinary `ReportRecord` with a newer t, which is indistinguishable from real progress. The model checks only that an idle stop, which keeps its entry's t and confirms nothing, loses no progress.
 - The played flag (`recorded`, `knownPlayed`, design rule 11), `ResumeRules`, `ResumeGuard` and the server clock offset are not modeled. A play state is its LastPlayedDate; the position and played flag ride along with it.
 - Assumed: a progress or stop report leaves the server with the reported state, dated no earlier than the local record. All devices stamp dates on one server clock.
 - Another device's write that lands between a flush's fetch and its post is overwritten, because the Jellyfin API has no conditional update. The invariants do not check other devices' progress.

@@ -43,6 +43,21 @@ class CoreTest {
         assertFalse(shouldPush(local, PlayState(0, true, 300)))
     }
 
+    @Test fun idleStopKeepsTheLastReportsDate() {
+        val paused = PlayState(10 * min, false, 200)
+        assertEquals(paused, idleStop(paused, 10 * min, runtime))
+        // A newer play on another device (date 300) still wins the flush.
+        assertFalse(shouldPush(idleStop(paused, 10 * min, runtime)!!, PlayState(15 * min, false, 300)))
+    }
+
+    @Test fun idleStopNearTheEndMarksPlayedOnTheOldDate() {
+        assertEquals(PlayState(0, true, 200), idleStop(PlayState(23 * min, false, 200), 23 * min, runtime))
+    }
+
+    @Test fun idleStopWithNothingPendingRecordsNothing() {
+        assertNull(idleStop(null, 10 * min, runtime))
+    }
+
     @Test fun pendingStoreSurvivesReloadAndKeepsNewerWrites() {
         val f = File.createTempFile("pending", ".json")
         f.delete()
